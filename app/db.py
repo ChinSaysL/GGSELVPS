@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections.abc import Generator
 from pathlib import Path
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import get_settings
@@ -60,3 +60,32 @@ def init_db() -> None:
     from app import models  # noqa: F401
 
     Base.metadata.create_all(bind=engine)
+    _run_sqlite_migrations()
+
+
+def _run_sqlite_migrations() -> None:
+    if engine.dialect.name != "sqlite":
+        return
+
+    inspector = inspect(engine)
+    if not inspector.has_table("marketplace_offers"):
+        return
+
+    existing_columns = {
+        column["name"] for column in inspector.get_columns("marketplace_offers")
+    }
+    migrations = {
+        "requires_buyer_input": (
+            "ALTER TABLE marketplace_offers "
+            "ADD COLUMN requires_buyer_input BOOLEAN NOT NULL DEFAULT 0"
+        ),
+        "buyer_input_label": (
+            "ALTER TABLE marketplace_offers ADD COLUMN buyer_input_label VARCHAR(255)"
+        ),
+        "buyer_input_help": "ALTER TABLE marketplace_offers ADD COLUMN buyer_input_help TEXT",
+    }
+
+    with engine.begin() as connection:
+        for column_name, statement in migrations.items():
+            if column_name not in existing_columns:
+                connection.execute(text(statement))

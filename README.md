@@ -68,8 +68,16 @@ python manage.py check
 python manage.py run-api
 python manage.py sync-products
 python manage.py list-products
+python manage.py manual-link
 python manage.py manual-link-example
 ```
+
+`python manage.py manual-link` walks through:
+- choosing `digiseller` or `ggsel`
+- searching/selecting the exact imported G-Engine product or denomination sub-item
+- entering the marketplace offer/product ID
+- entering the local marketplace price
+- optionally marking that buyer text is required, such as a Steam friend code
 
 ## Local setup (test PC)
 

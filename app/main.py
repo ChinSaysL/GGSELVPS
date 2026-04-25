@@ -52,6 +52,9 @@ class ManualOfferLinkRequest(BaseModel):
     price: Decimal
     currency: str = "RUB"
     offer_enabled: bool = False
+    requires_buyer_input: bool = False
+    buyer_input_label: str | None = None
+    buyer_input_help: str | None = None
     mapping_enabled: bool = True
     min_margin_percent: Decimal | None = None
     min_profit_usd: Decimal | None = None
@@ -147,6 +150,9 @@ def list_offers(
                 "price": _serialize_decimal(offer.price),
                 "currency": offer.currency,
                 "is_enabled": offer.is_enabled,
+                "requires_buyer_input": offer.requires_buyer_input,
+                "buyer_input_label": offer.buyer_input_label,
+                "buyer_input_help": offer.buyer_input_help,
                 "supplier_product_id": offer.supplier_product_id,
                 "supplier_product_title": (
                     offer.supplier_product.title if offer.supplier_product else None
@@ -323,6 +329,9 @@ def manual_link_offer(
             price=payload.price,
             currency=payload.currency.upper(),
             is_enabled=payload.offer_enabled,
+            requires_buyer_input=payload.requires_buyer_input,
+            buyer_input_label=payload.buyer_input_label,
+            buyer_input_help=payload.buyer_input_help,
             last_synced_at=datetime.utcnow(),
         )
         db.add(offer)
@@ -334,6 +343,9 @@ def manual_link_offer(
         offer.price = payload.price
         offer.currency = payload.currency.upper()
         offer.is_enabled = payload.offer_enabled
+        offer.requires_buyer_input = payload.requires_buyer_input
+        offer.buyer_input_label = payload.buyer_input_label
+        offer.buyer_input_help = payload.buyer_input_help
         offer.last_synced_at = datetime.utcnow()
         db.add(offer)
         db.flush()
@@ -380,6 +392,9 @@ def manual_link_offer(
             "price": _serialize_decimal(offer.price),
             "currency": offer.currency,
             "is_enabled": offer.is_enabled,
+            "requires_buyer_input": offer.requires_buyer_input,
+            "buyer_input_label": offer.buyer_input_label,
+            "buyer_input_help": offer.buyer_input_help,
         },
         "mapping": {
             "id": mapping.id,
