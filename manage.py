@@ -1703,8 +1703,10 @@ def action_manual_link() -> int:
         return 1
     reference, reference_products = chosen
 
-    print(f"\nImported rows for G-Engine {reference.kind} product ID {reference.product_id}:")
-    _print_reference_products(reference_products)
+    print(
+        f"\nLoaded {len(reference_products)} imported row(s) for "
+        f"G-Engine {reference.kind} product ID {reference.product_id}."
+    )
 
     marketplace_offer_id = _ask_text("Marketplace offer/product id")
 
@@ -1749,103 +1751,59 @@ def action_manual_link() -> int:
     _print_linked_rows_for_offer(marketplace, marketplace_offer_id)
 
     targets_by_product_id: dict[int, dict[str, Any]] = {}
-    remaining_entries_for_manual: list[dict[str, str]] = []
     if option_variant_entries:
-        auto_match_all = _ask_bool(
-            "Auto-map all option values by exact denomination/signature?",
-            default=True,
+        auto_matches, unmatched_entries, ambiguous_entries = _auto_match_option_entries_to_products(
+            reference_products,
+            option_variant_entries,
         )
-        if auto_match_all:
-            auto_matches, unmatched_entries, ambiguous_entries = _auto_match_option_entries_to_products(
-                reference_products,
-                option_variant_entries,
-            )
-            for item in auto_matches:
-                _add_link_target(
-                    targets_by_product_id,
-                    product=item["product"],
-                    option_description=str(item["option_description"]),
-                )
-
-            print(
-                "\nAuto-map summary: "
-                f"matched {len(auto_matches)}/{len(option_variant_entries)} option values."
-            )
-            if unmatched_entries:
-                print("Unmatched option values:")
-                for item in unmatched_entries[:20]:
-                    entry = item["entry"]
-                    option_label = str(entry.get("option_label") or "Option")
-                    variant_value = str(entry.get("variant_value") or "")
-                    print(f"- {option_label}: {variant_value}")
-                if len(unmatched_entries) > 20:
-                    print(f"...and {len(unmatched_entries) - 20} more unmatched values.")
-            if ambiguous_entries:
-                print("Ambiguous option values (multiple local matches):")
-                for item in ambiguous_entries[:20]:
-                    entry = item["entry"]
-                    option_label = str(entry.get("option_label") or "Option")
-                    variant_value = str(entry.get("variant_value") or "")
-                    product_ids = ", ".join(str(product.id) for product in item["products"][:5])
-                    print(f"- {option_label}: {variant_value} -> local ids {product_ids}")
-                if len(ambiguous_entries) > 20:
-                    print(f"...and {len(ambiguous_entries) - 20} more ambiguous values.")
-
-            if (unmatched_entries or ambiguous_entries) and _ask_bool(
-                "Map unmatched/ambiguous option values manually now?",
-                default=False,
-            ):
-                remaining_entries_for_manual = [
-                    item["entry"] for item in unmatched_entries
-                ] + [
-                    item["entry"] for item in ambiguous_entries
-                ]
-        else:
-            remaining_entries_for_manual = option_variant_entries
-
-    if remaining_entries_for_manual:
-        print(
-            "\nFor each remaining marketplace option value, choose the matching local row "
-            "(blank skips that value)."
-        )
-        total = len(remaining_entries_for_manual)
-        for index, entry in enumerate(remaining_entries_for_manual, start=1):
-            option_label = str(entry.get("option_label") or "Option")
-            variant_value = str(entry.get("variant_value") or "")
-            print(f"\nOption value {index}/{total}: {option_label}: {variant_value}")
-            candidate_products = _products_matching_variant(reference_products, variant_value)
-            variant_default_product_id: int | None = None
-            if candidate_products:
-                print("Suggested local rows:")
-                _print_reference_products(candidate_products, limit=10)
-                if len(candidate_products) == 1:
-                    variant_default_product_id = int(candidate_products[0].id)
-            else:
-                print("No automatic local row match for this value.")
-
-            selected_product = _choose_product_from_reference_rows(
-                reference_products,
-                prompt="Local row id for this option value (blank = skip)",
-                default_product_id=variant_default_product_id,
-                allow_skip=True,
-            )
-            if selected_product is None:
-                continue
+        for item in auto_matches:
             _add_link_target(
                 targets_by_product_id,
-                product=selected_product,
-                option_description=f"{option_label}: {variant_value}",
+                product=item["product"],
+                option_description=str(item["option_description"]),
             )
 
+        print(
+            "\nAuto-map summary: "
+            f"matched {len(auto_matches)}/{len(option_variant_entries)} option values."
+        )
+        if unmatched_entries:
+            print("Unmatched option values (skipped):")
+            for item in unmatched_entries[:20]:
+                entry = item["entry"]
+                option_label = str(entry.get("option_label") or "Option")
+                variant_value = str(entry.get("variant_value") or "")
+                print(f"- {option_label}: {variant_value}")
+            if len(unmatched_entries) > 20:
+                print(f"...and {len(unmatched_entries) - 20} more unmatched values.")
+        if ambiguous_entries:
+            print("Ambiguous option values (skipped, multiple local matches):")
+            for item in ambiguous_entries[:20]:
+                entry = item["entry"]
+                option_label = str(entry.get("option_label") or "Option")
+                variant_value = str(entry.get("variant_value") or "")
+                product_ids = ", ".join(str(product.id) for product in item["products"][:5])
+                print(f"- {option_label}: {variant_value} -> local ids {product_ids}")
+            if len(ambiguous_entries) > 20:
+                print(f"...and {len(ambiguous_entries) - 20} more ambiguous values.")
+
     if not targets_by_product_id:
+        if option_variant_entries:
+            print(
+                "No option values could be auto-mapped. "
+                "Make denomination text match exactly between marketplace and G-Engine "
+                "(for example 250 TRY) and retry."
+            )
+            return 1
+
         single_default_product_id: int | None = None
         if snapshot and snapshot.get("denomination"):
             snapshot_denom = str(snapshot.get("denomination"))
             suggested = _products_matching_variant(reference_products, snapshot_denom)
             if len(suggested) == 1:
                 single_default_product_id = int(suggested[0].id)
-        print("\nSelect one local row to link:")
-        _print_reference_products(reference_products)
+        print("\nNo option-value list found on marketplace item. Select one local row to link:")
+        _print_reference_products(reference_products, limit=25)
         selected_product = _choose_product_from_reference_rows(
             reference_products,
             prompt="Local row id",

@@ -87,7 +87,7 @@ python manage.py manual-link-example
 - pasting the G-Engine product link or product ID
 - entering the marketplace offer/product ID and attempting to fetch marketplace metadata
 - auto-mapping marketplace option values (for example `250 TRY`, `500 TRY`) to imported G-Engine rows by exact denomination/signature
-- showing unmatched/ambiguous option values and optionally allowing manual mapping for only those leftovers
+- showing unmatched/ambiguous option values that were skipped
 - entering/confirming marketplace price and currency (prefilled when fetched)
 - auto-detecting required buyer text fields (such as Steam friend code), with optional manual override
 
