@@ -62,6 +62,81 @@ def test_gengine_does_not_duplicate_v21_prefix_if_present_in_base_url() -> None:
     assert captured["url"].endswith("/v2.1/users/balance")
 
 
+def test_gengine_list_products_expands_denominations() -> None:
+    call_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        call_paths.append(path)
+        if path.endswith("/shop/products"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "data": {
+                        "items": [
+                            {
+                                "id": "100",
+                                "name": "Steam Gift Card",
+                                "category": "Gift Cards",
+                            }
+                        ]
+                    }
+                },
+            )
+        if path.endswith("/shop/denominations/100"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "data": {
+                        "denominations": [
+                            {
+                                "id": "1001",
+                                "price": "5.50",
+                                "denomination": "10",
+                            }
+                        ]
+                    }
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    products = client.list_products()
+    client.close()
+
+    assert len(products) == 1
+    assert products[0]["id"] == "1001"
+    assert products[0]["product_id"] == "100"
+    assert products[0]["price"] == "5.50"
+    assert products[0]["name"] == "Steam Gift Card"
+    assert any(path.endswith("/shop/denominations/100") for path in call_paths)
+
+
+def test_gengine_list_products_falls_back_to_base_product_when_denominations_fail() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        if path.endswith("/shop/products"):
+            return httpx.Response(
+                status_code=200,
+                json={"data": {"items": [{"id": "100", "title": "Base Product"}]}},
+            )
+        if path.endswith("/shop/denominations/100"):
+            return httpx.Response(status_code=500, json={"error": "temporary"})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    products = client.list_products()
+    client.close()
+
+    assert len(products) == 1
+    assert products[0]["id"] == "100"
+    assert products[0]["title"] == "Base Product"
+
+
 def test_ggsel_unresolved_methods_remain_explicitly_not_implemented() -> None:
     client = GGSELClient(base_url="https://seller.ggsel.com", api_key="secret")
     with pytest.raises(NotImplementedError):
