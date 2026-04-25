@@ -109,6 +109,7 @@ def action_check_config() -> int:
     print(f"data directory exists: {_safe_yes_no(data_dir.exists())}")
     print(f"database_url: {settings.database_url}")
     print(f"scheduler_enabled: {settings.scheduler_enabled}")
+    print(f"price_sync_interval_minutes: {settings.price_sync_interval_minutes}")
     print(f"default_currency: {settings.default_currency}")
     print(f"manual_usd_rub_rate configured: {_safe_yes_no(settings.manual_usd_rub_rate is not None)}")
     print(f"gengine_api_key: {mask_secret(settings.gengine_api_key)}")
@@ -119,6 +120,10 @@ def action_check_config() -> int:
     warnings: list[str] = []
     if not settings.gengine_api_key:
         missing.append("GENGINE_API_KEY")
+    if not settings.scheduler_enabled:
+        warnings.append(
+            "SCHEDULER_ENABLED is false, so automatic hourly price sync is disabled."
+        )
     if settings.default_currency == "RUB":
         if settings.manual_usd_rub_rate is None and not settings.auto_usd_rub_rate:
             warnings.append(
@@ -269,10 +274,10 @@ def action_price_preview() -> int:
 
 
 def action_sync_prices() -> int:
-    _print_header("Price Sync")
+    _print_header("Price Sync (Manual Trigger)")
     print(
-        "This refreshes linked G-Engine costs when possible, then updates prices for "
-        "already-linked marketplace offers. It does not create marketplace listings."
+        "This triggers price sync immediately. For automatic hourly sync, keep "
+        "SCHEDULER_ENABLED=true and PRICE_SYNC_INTERVAL_MINUTES=60."
     )
     if sys.stdin.isatty() and not _ask_bool("Update marketplace prices now (live mode)?", default=True):
         print("Cancelled.")

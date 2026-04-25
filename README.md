@@ -55,7 +55,8 @@ Cache path is controlled by `USD_RUB_RATE_CACHE_PATH`.
 
 There are intentionally no listing template, category, or publish-switch settings. Marketplace listings are created manually outside this app.
 
-For first VPS testing, keep `SCHEDULER_ENABLED=false` and trigger actions manually. Enable the scheduler only after product sync, price sync, stock sync, and order sync are fully implemented and verified.
+For automatic price updates, set `SCHEDULER_ENABLED=true` and `PRICE_SYNC_INTERVAL_MINUTES=60`.
+`python manage.py sync-prices` is a manual immediate trigger, while the scheduler handles recurring runs.
 
 ## Management menu
 
