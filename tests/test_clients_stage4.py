@@ -151,3 +151,49 @@ def test_digiseller_set_offer_price_rub_only_for_v1() -> None:
     with pytest.raises(NotImplementedError):
         client.set_offer_price(offer_id="10", price=99.9, currency="USD")
     client.close()
+
+
+def test_digiseller_create_offer_uses_uniquefixed_with_localized_payload() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["method"] = request.method
+        captured["url"] = str(request.url)
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(
+            status_code=200,
+            json={"retval": 0, "content": {"product_id": 777}},
+        )
+
+    client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    response = client.create_offer(
+        {
+            "title": "[AUTO 24/7] Steam Gift Card 10 USD | Global",
+            "description": "Instant delivery",
+            "title_localized": [
+                {"locale": "en-US", "value": "[AUTO 24/7] Steam Gift Card 10 USD | Global"},
+                {"locale": "ru-RU", "value": "[AUTO 24/7] Steam Gift Card 10 USD | Global"},
+            ],
+            "description_localized": [
+                {"locale": "en-US", "value": "Instant delivery"},
+                {"locale": "ru-RU", "value": "Мгновенная доставка"},
+            ],
+            "content_type": "Text",
+            "category_id": 123,
+            "category_owner": 3,
+            "price": 999.0,
+            "currency": "RUB",
+            "enabled": False,
+        }
+    )
+    client.close()
+
+    assert response["content"]["product_id"] == 777
+    assert captured["method"] == "POST"
+    assert "/api/product/create/uniquefixed" in captured["url"]
+    assert "token=secret" in captured["url"]
+    assert captured["body"]["categories"] == [{"owner": 3, "category_id": 123}]
+    assert captured["body"]["price"] == {"price": 999.0, "currency": "RUB"}
+    assert captured["body"]["name"][1]["locale"] == "ru-RU"

@@ -14,7 +14,7 @@ This repository currently includes Stage 1-5 foundations:
 - Tests for pricing, stock rules, and idempotency decisions
 - Docker + docker-compose deployment baseline
 
-API integrations are intentionally stubbed for now and will be completed in later stages once endpoint mappings are confirmed from official docs.
+API integrations are partially implemented and continue to evolve as endpoint mappings are confirmed from official docs.
 
 ## Tech
 
@@ -43,6 +43,26 @@ Compatibility aliases are also supported:
 - `DigisellerToken`
 
 If `DEFAULT_CURRENCY=RUB`, set `MANUAL_USD_RUB_RATE` before running price sync logic.
+
+For Digiseller auto-listing:
+- Set `DIGISELLER_CATEGORY_ID` (required for product creation).
+- Optional: set `DIGISELLER_CATEGORY_OWNER` (default `3` for GGSEL marketplace category).
+- Optional: set `DIGISELLER_CONTENT_TYPE` (default `Text`).
+
+Bilingual listing templates are configurable:
+- `LISTING_TITLE_TEMPLATE_EN`
+- `LISTING_TITLE_TEMPLATE_RU`
+- `LISTING_DESCRIPTION_TEMPLATE_EN`
+- `LISTING_DESCRIPTION_TEMPLATE_RU`
+
+Supported template placeholders:
+- `{supplier_title}`
+- `{denomination}`
+- `{currency}`
+- `{region}`
+- `{category}`
+- `{delivery_type}`
+- `{delivery_type_ru}`
 
 ## Local setup (test PC)
 
@@ -155,4 +175,6 @@ docker compose logs -f
 - No competitor pricing data is used.
 - No competitor scraping is implemented.
 - No browser automation is used.
-- API client methods are stubs with explicit TODOs and `NotImplementedError` until endpoint mappings are finalized.
+- Digiseller create/update listing flows are implemented for base product sync.
+- GGSEL listing creation/update endpoints remain unresolved in public docs and are still explicit TODOs.
+- Automatic thumbnail transfer from G-Engine is not guaranteed by current public API contracts; set preview images manually when needed.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -17,6 +18,10 @@ from app.pricing import PricingConfigError, calculate_final_price_usd, convert_u
 from app.utils.logging import get_logger, log_event
 
 logger = get_logger(__name__)
+
+
+class ListingTemplateError(ValueError):
+    pass
 
 
 class SupplierClientProtocol(Protocol):
@@ -44,7 +49,14 @@ class NormalizedSupplierProduct:
     cost_usd: Decimal
     supplier_stock: str | None
     is_available: bool
+    thumbnail_url: str | None
     raw_payload_json: str
+
+
+class _SafeTemplateValues(dict[str, str]):
+    def __missing__(self, key: str) -> str:
+        _ = key
+        return ""
 
 
 def _to_decimal(value: Any) -> Decimal | None:
@@ -82,6 +94,60 @@ def _parse_bool(value: Any, default: bool = True) -> bool:
     return default
 
 
+def _extract_currency_code(*values: str | None) -> str | None:
+    pattern = re.compile(r"\b(USD|EUR|RUB|UAH|TRY|GBP|KZT)\b", flags=re.IGNORECASE)
+    for value in values:
+        if not value:
+            continue
+        match = pattern.search(value)
+        if match:
+            return match.group(1).upper()
+    return None
+
+
+def _extract_denomination_value(*values: str | None) -> str | None:
+    pattern = re.compile(r"\b(\d+(?:[.,]\d+)?)\b")
+    for value in values:
+        if not value:
+            continue
+        match = pattern.search(value)
+        if match:
+            return match.group(1)
+    return None
+
+
+def _render_template(template: str, values: dict[str, str], *, multiline: bool) -> str:
+    rendered = template.format_map(_SafeTemplateValues(values)).strip()
+    if not rendered:
+        raise ListingTemplateError("Listing template rendered to an empty string.")
+    if multiline:
+        return rendered
+    return " ".join(rendered.split())
+
+
+def _build_listing_values(product: NormalizedSupplierProduct, settings: Settings) -> dict[str, str]:
+    denomination = (
+        _extract_denomination_value(product.denomination)
+        or _extract_denomination_value(product.title)
+        or "N/A"
+    )
+    currency = (
+        _extract_currency_code(product.denomination, product.title)
+        or settings.default_currency.upper()
+    )
+    region = (product.region or "Global").strip() or "Global"
+
+    return {
+        "supplier_title": product.title,
+        "denomination": denomination,
+        "currency": currency,
+        "region": region,
+        "category": product.category or "Gift Cards",
+        "delivery_type": "Auto code delivery (24/7)",
+        "delivery_type_ru": "Автовыдача кода (24/7)",
+    }
+
+
 def _normalize_supplier_product(raw_product: dict[str, Any]) -> NormalizedSupplierProduct | None:
     supplier_product_id = _first_non_empty_str(raw_product, ("id", "product_id", "productId", "sku"))
     title = _first_non_empty_str(raw_product, ("title", "name", "product_name"))
@@ -104,6 +170,21 @@ def _normalize_supplier_product(raw_product: dict[str, Any]) -> NormalizedSuppli
     description = _first_non_empty_str(raw_product, ("description", "details", "note"))
     supplier_stock = _first_non_empty_str(raw_product, ("stock", "supplier_stock", "quantity", "available"))
     is_available = _parse_bool(raw_product.get("is_available"), default=True)
+    thumbnail_url = _first_non_empty_str(
+        raw_product,
+        (
+            "thumbnail_url",
+            "thumbnail",
+            "image_url",
+            "image",
+            "img",
+            "icon",
+            "picture",
+            "photo",
+            "logo",
+            "cover",
+        ),
+    )
 
     return NormalizedSupplierProduct(
         supplier_product_id=supplier_product_id,
@@ -115,6 +196,7 @@ def _normalize_supplier_product(raw_product: dict[str, Any]) -> NormalizedSuppli
         cost_usd=cost_value,
         supplier_stock=supplier_stock,
         is_available=is_available,
+        thumbnail_url=thumbnail_url,
         raw_payload_json=json.dumps(raw_product, ensure_ascii=True, separators=(",", ":")),
     )
 
@@ -123,8 +205,6 @@ def _validate_listing_requirements(product: NormalizedSupplierProduct) -> list[s
     errors: list[str] = []
     if not product.title:
         errors.append("missing_title")
-    if product.category is None:
-        errors.append("missing_category")
     if product.cost_usd <= Decimal("0"):
         errors.append("invalid_cost")
     return errors
@@ -147,6 +227,13 @@ def _resolve_marketplace_offer_id(payload: dict[str, Any]) -> str | None:
     if isinstance(data, dict):
         for key in candidate_keys:
             value = data.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+
+    content = payload.get("content")
+    if isinstance(content, dict):
+        for key in candidate_keys:
+            value = content.get(key)
             if value is not None and str(value).strip():
                 return str(value).strip()
     return None
@@ -176,16 +263,47 @@ def _build_offer_payload(
             ),
         )
 
-    description = product.description or f"{product.title}. Region: {product.region or 'N/A'}."
+    values = _build_listing_values(product, settings)
+
+    title_en = _render_template(settings.listing_title_template_en, values, multiline=False)
+    title_ru = _render_template(settings.listing_title_template_ru, values, multiline=False)
+
+    description_en = _render_template(
+        settings.listing_description_template_en,
+        values,
+        multiline=True,
+    )
+    description_ru = _render_template(
+        settings.listing_description_template_ru,
+        values,
+        multiline=True,
+    )
+
+    title_localized = [
+        {"locale": "en-US", "value": title_en},
+        {"locale": "ru-RU", "value": title_ru},
+    ]
+    description_localized = [
+        {"locale": "en-US", "value": description_en},
+        {"locale": "ru-RU", "value": description_ru},
+    ]
 
     return {
-        "title": product.title,
-        "description": description,
+        "title": title_en,
+        "title_ru": title_ru,
+        "description": description_en,
+        "description_ru": description_ru,
+        "title_localized": title_localized,
+        "description_localized": description_localized,
         "category": product.category,
         "price": float(marketplace_price),
         "currency": currency,
         "enabled": False,
         "stock": 0,
+        "content_type": settings.digiseller_content_type,
+        "category_id": settings.digiseller_category_id,
+        "category_owner": settings.digiseller_category_owner,
+        "thumbnail_url": product.thumbnail_url,
     }
 
 
@@ -344,13 +462,13 @@ def sync_products(
 
         try:
             payload = _build_offer_payload(normalized, settings)
-        except PricingConfigError as exc:
+        except (PricingConfigError, ListingTemplateError) as exc:
             stats["skipped"] += 1
             log_event(
                 logger,
                 "product_sync.offer_skipped",
                 supplier_product_id=normalized.supplier_product_id,
-                reason="pricing_config_error",
+                reason="payload_build_error",
                 error=str(exc),
             )
             continue

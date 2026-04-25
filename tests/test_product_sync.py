@@ -115,6 +115,53 @@ def test_product_sync_creates_supplier_offer_and_mapping(db_session: Session) ->
     assert offers[0].marketplace_offer_id == "offer-1"
 
 
+def test_product_sync_builds_bilingual_listing_payload(db_session: Session) -> None:
+    db = db_session
+    supplier_client = FakeSupplierClient(
+        products=[
+            {
+                "id": "202",
+                "title": "Steam Wallet 10 USD",
+                "category": "Gift Cards",
+                "denomination": "10",
+                "region": "Global",
+                "description": "Auto delivery",
+                "cost_usd": "6.00",
+                "image_url": "https://cdn.example.com/steam-10.png",
+            }
+        ]
+    )
+    marketplace_client = FakeMarketplaceClient()
+    settings = Settings(
+        _env_file=None,
+        default_currency="USD",
+        scheduler_enabled=False,
+        listing_title_template_en="[AUTO 24/7] Steam Gift Card {denomination} {currency} | {region}",
+        listing_title_template_ru="[AUTO 24/7] Steam Gift Card {denomination} {currency} | {region}",
+    )
+
+    result = sync_products(
+        db=db,
+        settings=settings,
+        supplier_client=supplier_client,
+        marketplace_client=marketplace_client,
+        marketplace_name="digiseller",
+    )
+    db.commit()
+
+    assert result["offers_created"] == 1
+    assert len(marketplace_client.create_calls) == 1
+
+    payload = marketplace_client.create_calls[0]
+    assert payload["title"] == "[AUTO 24/7] Steam Gift Card 10 USD | Global"
+    assert payload["title_localized"] == [
+        {"locale": "en-US", "value": "[AUTO 24/7] Steam Gift Card 10 USD | Global"},
+        {"locale": "ru-RU", "value": "[AUTO 24/7] Steam Gift Card 10 USD | Global"},
+    ]
+    assert payload["description_ru"].startswith("Мгновенная цифровая доставка")
+    assert payload["thumbnail_url"] == "https://cdn.example.com/steam-10.png"
+
+
 def test_product_sync_second_run_updates_existing_offer_without_duplicates(
     db_session: Session,
 ) -> None:
@@ -171,7 +218,7 @@ def test_product_sync_second_run_updates_existing_offer_without_duplicates(
     assert suppliers[0].title == "PSN Card 20 USD Updated"
 
 
-def test_product_sync_skips_offer_creation_when_required_listing_data_missing(
+def test_product_sync_creates_offer_when_category_is_missing(
     db_session: Session,
 ) -> None:
     db = db_session
@@ -199,10 +246,10 @@ def test_product_sync_skips_offer_creation_when_required_listing_data_missing(
     offers = db.execute(select(MarketplaceOffer)).scalars().all()
 
     assert result["products_imported"] == 1
-    assert result["skipped"] == 1
-    assert result["offers_created"] == 0
+    assert result["skipped"] == 0
+    assert result["offers_created"] == 1
     assert len(suppliers) == 1
-    assert len(offers) == 0
+    assert len(offers) == 1
 
 
 def test_product_sync_links_mapping_when_offer_already_exists_without_mapping(

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
-from app.clients.base import BaseAPIClient
+from app.clients.base import APIClientConfigError, BaseAPIClient
 
 
 class DigisellerClient(BaseAPIClient):
@@ -10,6 +10,7 @@ class DigisellerClient(BaseAPIClient):
     Reference docs: https://api.digiseller.com/swagger/ui/index
 
     Confirmed endpoint mapping:
+    - POST /api/product/create/uniquefixed
     - POST /api/product/edit/base/{product_id}
     - POST /api/product/edit/prices
     - POST /api/seller-sells/v2
@@ -29,6 +30,79 @@ class DigisellerClient(BaseAPIClient):
         api_key = self._require_api_key()
         return {"token": api_key}
 
+    @staticmethod
+    def _localized_text(value: object, fallback: str) -> list[dict[str, str]]:
+        if isinstance(value, list):
+            localized: list[dict[str, str]] = []
+            for item in value:
+                if not isinstance(item, dict):
+                    continue
+                locale = str(item.get("locale", "")).strip()
+                text = str(item.get("value", "")).strip()
+                if not locale or not text:
+                    continue
+                localized.append({"locale": locale, "value": text})
+            if localized:
+                return localized
+        return [{"locale": "en-US", "value": fallback}]
+
+    @staticmethod
+    def _resolve_categories(payload: dict[str, Any]) -> list[dict[str, int]]:
+        categories_payload = payload.get("categories")
+        if isinstance(categories_payload, list):
+            categories: list[dict[str, int]] = []
+            for item in categories_payload:
+                if not isinstance(item, dict):
+                    continue
+                owner = item.get("owner")
+                category_id = item.get("category_id")
+                if owner in {None, ""} or category_id in {None, ""}:
+                    continue
+                owner_value = int(cast(str | int | float, owner))
+                category_value = int(cast(str | int | float, category_id))
+                categories.append({"owner": owner_value, "category_id": category_value})
+            if categories:
+                return categories
+
+        category_id = payload.get("category_id")
+        if category_id in {None, ""}:
+            raise APIClientConfigError(
+                "Digiseller category is required. Set DIGISELLER_CATEGORY_ID in environment "
+                "or provide categories in payload."
+            )
+
+        owner_raw = payload.get("category_owner", 3)
+        owner = int(cast(str | int | float, owner_raw))
+        return [{"owner": owner, "category_id": int(cast(str | int | float, category_id))}]
+
+    def _build_product_payload(self, payload: dict[str, Any]) -> dict[str, Any]:
+        title = str(payload.get("title", "")).strip()
+        description = str(payload.get("description", "")).strip()
+        if not title:
+            raise APIClientConfigError("Digiseller payload is missing title.")
+        if not description:
+            raise APIClientConfigError("Digiseller payload is missing description.")
+
+        price = payload.get("price")
+        currency = str(payload.get("currency", "")).upper().strip()
+        if price is None:
+            raise APIClientConfigError("Digiseller payload is missing price.")
+        if not currency:
+            raise APIClientConfigError("Digiseller payload is missing currency.")
+
+        dto: dict[str, Any] = {
+            "content_type": str(payload.get("content_type", "Text")),
+            "categories": self._resolve_categories(payload),
+            "name": self._localized_text(payload.get("title_localized"), title),
+            "description": self._localized_text(payload.get("description_localized"), description),
+            "price": {
+                "price": float(price),
+                "currency": currency,
+            },
+            "enabled": bool(payload.get("enabled", False)),
+        }
+        return dto
+
     def list_offers(self) -> list[dict[str, Any]]:
         # TODO: Swagger exposes /api/products/list for ID-based lookup; a dedicated
         # "list all seller offers" endpoint is not confirmed in the provided docs.
@@ -38,21 +112,22 @@ class DigisellerClient(BaseAPIClient):
         )
 
     def create_offer(self, payload: dict[str, Any]) -> dict[str, Any]:
-        _ = payload
-        # TODO: Product creation is split into typed endpoints
-        # (/api/product/create/software|book|arbitrary|uniquefixed|uniqueunfixed).
-        # A generic create_offer contract needs product type selection rules.
-        raise NotImplementedError(
-            "Digiseller create_offer is not implemented. "
-            "Please provide product type mapping for offer creation."
+        response = self._request_json(
+            method="POST",
+            path="/api/product/create/uniquefixed",
+            params=self._auth_query_params(),
+            json_body=self._build_product_payload(payload),
         )
+        if not isinstance(response, dict):
+            raise TypeError("Unexpected Digiseller create response format.")
+        return response
 
     def update_offer(self, offer_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         response = self._request_json(
             method="POST",
             path=f"/api/product/edit/base/{offer_id}",
             params=self._auth_query_params(),
-            json_body=payload,
+            json_body=self._build_product_payload(payload),
         )
         if not isinstance(response, dict):
             raise TypeError("Unexpected Digiseller update response format.")
