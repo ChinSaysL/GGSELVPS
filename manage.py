@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
 import shutil
 import subprocess
@@ -11,6 +12,7 @@ from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 
 
 REPO_ROOT = Path(__file__).resolve().parent
@@ -42,17 +44,15 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
 
 VALID_MARKETPLACES = ("digiseller", "ggsel")
 VALID_CURRENCIES = ("RUB", "USD")
-OPTIONAL_SEARCH_TERMS = {"card", "code", "digital", "gift", "store", "wallet"}
-SEARCH_ALIASES: dict[str, tuple[str, ...]] = {
-    "psn": ("playstation", "ps", "sony"),
-    "playstation": ("psn", "ps", "sony"),
-    "ps": ("playstation", "psn", "sony"),
-    "sony": ("playstation", "psn"),
-    "tl": ("try", "turkey", "turkish"),
-    "try": ("tl", "turkey", "turkish"),
-    "turkey": ("try", "tl", "turkish"),
-    "turkish": ("turkey", "try", "tl"),
-}
+GENGINE_LINK_KINDS = ("shop", "recharge", "gifts")
+
+
+@dataclass(frozen=True)
+class GEngineProductReference:
+    kind: str
+    product_id: str
+    slug: str | None
+    source: str
 
 
 def _run_command(command: Sequence[str]) -> int:
@@ -206,88 +206,112 @@ def _normalize_search_text(value: object) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
 
 
-def _search_groups(query: str) -> list[tuple[str, set[str]]]:
-    terms = [term for term in _normalize_search_text(query).split() if term]
-    groups: list[tuple[str, set[str]]] = []
-    for term in terms:
-        variants = {term, *SEARCH_ALIASES.get(term, ())}
-        groups.append((term, variants))
-    return groups
+def _parse_gengine_reference(value: str) -> GEngineProductReference | None:
+    raw_value = value.strip()
+    if not raw_value:
+        return None
+    if raw_value.isdigit():
+        return GEngineProductReference(
+            kind="unknown",
+            product_id=raw_value,
+            slug=None,
+            source=raw_value,
+        )
 
+    parsed = urlparse(raw_value)
+    path = parsed.path if parsed.scheme or parsed.netloc else raw_value
+    segments = [unquote(segment).strip() for segment in path.split("/") if segment.strip()]
+    normalized_segments = [segment.lower() for segment in segments]
 
-def _product_matches_query(product: Any, query: str) -> bool:
-    return _product_match_score(product, query) > 0
-
-
-def _product_match_score(product: Any, query: str) -> int:
-    groups = _search_groups(query)
-    if not groups:
-        return 1
-
-    blob = _product_search_blob(product)
-    tokens = set(blob.split())
-    required_groups = [
-        (term, variants) for term, variants in groups if term not in OPTIONAL_SEARCH_TERMS
-    ]
-    if not required_groups:
-        required_groups = groups
-
-    required_matches = sum(
-        1 for _, variants in required_groups if _variant_group_matches(blob, tokens, variants)
-    )
-    if required_matches != len(required_groups):
-        return 0
-
-    optional_matches = sum(
-        1
-        for term, variants in groups
-        if term in OPTIONAL_SEARCH_TERMS and _variant_group_matches(blob, tokens, variants)
-    )
-
-    # Prefer products where the important terms match, then use optional/product-detail
-    # matches to sort friendlier results first.
-    return (required_matches * 100) + (optional_matches * 10) + _product_detail_score(product, groups)
-
-
-def _variant_group_matches(blob: str, tokens: set[str], variants: set[str]) -> bool:
-    return any(_blob_contains(blob, tokens, variant) for variant in variants)
-
-
-def _product_detail_score(product: Any, groups: list[tuple[str, set[str]]]) -> int:
-    detail_fields = (
-        ("title", 8),
-        ("denomination", 6),
-        ("category", 4),
-        ("supplier_product_id", 3),
-        ("raw_payload_json", 2),
-    )
-    score = 0
-    for field_name, weight in detail_fields:
-        value = getattr(product, field_name, None)
-        if value is None:
+    for kind in GENGINE_LINK_KINDS:
+        if kind not in normalized_segments:
             continue
-        field_blob = _normalize_search_text(value)
-        field_tokens = set(field_blob.split())
-        for _, variants in groups:
-            if _variant_group_matches(field_blob, field_tokens, variants):
-                score += weight
-    return score
+        index = normalized_segments.index(kind)
+        if len(segments) <= index + 1:
+            return None
+        product_id = segments[index + 1].strip()
+        if not product_id.isdigit():
+            return None
+        slug = segments[index + 2].strip() if len(segments) > index + 2 else None
+        return GEngineProductReference(
+            kind=kind,
+            product_id=product_id,
+            slug=slug or None,
+            source=raw_value,
+        )
+
+    return None
 
 
-def _sort_products_for_query(products: list[Any], query: str) -> list[Any]:
-    if not _search_groups(query):
-        return products
-    return sorted(products, key=lambda product: (-_product_match_score(product, query), product.id))
+def _raw_payload_dict(product: Any) -> dict[str, Any]:
+    raw_payload = getattr(product, "raw_payload_json", None)
+    if not raw_payload:
+        return {}
+    try:
+        payload = json.loads(str(raw_payload))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
-def _blob_contains(blob: str, tokens: set[str], term: str) -> bool:
-    if not term:
-        return False
-    if term in tokens:
+def _collect_payload_values(value: object, keys: set[str]) -> set[str]:
+    collected: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            normalized_key = str(key).lower()
+            if normalized_key in keys and item not in {None, ""}:
+                collected.add(str(item).strip())
+            collected.update(_collect_payload_values(item, keys))
+    elif isinstance(value, list):
+        for item in value:
+            collected.update(_collect_payload_values(item, keys))
+    return collected
+
+
+def _product_reference_ids(product: Any) -> set[str]:
+    payload = _raw_payload_dict(product)
+    id_keys = {
+        "id",
+        "product_id",
+        "productid",
+        "parent_product_id",
+        "base_product_id",
+        "shop_product_id",
+        "recharge_product_id",
+        "gift_id",
+        "item_id",
+        "sku",
+    }
+    values = {
+        str(value).strip()
+        for value in (
+            getattr(product, "supplier_product_id", None),
+            getattr(product, "id", None),
+        )
+        if value not in {None, ""}
+    }
+    values.update(_collect_payload_values(payload, id_keys))
+    return {value for value in values if value}
+
+
+def _product_matches_reference(product: Any, reference: GEngineProductReference) -> bool:
+    if reference.product_id in _product_reference_ids(product):
         return True
-    if len(term) >= 4:
-        return any(term in token or token in term for token in tokens)
-    return f" {term} " in f" {blob} "
+    if reference.slug is None:
+        return False
+    return _normalize_search_text(reference.slug) in _product_search_blob(product)
+
+
+def _sort_products_for_reference(
+    products: list[Any],
+    reference: GEngineProductReference,
+) -> list[Any]:
+    def score(product: Any) -> tuple[int, int]:
+        ids = _product_reference_ids(product)
+        direct_id_score = 0 if reference.product_id in ids else 1
+        return (direct_id_score, product.id)
+
+    return sorted(products, key=score)
 
 
 def _load_recent_products(limit: int = 200) -> list[Any]:
@@ -469,39 +493,57 @@ def _choose_product_interactively() -> Any | None:
         print("No imported products yet. Run product sync first.")
         return None
 
-    next_query: str | None = None
+    next_reference: GEngineProductReference | None = None
     while True:
-        if next_query is None:
-            query = input(
-                "\nSearch product/sub-item by title, denomination, category, slug, or supplier id "
-                "(examples: playstation turkey, 250 TRY, 500 TL, psn; blank shows latest 25): "
+        if next_reference is None:
+            raw_reference = input(
+                "\nPaste G-Engine product link or product ID "
+                "(examples: https://b2b.g-engine.net/en/shop/5/playstation-store-wallet-turkey, "
+                "https://b2b.g-engine.net/en/gifts/4451080/vituber-melody): "
             ).strip()
+            reference = _parse_gengine_reference(raw_reference)
+            if reference is None:
+                print("Could not read a G-Engine product ID from that value. Paste the full link.")
+                continue
         else:
-            query = next_query
-            next_query = None
-            print(f"\nSearching again for: {query}")
+            reference = next_reference
+            next_reference = None
+            print(f"\nLooking up: {reference.source}")
 
         matches = [
-            product for product in products if _product_matches_query(product, query)
+            product for product in products if _product_matches_reference(product, reference)
         ]
-        matches = _sort_products_for_query(matches, query)
+        matches = _sort_products_for_reference(matches, reference)
         if not matches:
-            print("No matches. Try a broader search like 'playstation', 'TRY', 'Roblox', or 'Steam'.")
+            print(
+                f"No imported rows matched G-Engine {reference.kind} product ID "
+                f"{reference.product_id}."
+            )
+            print("Run product sync first. If it still does not appear, this G-Engine section")
+            print("may not be imported by the current integration yet.")
             continue
 
-        visible_matches = matches[:25]
-        print("\nMatching products:")
+        visible_matches = matches[:50]
+        print(
+            f"\nImported rows for G-Engine {reference.kind} product ID "
+            f"{reference.product_id}:"
+        )
         for product in visible_matches:
             print(_product_label(product))
 
         if len(matches) > len(visible_matches):
-            print(f"...and {len(matches) - len(visible_matches)} more. Refine the search if needed.")
+            print(f"...and {len(matches) - len(visible_matches)} more rows.")
 
-        selected = input("\nEnter local product id from [] or 's' to search again: ").strip().lower()
-        if selected in {"s", "search"}:
+        selected = input(
+            "\nEnter local product id from [] or paste another G-Engine link/id: "
+        ).strip()
+        if selected.lower() in {"s", "search", "again"}:
             continue
         if not selected.isdigit():
-            next_query = selected
+            next_reference = _parse_gengine_reference(selected)
+            if next_reference is None:
+                print("Please enter a local numeric product id or another G-Engine link.")
+                continue
             continue
 
         product_id = int(selected)

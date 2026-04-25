@@ -74,10 +74,16 @@ python manage.py manual-link-example
 
 `python manage.py manual-link` walks through:
 - choosing `digiseller` or `ggsel`
-- searching/selecting the exact imported G-Engine product or denomination sub-item
+- pasting the G-Engine product link or product ID
+- selecting the exact imported denomination/sub-item for that G-Engine product
 - entering the marketplace offer/product ID
 - entering the local marketplace price
 - optionally marking that buyer text is required, such as a Steam friend code
+
+Supported G-Engine link shapes include:
+- `https://b2b.g-engine.net/en/shop/5/playstation-store-wallet-turkey`
+- `https://b2b.g-engine.net/ru/recharge/1/steam`
+- `https://b2b.g-engine.net/en/gifts/4451080/vituber-melody`
 
 ## Local setup (test PC)
 

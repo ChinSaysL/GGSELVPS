@@ -25,93 +25,77 @@ def test_parse_args_accepts_manual_link_command() -> None:
     assert args.command == "manual-link"
 
 
-def test_product_search_matches_denominations_and_categories() -> None:
-    product = SimpleNamespace(
-        id=10,
-        title="Turkey Gift Card",
-        category="Gift Card",
-        denomination="500 TL",
-        region="TR",
-        supplier_product_id="abc-500",
-        supplier_stock="5",
+def test_parse_gengine_shop_reference_from_url() -> None:
+    reference = manage._parse_gengine_reference(
+        "https://b2b.g-engine.net/en/shop/5/playstation-store-wallet-turkey"
     )
 
-    assert manage._product_matches_query(product, "500 tl")
-    assert manage._product_matches_query(product, "gift abc")
-    assert not manage._product_matches_query(product, "250 tl")
-
-
-def test_product_search_matches_slug_and_currency_aliases() -> None:
-    product = SimpleNamespace(
-        id=20,
-        title="PlayStation Store Wallet Turkey",
-        category="Gift Card, PlayStation",
-        denomination="250 TRY",
-        region=None,
-        supplier_product_id="ps-tr-250",
-        supplier_stock="300+",
-        raw_payload_json='{"slug":"playstation-store-wallet-turkey"}',
+    assert reference == manage.GEngineProductReference(
+        kind="shop",
+        product_id="5",
+        slug="playstation-store-wallet-turkey",
+        source="https://b2b.g-engine.net/en/shop/5/playstation-store-wallet-turkey",
     )
 
-    assert manage._product_matches_query(product, "playstation-store-wallet-turkey")
-    assert manage._product_matches_query(product, "250 TL")
-    assert manage._product_matches_query(product, "psn turkey")
+
+def test_parse_gengine_gift_reference_from_url() -> None:
+    reference = manage._parse_gengine_reference(
+        "https://b2b.g-engine.net/en/gifts/4451080/vituber-melody"
+    )
+
+    assert reference is not None
+    assert reference.kind == "gifts"
+    assert reference.product_id == "4451080"
+    assert reference.slug == "vituber-melody"
 
 
-def test_product_search_handles_generic_slug_words_as_optional() -> None:
+def test_parse_plain_numeric_reference() -> None:
+    reference = manage._parse_gengine_reference("5")
+
+    assert reference == manage.GEngineProductReference(
+        kind="unknown",
+        product_id="5",
+        slug=None,
+        source="5",
+    )
+
+
+def test_product_reference_matches_base_product_id_from_raw_payload() -> None:
     product = SimpleNamespace(
-        id=21,
+        id=130,
         title="250 TRY",
         category="Gift Card, PlayStation",
         denomination="250 TRY",
-        region=None,
-        supplier_product_id="ps-tr-250",
-        supplier_stock="300+",
-        raw_payload_json="{}",
+        supplier_product_id="560",
+        raw_payload_json='{"id":"560","product_id":"5"}',
+    )
+    reference = manage.GEngineProductReference(
+        kind="shop",
+        product_id="5",
+        slug="playstation-store-wallet-turkey",
+        source="link",
     )
 
-    assert manage._product_matches_query(product, "playstation-store-wallet-turkey")
+    assert manage._product_matches_reference(product, reference)
 
 
-def test_product_search_sorts_more_specific_matches_first() -> None:
-    playstation = SimpleNamespace(
-        id=21,
-        title="250 TRY",
-        category="Gift Card, PlayStation",
-        denomination="250 TRY",
-        region=None,
-        supplier_product_id="ps-tr-250",
-        supplier_stock="300+",
-        raw_payload_json='{"slug":"playstation-store-wallet-turkey"}',
-    )
-    steam = SimpleNamespace(
-        id=22,
-        title="250 TRY",
-        category="Gift Card, Steam",
-        denomination="250 TRY",
-        region=None,
-        supplier_product_id="steam-tr-250",
-        supplier_stock="300+",
-        raw_payload_json="{}",
-    )
-
-    results = manage._sort_products_for_query([steam, playstation], "playstation 250 try")
-    assert results == [playstation, steam]
-
-
-def test_product_search_does_not_match_tl_inside_unrelated_words() -> None:
+def test_product_reference_matches_direct_supplier_product_id() -> None:
     product = SimpleNamespace(
-        id=30,
-        title="60 CAD",
-        category="Gift Card, Battle.net",
-        denomination="60 CAD",
-        region=None,
-        supplier_product_id="621",
-        supplier_stock="1",
+        id=1,
+        title="Steam RUB",
+        category="Direct replenishment",
+        denomination=None,
+        supplier_product_id="1",
         raw_payload_json="{}",
     )
+    reference = manage.GEngineProductReference(
+        kind="recharge",
+        product_id="1",
+        slug="steam",
+        source="link",
+    )
 
-    assert not manage._product_matches_query(product, "TL")
+    assert manage._product_matches_reference(product, reference)
 
 
 def test_default_offer_title_includes_distinct_denomination() -> None:
