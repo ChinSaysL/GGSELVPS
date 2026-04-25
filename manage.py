@@ -713,6 +713,35 @@ def _payload_first_decimal(payload: dict[str, Any], keys: tuple[str, ...]) -> De
     return None
 
 
+def _extract_option_variant_values(option: dict[str, Any]) -> list[str]:
+    variant_containers = ("variants", "values", "items", "options")
+    variant_value_keys = ("text", "label", "name", "value", "title")
+    values: list[str] = []
+    seen: set[str] = set()
+
+    for container_key in variant_containers:
+        container = option.get(container_key)
+        if not isinstance(container, list):
+            continue
+        for item in container:
+            text: str | None = None
+            if isinstance(item, dict):
+                text = _payload_first_str(item, variant_value_keys)
+            elif item is not None:
+                text = str(item).strip()
+            if not text:
+                continue
+            normalized = _normalize_search_text(text)
+            if not normalized or normalized in seen:
+                continue
+            seen.add(normalized)
+            values.append(text)
+        if values:
+            break
+
+    return values
+
+
 def _extract_marketplace_snapshot_fields(payload: dict[str, Any]) -> dict[str, Any]:
     title = _payload_first_str(
         payload,
@@ -743,32 +772,56 @@ def _extract_marketplace_snapshot_fields(payload: dict[str, Any]) -> dict[str, A
     )
     options = payload.get("options")
     option_variants: list[str] = []
+    option_variant_entries: list[dict[str, str]] = []
+    option_parameter_names: list[str] = []
+    detected_requires_buyer_input = False
+    detected_buyer_input_label: str | None = None
+    seen_variant_entries: set[tuple[str, str]] = set()
     if isinstance(options, list):
         for option in options:
             if not isinstance(option, dict):
                 continue
             option_label = _payload_first_str(option, ("label", "name"))
-            variants = option.get("variants")
-            if not isinstance(variants, list):
-                if option_label:
-                    option_variants.append(option_label)
-                continue
-
+            if option_label:
+                option_parameter_names.append(option_label)
+            option_type = _payload_first_str(option, ("type",))
+            required_flag = _payload_first_bool(option, ("required", "is_required"))
+            normalized_type = str(option_type or "").strip().lower()
+            if normalized_type in {"text", "textarea"} and required_flag is not False:
+                detected_requires_buyer_input = True
+                if detected_buyer_input_label is None:
+                    detected_buyer_input_label = option_label
+            variants = _extract_option_variant_values(option)
             default_variant_text: str | None = None
-            for variant in variants:
-                if not isinstance(variant, dict):
+            raw_variants = option.get("variants")
+            default_variant_keys = ("default", "is_default")
+            if isinstance(raw_variants, list):
+                for raw_variant in raw_variants:
+                    if not isinstance(raw_variant, dict):
+                        continue
+                    variant_text = _payload_first_str(raw_variant, ("text", "label", "name", "value"))
+                    if default_variant_text is None and _payload_first_bool(raw_variant, default_variant_keys):
+                        default_variant_text = variant_text
+
+            for variant_text in variants:
+                option_variants.append(variant_text)
+                option_key = _normalize_search_text(option_label or "option")
+                variant_key = _normalize_search_text(variant_text)
+                composite_key = (option_key, variant_key)
+                if composite_key in seen_variant_entries:
                     continue
-                variant_text = _payload_first_str(variant, ("text", "label", "name", "value"))
-                if variant_text:
-                    option_variants.append(variant_text)
-                if default_variant_text is None and _payload_first_bool(
-                    variant,
-                    ("default", "is_default"),
-                ):
-                    default_variant_text = variant_text
+                seen_variant_entries.add(composite_key)
+                option_variant_entries.append(
+                    {
+                        "option_label": option_label or "Option",
+                        "variant_value": variant_text,
+                    }
+                )
 
             if denomination is None and default_variant_text:
                 denomination = default_variant_text
+            if denomination is None and variants:
+                denomination = variants[0]
             if denomination is None and option_label:
                 denomination = option_label
 
@@ -782,6 +835,10 @@ def _extract_marketplace_snapshot_fields(payload: dict[str, Any]) -> dict[str, A
         "buyer_input_label": buyer_input_label,
         "buyer_input_help": buyer_input_help,
         "option_variants": option_variants,
+        "option_variant_entries": option_variant_entries,
+        "option_parameter_names": option_parameter_names,
+        "detected_requires_buyer_input": detected_requires_buyer_input,
+        "detected_buyer_input_label": detected_buyer_input_label,
     }
 
 
@@ -846,6 +903,157 @@ def _snapshot_matches_selected_product(product: Any, snapshot: dict[str, Any]) -
     if snapshot_title and product_denom in snapshot_title:
         return True
     return False
+
+
+def _variant_match_key(text: str | None) -> str:
+    signature = _extract_denomination_signature(text)
+    if signature:
+        return signature
+    return _normalize_search_text(text or "")
+
+
+def _product_variant_key(product: Any) -> str:
+    signature = _product_denomination_signature(product)
+    if signature:
+        return signature
+    return _normalize_search_text(
+        " ".join(
+            [
+                str(getattr(product, "denomination", "") or ""),
+                str(getattr(product, "title", "") or ""),
+                str(getattr(product, "category", "") or ""),
+            ]
+        )
+    )
+
+
+def _products_matching_variant(products: list[Any], variant_value: str) -> list[Any]:
+    target_key = _variant_match_key(variant_value)
+    if not target_key:
+        return []
+
+    strict_matches = [
+        product
+        for product in products
+        if _product_variant_key(product) == target_key
+    ]
+    if strict_matches:
+        return sorted(strict_matches, key=lambda item: int(item.id))
+
+    normalized_variant = _normalize_search_text(variant_value)
+    if not normalized_variant:
+        return []
+
+    fuzzy_matches = [
+        product
+        for product in products
+        if normalized_variant in _product_search_blob(product)
+    ]
+    return sorted(fuzzy_matches, key=lambda item: int(item.id))
+
+
+def _print_reference_products(products: list[Any], *, limit: int = 50) -> None:
+    visible = products[:limit]
+    for product in visible:
+        print(_product_label(product))
+    if len(products) > len(visible):
+        print(f"...and {len(products) - len(visible)} more rows.")
+
+
+def _choose_product_from_reference_rows(
+    products: list[Any],
+    *,
+    prompt: str,
+    default_product_id: int | None = None,
+    allow_skip: bool = False,
+) -> Any | None:
+    by_id = {int(product.id): product for product in products}
+    while True:
+        default_text = str(default_product_id) if default_product_id is not None else None
+        value = _ask_text(prompt, default=default_text, required=not allow_skip).strip()
+        if not value and allow_skip:
+            return None
+        if not value.isdigit():
+            print("Please enter a numeric local row id.")
+            continue
+        selected = by_id.get(int(value))
+        if selected is None:
+            print("That local row id is not in the current imported rows.")
+            continue
+        return selected
+
+
+def _add_link_target(
+    targets_by_product_id: dict[int, dict[str, Any]],
+    *,
+    product: Any,
+    option_description: str | None,
+) -> None:
+    product_id = int(product.id)
+    item = targets_by_product_id.setdefault(
+        product_id,
+        {"product": product, "option_descriptions": []},
+    )
+    if option_description and option_description not in item["option_descriptions"]:
+        item["option_descriptions"].append(option_description)
+
+
+def _linked_rows_for_marketplace_offer(
+    marketplace: str,
+    marketplace_offer_id: str,
+) -> list[dict[str, Any]]:
+    try:
+        from sqlalchemy import select
+
+        from app.db import SessionLocal
+        from app.models import MarketplaceOffer, ProductMapping, SupplierProduct
+    except ImportError:
+        return []
+
+    with SessionLocal() as db:
+        offer_stmt = select(MarketplaceOffer).where(
+            MarketplaceOffer.marketplace == marketplace,
+            MarketplaceOffer.marketplace_offer_id == marketplace_offer_id,
+        )
+        offer = db.execute(offer_stmt).scalars().first()
+        if offer is None:
+            return []
+
+        mapping_stmt = (
+            select(ProductMapping, SupplierProduct)
+            .join(SupplierProduct, ProductMapping.supplier_product_id == SupplierProduct.id)
+            .where(ProductMapping.marketplace_offer_id == offer.id)
+            .order_by(ProductMapping.id)
+        )
+        rows = db.execute(mapping_stmt).all()
+
+    linked: list[dict[str, Any]] = []
+    for mapping, supplier in rows:
+        linked.append(
+            {
+                "mapping_id": mapping.id,
+                "local_supplier_product_id": supplier.id,
+                "supplier_product_id": supplier.supplier_product_id,
+                "title": supplier.title,
+                "denomination": supplier.denomination,
+                "enabled": mapping.enabled,
+            }
+        )
+    return linked
+
+
+def _print_linked_rows_for_offer(marketplace: str, marketplace_offer_id: str) -> None:
+    rows = _linked_rows_for_marketplace_offer(marketplace, marketplace_offer_id)
+    if not rows:
+        print("Currently linked rows for this marketplace offer: none.")
+        return
+    print("Currently linked rows for this marketplace offer:")
+    for row in rows:
+        print(
+            f"- mapping {row['mapping_id']}: local {row['local_supplier_product_id']} | "
+            f"supplier_id={row['supplier_product_id']} | "
+            f"{row['title']} | denomination={row['denomination'] or ''} | enabled={row['enabled']}"
+        )
 
 
 def _normalize_currency_code(value: str | None) -> str | None:
@@ -1428,12 +1636,8 @@ def _upsert_manual_link(
 def action_manual_link() -> int:
     _print_header("Manual Link Offer")
     print(
-        "This links an existing marketplace offer to one exact G-Engine product/sub-item. "
+        "This links an existing marketplace offer to imported G-Engine rows. "
         "It does not create or edit marketplace listings."
-    )
-    print(
-        "If one marketplace listing has several choices like 250 TRY and 500 TRY, "
-        "create/link each marketplace product or variant ID separately for now."
     )
 
     marketplace = _ask_text("Marketplace/listing platform (digiseller or ggsel)", default="digiseller")
@@ -1442,14 +1646,18 @@ def action_manual_link() -> int:
         print(f"Marketplace must be one of: {', '.join(VALID_MARKETPLACES)}.")
         return 1
 
-    product = _choose_product_interactively()
-    if product is None:
+    chosen = _choose_reference_products_interactively()
+    if chosen is None:
         return 1
+    reference, reference_products = chosen
 
-    print(f"\nSelected: {_product_label(product)}")
+    print(f"\nImported rows for G-Engine {reference.kind} product ID {reference.product_id}:")
+    _print_reference_products(reference_products)
+
     marketplace_offer_id = _ask_text("Marketplace offer/product id")
 
     snapshot, snapshot_error = _fetch_marketplace_offer_snapshot(marketplace, marketplace_offer_id)
+    option_variant_entries: list[dict[str, str]] = []
     if snapshot is None:
         print("Could not fetch marketplace item details by ID; continuing with manual values.")
         if snapshot_error:
@@ -1460,19 +1668,107 @@ def action_manual_link() -> int:
         print(f"- denomination: {snapshot.get('denomination') or '(not provided)'}")
         print(f"- price: {snapshot.get('price') if snapshot.get('price') is not None else '(unknown)'}")
         print(f"- currency: {snapshot.get('currency') or '(unknown)'}")
-        option_variants = snapshot.get("option_variants")
-        if isinstance(option_variants, list) and option_variants:
-            unique_variants = list(dict.fromkeys(str(item) for item in option_variants))
-            print(f"- option variants: {', '.join(unique_variants[:12])}")
+        option_parameter_names = snapshot.get("option_parameter_names")
+        if isinstance(option_parameter_names, list) and option_parameter_names:
+            unique_parameter_names = list(dict.fromkeys(str(item) for item in option_parameter_names))
+            print(f"- parameter names: {', '.join(unique_parameter_names[:12])}")
+        raw_variant_entries = snapshot.get("option_variant_entries")
+        if isinstance(raw_variant_entries, list):
+            option_variant_entries = [
+                entry
+                for entry in raw_variant_entries
+                if isinstance(entry, dict)
+                and entry.get("variant_value")
+            ]
+        if option_variant_entries:
+            print("- selectable option values:")
+            for entry in option_variant_entries[:20]:
+                option_label = str(entry.get("option_label") or "Option")
+                variant_value = str(entry.get("variant_value") or "")
+                print(f"  {option_label}: {variant_value}")
+            if len(option_variant_entries) > 20:
+                print(f"  ...and {len(option_variant_entries) - 20} more values.")
+        else:
+            option_variants = snapshot.get("option_variants")
+            if isinstance(option_variants, list) and option_variants:
+                unique_variants = list(dict.fromkeys(str(item) for item in option_variants))
+                print(f"- option variants: {', '.join(unique_variants[:12])}")
 
-        if not _snapshot_matches_selected_product(product, snapshot):
-            print("Warning: selected G-Engine denomination does not match fetched marketplace item.")
-            print(f"- G-Engine denomination: {getattr(product, 'denomination', None) or '(none)'}")
-            print(f"- marketplace denomination: {snapshot.get('denomination') or '(not provided)'}")
-            print(f"- marketplace title: {snapshot.get('title') or '(not provided)'}")
-            if not _ask_bool("Continue linking anyway?", default=False):
-                print("Cancelled.")
-                return 0
+    _print_linked_rows_for_offer(marketplace, marketplace_offer_id)
+
+    targets_by_product_id: dict[int, dict[str, Any]] = {}
+    if option_variant_entries and _ask_bool(
+        "Process detected option values one by one now?",
+        default=True,
+    ):
+        print(
+            "\nFor each marketplace option value, choose the matching local row "
+            "(blank skips that value)."
+        )
+        total = len(option_variant_entries)
+        for index, entry in enumerate(option_variant_entries, start=1):
+            option_label = str(entry.get("option_label") or "Option")
+            variant_value = str(entry.get("variant_value") or "")
+            print(f"\nOption value {index}/{total}: {option_label}: {variant_value}")
+            candidate_products = _products_matching_variant(reference_products, variant_value)
+            variant_default_product_id: int | None = None
+            if candidate_products:
+                print("Suggested local rows:")
+                _print_reference_products(candidate_products, limit=10)
+                if len(candidate_products) == 1:
+                    variant_default_product_id = int(candidate_products[0].id)
+            else:
+                print("No automatic local row match for this value.")
+
+            selected_product = _choose_product_from_reference_rows(
+                reference_products,
+                prompt="Local row id for this option value (blank = skip)",
+                default_product_id=variant_default_product_id,
+                allow_skip=True,
+            )
+            if selected_product is None:
+                continue
+            _add_link_target(
+                targets_by_product_id,
+                product=selected_product,
+                option_description=f"{option_label}: {variant_value}",
+            )
+
+    if not targets_by_product_id:
+        single_default_product_id: int | None = None
+        if snapshot and snapshot.get("denomination"):
+            snapshot_denom = str(snapshot.get("denomination"))
+            suggested = _products_matching_variant(reference_products, snapshot_denom)
+            if len(suggested) == 1:
+                single_default_product_id = int(suggested[0].id)
+        print("\nSelect one local row to link:")
+        _print_reference_products(reference_products)
+        selected_product = _choose_product_from_reference_rows(
+            reference_products,
+            prompt="Local row id",
+            default_product_id=single_default_product_id,
+            allow_skip=False,
+        )
+        if selected_product is None:
+            print("Cancelled.")
+            return 1
+        _add_link_target(
+            targets_by_product_id,
+            product=selected_product,
+            option_description=None,
+        )
+
+    targets = list(targets_by_product_id.values())
+    primary_product = targets[0]["product"]
+
+    if snapshot and len(targets) == 1 and not _snapshot_matches_selected_product(primary_product, snapshot):
+        print("Warning: selected G-Engine denomination does not match fetched marketplace item.")
+        print(f"- G-Engine denomination: {getattr(primary_product, 'denomination', None) or '(none)'}")
+        print(f"- marketplace denomination: {snapshot.get('denomination') or '(not provided)'}")
+        print(f"- marketplace title: {snapshot.get('title') or '(not provided)'}")
+        if not _ask_bool("Continue linking anyway?", default=False):
+            print("Cancelled.")
+            return 0
 
     currency_default = snapshot.get("currency") if snapshot else None
     if currency_default not in VALID_CURRENCIES:
@@ -1483,7 +1779,7 @@ def action_manual_link() -> int:
         print(f"Currency must be one of: {', '.join(VALID_CURRENCIES)}.")
         return 1
 
-    suggested_price = _suggest_price(product, currency)
+    suggested_price = _suggest_price(primary_product, currency)
     if suggested_price is None:
         print("No automatic price suggestion available; enter the current marketplace price.")
         if currency == "RUB":
@@ -1496,7 +1792,7 @@ def action_manual_link() -> int:
         price_default = suggested_price
     price = _ask_decimal("Marketplace price", default=price_default)
 
-    title_default = _default_offer_title(product)
+    title_default = _default_offer_title(primary_product)
     if snapshot and snapshot.get("title"):
         title_default = str(snapshot["title"])
     title = _ask_text("Local offer title", default=title_default)
@@ -1505,39 +1801,69 @@ def action_manual_link() -> int:
     offer_enabled = _ask_bool("Mark local offer enabled?", default=offer_enabled_default)
     mapping_enabled = _ask_bool("Enable this product mapping?", default=True)
 
-    requires_buyer_input_default = bool(snapshot.get("requires_buyer_input")) if snapshot else False
-    requires_buyer_input = _ask_bool(
-        "Does this listing require buyer text/input, like a Steam friend code?",
-        default=requires_buyer_input_default,
+    detected_requires_buyer_input = bool(snapshot.get("detected_requires_buyer_input")) if snapshot else False
+    detected_buyer_input_label = (
+        str(snapshot.get("detected_buyer_input_label"))
+        if snapshot and snapshot.get("detected_buyer_input_label")
+        else None
     )
+    requires_buyer_input_default = bool(snapshot.get("requires_buyer_input")) if snapshot else False
+    if detected_requires_buyer_input:
+        requires_buyer_input_default = True
+
+    requires_buyer_input = requires_buyer_input_default
     buyer_input_label: str | None = None
     buyer_input_help: str | None = None
     if requires_buyer_input:
-        buyer_input_label_default = (
+        buyer_input_label = (
             str(snapshot.get("buyer_input_label"))
             if snapshot and snapshot.get("buyer_input_label")
-            else _default_buyer_input_label(product)
+            else None
         )
-        buyer_input_label = _ask_text(
-            "Buyer input label",
-            default=buyer_input_label_default,
-        )
-        buyer_input_help_default = (
+        if not buyer_input_label:
+            buyer_input_label = detected_buyer_input_label or _default_buyer_input_label(primary_product)
+        buyer_input_help = (
             str(snapshot.get("buyer_input_help"))
             if snapshot and snapshot.get("buyer_input_help")
             else _default_buyer_input_help(buyer_input_label)
         )
-        buyer_input_help = _ask_text(
-            "Buyer input help text",
-            default=buyer_input_help_default,
-            required=False,
+        print(
+            f"Buyer input is auto-detected as required. label='{buyer_input_label}'"
         )
+    else:
+        print("Buyer input is auto-detected as not required.")
+
+    if _ask_bool("Override buyer input settings manually?", default=False):
+        requires_buyer_input = _ask_bool(
+            "Does this listing require buyer text/input, like a Steam friend code?",
+            default=requires_buyer_input,
+        )
+        if requires_buyer_input:
+            buyer_input_label = _ask_text(
+                "Buyer input label",
+                default=buyer_input_label or _default_buyer_input_label(primary_product),
+            )
+            buyer_input_help = _ask_text(
+                "Buyer input help text",
+                default=buyer_input_help or _default_buyer_input_help(buyer_input_label),
+                required=False,
+            )
+        else:
+            buyer_input_label = None
+            buyer_input_help = None
 
     print("\nReview:")
     print(f"- marketplace: {marketplace}")
     print(f"- marketplace_offer_id: {marketplace_offer_id}")
-    print(f"- supplier_product_id: {product.id}")
-    print(f"- product/sub-item: {_product_label(product)}")
+    print(f"- local rows selected: {len(targets)}")
+    for target in targets:
+        product = target["product"]
+        option_descriptions = target["option_descriptions"]
+        if option_descriptions:
+            joined = "; ".join(option_descriptions)
+            print(f"  {_product_label(product)} | option values: {joined}")
+        else:
+            print(f"  {_product_label(product)}")
     print(f"- title: {title}")
     print(f"- price: {price} {currency}")
     print(f"- local offer enabled: {offer_enabled}")
@@ -1551,28 +1877,34 @@ def action_manual_link() -> int:
         print("Cancelled.")
         return 0
 
-    try:
-        result = _upsert_manual_link(
-            marketplace=marketplace,
-            marketplace_offer_id=marketplace_offer_id,
-            supplier_product_id=product.id,
-            title=title,
-            price=price,
-            currency=currency,
-            offer_enabled=offer_enabled,
-            requires_buyer_input=requires_buyer_input,
-            buyer_input_label=buyer_input_label,
-            buyer_input_help=buyer_input_help,
-            mapping_enabled=mapping_enabled,
-        )
-    except Exception as exc:  # noqa: BLE001 - CLI should show a readable failure.
-        print(f"Manual link failed: {exc}")
-        return 1
+    successful = 0
+    failed = 0
+    for target in targets:
+        product = target["product"]
+        try:
+            _upsert_manual_link(
+                marketplace=marketplace,
+                marketplace_offer_id=marketplace_offer_id,
+                supplier_product_id=int(product.id),
+                title=title,
+                price=price,
+                currency=currency,
+                offer_enabled=offer_enabled,
+                requires_buyer_input=requires_buyer_input,
+                buyer_input_label=buyer_input_label,
+                buyer_input_help=buyer_input_help,
+                mapping_enabled=mapping_enabled,
+            )
+            successful += 1
+        except Exception as exc:  # noqa: BLE001 - continue remaining links.
+            failed += 1
+            print(f"Link failed for local {product.id}: {exc}")
 
     print("\nLinked successfully.")
-    for key, value in result.items():
-        print(f"{key}: {value}")
-    return 0
+    print(f"links_created_or_updated: {successful}")
+    print(f"links_failed: {failed}")
+    _print_linked_rows_for_offer(marketplace, marketplace_offer_id)
+    return 0 if successful > 0 and failed == 0 else (0 if successful > 0 else 1)
 
 
 def action_docker_build() -> int:

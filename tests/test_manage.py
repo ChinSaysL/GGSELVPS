@@ -224,3 +224,68 @@ def test_extract_marketplace_snapshot_fields_reads_option_variants() -> None:
 
     assert snapshot["denomination"] == "250 TL"
     assert snapshot["option_variants"] == ["250 TL", "500 TL"]
+
+
+def test_extract_marketplace_snapshot_fields_detects_required_text_input() -> None:
+    snapshot = manage._extract_marketplace_snapshot_fields(
+        {
+            "name": "Steam gift",
+            "options": [
+                {"label": "Steam friend code", "type": "text", "required": 1},
+            ],
+        }
+    )
+
+    assert snapshot["detected_requires_buyer_input"] is True
+    assert snapshot["detected_buyer_input_label"] == "Steam friend code"
+
+
+def test_extract_marketplace_snapshot_fields_handles_mixed_options() -> None:
+    snapshot = manage._extract_marketplace_snapshot_fields(
+        {
+            "name": "Playstation testing",
+            "options": [
+                {
+                    "label": "Gift Card Amount",
+                    "type": "radio",
+                    "variants": [
+                        {"text": "250 TRY", "default": 1},
+                        {"text": "500 TRY", "default": 0},
+                    ],
+                },
+                {
+                    "label": "Steam friend code",
+                    "type": "text",
+                    "required": 1,
+                },
+            ],
+        }
+    )
+
+    assert snapshot["option_variant_entries"] == [
+        {"option_label": "Gift Card Amount", "variant_value": "250 TRY"},
+        {"option_label": "Gift Card Amount", "variant_value": "500 TRY"},
+    ]
+    assert snapshot["detected_requires_buyer_input"] is True
+    assert snapshot["detected_buyer_input_label"] == "Steam friend code"
+
+
+def test_products_matching_variant_uses_denomination_signature() -> None:
+    products = [
+        SimpleNamespace(
+            id=10,
+            title="Playstation Store Wallet Turkey",
+            category="Gift Card, PlayStation",
+            denomination="250 TRY",
+        ),
+        SimpleNamespace(
+            id=11,
+            title="Playstation Store Wallet Turkey",
+            category="Gift Card, PlayStation",
+            denomination="500 TRY",
+        ),
+    ]
+
+    matches = manage._products_matching_variant(products, "500 TL")
+
+    assert [product.id for product in matches] == [11]
