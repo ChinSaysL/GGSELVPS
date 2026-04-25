@@ -202,3 +202,25 @@ def test_auto_match_products_and_snapshots_by_signature() -> None:
     assert unmatched_products == []
     assert unmatched_snapshots == []
     assert ambiguous == []
+
+
+def test_extract_marketplace_snapshot_fields_reads_option_variants() -> None:
+    snapshot = manage._extract_marketplace_snapshot_fields(
+        {
+            "name": "Playstation testing",
+            "price": 7.0,
+            "currency": "USD",
+            "options": [
+                {
+                    "label": "250 TL",
+                    "variants": [
+                        {"text": "250 TL", "default": 1},
+                        {"text": "500 TL", "default": 0},
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert snapshot["denomination"] == "250 TL"
+    assert snapshot["option_variants"] == ["250 TL", "500 TL"]

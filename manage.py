@@ -741,6 +741,37 @@ def _extract_marketplace_snapshot_fields(payload: dict[str, Any]) -> dict[str, A
         payload,
         ("buyer_input_help", "user_data_help", "input_help"),
     )
+    options = payload.get("options")
+    option_variants: list[str] = []
+    if isinstance(options, list):
+        for option in options:
+            if not isinstance(option, dict):
+                continue
+            option_label = _payload_first_str(option, ("label", "name"))
+            variants = option.get("variants")
+            if not isinstance(variants, list):
+                if option_label:
+                    option_variants.append(option_label)
+                continue
+
+            default_variant_text: str | None = None
+            for variant in variants:
+                if not isinstance(variant, dict):
+                    continue
+                variant_text = _payload_first_str(variant, ("text", "label", "name", "value"))
+                if variant_text:
+                    option_variants.append(variant_text)
+                if default_variant_text is None and _payload_first_bool(
+                    variant,
+                    ("default", "is_default"),
+                ):
+                    default_variant_text = variant_text
+
+            if denomination is None and default_variant_text:
+                denomination = default_variant_text
+            if denomination is None and option_label:
+                denomination = option_label
+
     return {
         "title": title,
         "denomination": denomination,
@@ -750,6 +781,7 @@ def _extract_marketplace_snapshot_fields(payload: dict[str, Any]) -> dict[str, A
         "requires_buyer_input": requires_buyer_input,
         "buyer_input_label": buyer_input_label,
         "buyer_input_help": buyer_input_help,
+        "option_variants": option_variants,
     }
 
 
@@ -760,12 +792,15 @@ def _extract_marketplace_offer_id(payload: dict[str, Any]) -> str | None:
     )
 
 
-def _fetch_marketplace_offer_snapshot(marketplace: str, marketplace_offer_id: str) -> dict[str, Any] | None:
+def _fetch_marketplace_offer_snapshot(
+    marketplace: str,
+    marketplace_offer_id: str,
+) -> tuple[dict[str, Any] | None, str | None]:
     try:
         from app.clients import DigisellerClient, GGSELClient
         from app.config import get_settings
     except ImportError:
-        return None
+        return None, "app dependencies are missing"
 
     settings = get_settings()
     client: Any | None = None
@@ -775,18 +810,18 @@ def _fetch_marketplace_offer_snapshot(marketplace: str, marketplace_offer_id: st
         elif marketplace == "ggsel" and settings.ggsel_api_key:
             client = GGSELClient(settings.ggsel_base_url, settings.ggsel_api_key)
         else:
-            return None
+            return None, "marketplace API key is not configured"
 
         raw = client.get_offer_by_id(marketplace_offer_id)
         if not isinstance(raw, dict):
-            return None
+            return None, "marketplace API returned no item for this id"
 
         fields = _extract_marketplace_snapshot_fields(raw)
         fields["marketplace_offer_id"] = marketplace_offer_id
         fields["raw"] = raw
-        return fields
-    except Exception:
-        return None
+        return fields, None
+    except Exception as exc:
+        return None, str(exc)
     finally:
         if client is not None:
             client.close()
@@ -990,7 +1025,7 @@ def _load_snapshots_by_ids(marketplace: str, offer_ids: list[str]) -> list[dict[
     for offer_id in offer_ids:
         if offer_id in seen_ids:
             continue
-        snapshot = _fetch_marketplace_offer_snapshot(marketplace, offer_id)
+        snapshot, _error = _fetch_marketplace_offer_snapshot(marketplace, offer_id)
         if snapshot is None:
             continue
         snapshot["marketplace_offer_id"] = offer_id
@@ -1414,15 +1449,21 @@ def action_manual_link() -> int:
     print(f"\nSelected: {_product_label(product)}")
     marketplace_offer_id = _ask_text("Marketplace offer/product id")
 
-    snapshot = _fetch_marketplace_offer_snapshot(marketplace, marketplace_offer_id)
+    snapshot, snapshot_error = _fetch_marketplace_offer_snapshot(marketplace, marketplace_offer_id)
     if snapshot is None:
         print("Could not fetch marketplace item details by ID; continuing with manual values.")
+        if snapshot_error:
+            print(f"Lookup reason: {snapshot_error}")
     else:
         print("Fetched marketplace item by ID:")
         print(f"- title: {snapshot.get('title') or '(unknown)'}")
         print(f"- denomination: {snapshot.get('denomination') or '(not provided)'}")
         print(f"- price: {snapshot.get('price') if snapshot.get('price') is not None else '(unknown)'}")
         print(f"- currency: {snapshot.get('currency') or '(unknown)'}")
+        option_variants = snapshot.get("option_variants")
+        if isinstance(option_variants, list) and option_variants:
+            unique_variants = list(dict.fromkeys(str(item) for item in option_variants))
+            print(f"- option variants: {', '.join(unique_variants[:12])}")
 
         if not _snapshot_matches_selected_product(product, snapshot):
             print("Warning: selected G-Engine denomination does not match fetched marketplace item.")

@@ -31,6 +31,13 @@ class DigisellerClient(BaseAPIClient):
         api_key = self._require_api_key()
         return {"token": api_key}
 
+    def _auth_headers(self) -> dict[str, str]:
+        api_key = self._require_api_key()
+        return {
+            "token": api_key,
+            "Authorization": f"Bearer {api_key}",
+        }
+
     @staticmethod
     def _collect_offer_dicts(value: object) -> list[dict[str, Any]]:
         collected: list[dict[str, Any]] = []
@@ -78,6 +85,8 @@ class DigisellerClient(BaseAPIClient):
         merged: dict[str, dict[str, Any]] = {}
 
         for body in attempts:
+            response: dict[str, Any] | list[Any] | None = None
+            # Try strict swagger query-token auth first.
             try:
                 response = self._request_json(
                     method="POST",
@@ -86,6 +95,21 @@ class DigisellerClient(BaseAPIClient):
                     json_body=body,
                 )
             except Exception:
+                response = None
+
+            # Then try header-based auth for accounts where query-token is rejected.
+            if response is None:
+                try:
+                    response = self._request_json(
+                        method="POST",
+                        path="/api/products/list",
+                        json_body=body,
+                        headers=self._auth_headers(),
+                    )
+                except Exception:
+                    response = None
+
+            if response is None:
                 continue
 
             items = self._collect_offer_dicts(response)
@@ -124,12 +148,13 @@ class DigisellerClient(BaseAPIClient):
         if DigisellerClient._matches_offer_id(item, offer_id):
             return item
 
-        for key in ("items", "products", "data", "result"):
-            value = item.get(key)
+        for value in item.values():
             if isinstance(value, list):
                 for child in value:
-                    if isinstance(child, dict) and DigisellerClient._matches_offer_id(child, offer_id):
-                        return child
+                    if isinstance(child, dict):
+                        matched = DigisellerClient._extract_offer(child, offer_id)
+                        if matched is not None:
+                            return matched
             if isinstance(value, dict):
                 matched = DigisellerClient._extract_offer(value, offer_id)
                 if matched is not None:
@@ -147,26 +172,48 @@ class DigisellerClient(BaseAPIClient):
         except ValueError:
             api_offer_id = normalized
 
-        attempts: list[tuple[str, str, dict[str, Any] | None]] = [
-            ("POST", "/api/products/list", {"ids": [api_offer_id]}),
-            ("POST", "/api/products/list", {"product_ids": [api_offer_id]}),
-            ("POST", "/api/products/list", {"products": [api_offer_id]}),
-            ("GET", f"/api/products/{normalized}", None),
-            ("GET", f"/api/product/{normalized}", None),
+        attempts: list[
+            tuple[
+                str,
+                str,
+                dict[str, Any] | None,
+                dict[str, str] | None,
+                dict[str, Any] | None,
+            ]
+        ] = [
+            # Public product info endpoint from swagger docs.
+            ("GET", f"/api/products/{normalized}/data", None, {"Accept": "application/json"}, None),
+            (
+                "GET",
+                f"/api/products/{normalized}/data",
+                None,
+                {"Accept": "application/json", **self._auth_headers()},
+                None,
+            ),
+            ("POST", "/api/products/list", {"ids": [api_offer_id]}, self._auth_headers(), None),
+            ("POST", "/api/products/list", {"product_ids": [api_offer_id]}, self._auth_headers(), None),
+            ("POST", "/api/products/list", {"products": [api_offer_id]}, self._auth_headers(), None),
+            ("GET", f"/api/products/{normalized}", None, self._auth_headers(), None),
+            ("GET", f"/api/product/{normalized}", None, self._auth_headers(), None),
         ]
 
-        for method, path, body in attempts:
+        for method, path, body, headers, params in attempts:
             try:
                 response = self._request_json(
                     method=method,
                     path=path,
-                    params=self._auth_query_params(),
+                    params=params,
                     json_body=body,
+                    headers=headers,
                 )
             except Exception:
                 continue
 
             if isinstance(response, dict):
+                product_obj = response.get("product")
+                if isinstance(product_obj, dict):
+                    product_obj.setdefault("product_id", product_obj.get("id"))
+                    return product_obj
                 extracted = self._extract_offer(response, normalized)
                 if extracted is not None:
                     return extracted
