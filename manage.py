@@ -626,6 +626,25 @@ def _ask_decimal(prompt: str, *, default: Decimal | None = None) -> Decimal:
         return decimal_value
 
 
+def _ask_optional_percent_as_ratio(prompt: str, *, default_percent: Decimal | None = None) -> Decimal | None:
+    while True:
+        suffix = f" [{default_percent}]" if default_percent is not None else ""
+        value = input(f"{prompt}{suffix}: ").strip()
+        if not value:
+            if default_percent is None:
+                return None
+            return default_percent / Decimal("100")
+        try:
+            percent_value = Decimal(value)
+        except InvalidOperation:
+            print("Please enter a valid percent number, for example 22 or 15.5.")
+            continue
+        if percent_value < 0:
+            print("Percent must be >= 0.")
+            continue
+        return percent_value / Decimal("100")
+
+
 def _default_offer_title(product: Any) -> str:
     denomination = str(product.denomination or "").strip()
     title = str(product.title).strip()
@@ -645,7 +664,12 @@ def _default_buyer_input_help(label: str) -> str:
     return f"Ask the buyer to provide their {label} before fulfillment."
 
 
-def _suggest_price(product: Any, currency: str) -> Decimal | None:
+def _suggest_price(
+    product: Any,
+    currency: str,
+    *,
+    markup_percent: Decimal | None = None,
+) -> Decimal | None:
     try:
         from app.pricing import calculate_final_price_usd, convert_usd_to_currency
         from app.services.fx import resolve_usd_rub_rate
@@ -659,6 +683,7 @@ def _suggest_price(product: Any, currency: str) -> Decimal | None:
         platform_fee_percent=Decimal(str(settings.platform_fee_percent)),
         fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
         risk_buffer_percent=Decimal(str(settings.risk_buffer_percent)),
+        markup_percent=markup_percent,
     )
     if currency == "USD":
         return calculation.final_price_usd
@@ -713,6 +738,24 @@ def _payload_first_decimal(payload: dict[str, Any], keys: tuple[str, ...]) -> De
     return None
 
 
+def _parse_int_token(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    matched = re.search(r"\d+", text)
+    if matched is None:
+        return None
+    return int(matched.group(0))
+
+
 def _extract_option_variant_items(option: dict[str, Any]) -> list[dict[str, Any]]:
     variant_containers = ("variants", "values", "items", "options")
     variant_value_keys = ("text", "label", "name", "value", "title")
@@ -729,9 +772,28 @@ def _extract_option_variant_items(option: dict[str, Any]) -> list[dict[str, Any]
             is_default: bool = False
             if isinstance(item, dict):
                 text = _payload_first_str(item, variant_value_keys)
-                raw_variant_id = _payload_first_str(item, ("variant_id", "id", "value_id"))
-                if raw_variant_id and raw_variant_id.strip().isdigit():
-                    variant_id = int(raw_variant_id.strip())
+                raw_variant_id = _payload_first_str(
+                    item,
+                    (
+                        "variant_id",
+                        "variantId",
+                        "id_variant",
+                        "id_var",
+                        "var_id",
+                        "value_id",
+                        "id_option_value",
+                        "option_value_id",
+                        "id",
+                    ),
+                )
+                variant_id = _parse_int_token(raw_variant_id)
+                if variant_id is None:
+                    for key, raw_value in item.items():
+                        if "id" not in str(key).lower():
+                            continue
+                        variant_id = _parse_int_token(raw_value)
+                        if variant_id is not None:
+                            break
                 is_default = bool(_payload_first_bool(item, ("default", "is_default")))
             elif item is not None:
                 text = str(item).strip()
@@ -1646,6 +1708,9 @@ def _upsert_manual_link(
     mapping_enabled: bool,
     marketplace_variant_id: int | None = None,
     marketplace_variant_name: str | None = None,
+    min_margin_percent: Decimal | None = None,
+    min_profit_usd: Decimal | None = None,
+    max_price: Decimal | None = None,
 ) -> dict[str, Any]:
     from sqlalchemy import select
 
@@ -1708,6 +1773,9 @@ def _upsert_manual_link(
                 enabled=mapping_enabled,
                 marketplace_variant_id=marketplace_variant_id,
                 marketplace_variant_name=marketplace_variant_name,
+                min_margin_percent=min_margin_percent,
+                min_profit_usd=min_profit_usd,
+                max_price=max_price,
             )
             db.add(mapping)
             mapping_created = True
@@ -1715,6 +1783,9 @@ def _upsert_manual_link(
             mapping.enabled = mapping_enabled
             mapping.marketplace_variant_id = marketplace_variant_id
             mapping.marketplace_variant_name = marketplace_variant_name
+            mapping.min_margin_percent = min_margin_percent
+            mapping.min_profit_usd = min_profit_usd
+            mapping.max_price = max_price
             db.add(mapping)
 
         db.commit()
@@ -1893,13 +1964,26 @@ def action_manual_link() -> int:
         print(f"Currency must be one of: {', '.join(VALID_CURRENCIES)}.")
         return 1
 
-    suggested_price = _suggest_price(primary_product, currency)
+    mapping_markup_percent = _ask_optional_percent_as_ratio(
+        "Markup rate percent for mapped rows (blank = automatic tier)",
+        default_percent=None,
+    )
+    if mapping_markup_percent is not None:
+        print(f"Using custom markup rate: {(mapping_markup_percent * Decimal('100'))}%")
+    else:
+        print("Using automatic markup tier based on cost.")
+
+    suggested_price = _suggest_price(
+        primary_product,
+        currency,
+        markup_percent=mapping_markup_percent,
+    )
     if suggested_price is None:
-        print("No automatic price suggestion available; enter the current marketplace price.")
+        print("No automatic markup-based price available; enter the current marketplace price.")
         if currency == "RUB":
             print("Tip: set MANUAL_USD_RUB_RATE or enable AUTO_USD_RUB_RATE for RUB suggestions.")
     else:
-        print(f"Suggested minimum safe price: {suggested_price} {currency}")
+        print(f"Calculated price from markup settings: {suggested_price} {currency}")
 
     price_default = snapshot.get("price") if snapshot else None
     if price_default is None:
@@ -1987,6 +2071,10 @@ def action_manual_link() -> int:
             print(f"  {_product_label(product)}{variant_text}")
     print(f"- title: {title}")
     print(f"- price: {price} {currency}")
+    if mapping_markup_percent is not None:
+        print(f"- mapping markup rate: {(mapping_markup_percent * Decimal('100'))}%")
+    else:
+        print("- mapping markup rate: automatic tier")
     print(f"- local offer enabled: {offer_enabled}")
     print(f"- mapping enabled: {mapping_enabled}")
     print(f"- requires buyer input: {requires_buyer_input}")
@@ -2026,6 +2114,9 @@ def action_manual_link() -> int:
                 mapping_enabled=mapping_enabled,
                 marketplace_variant_id=marketplace_variant_id,
                 marketplace_variant_name=marketplace_variant_name,
+                min_margin_percent=mapping_markup_percent,
+                min_profit_usd=None,
+                max_price=None,
             )
             successful += 1
         except Exception as exc:  # noqa: BLE001 - continue remaining links.
@@ -2049,6 +2140,18 @@ def action_manual_link() -> int:
                 f"- prices_updated: {sync_result.get('prices_updated')} | "
                 f"skipped: {sync_result.get('skipped')} | errors: {sync_result.get('errors')}"
             )
+            details = sync_result.get("details")
+            if isinstance(details, list):
+                skip_details = [
+                    item for item in details if isinstance(item, dict) and item.get("action") == "skipped"
+                ]
+                if skip_details:
+                    print("Skipped reasons (first 10):")
+                    for item in skip_details[:10]:
+                        print(
+                            f"- {item.get('marketplace')}:{item.get('marketplace_offer_id')} | "
+                            f"mapping={item.get('mapping_id')} | reason={item.get('reason')}"
+                        )
         except Exception as exc:  # noqa: BLE001 - keep manual link successful even if sync fails.
             print(f"Price sync failed after linking: {exc}")
     return 0 if successful > 0 and failed == 0 else (0 if successful > 0 else 1)
