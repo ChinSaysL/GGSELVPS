@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Generator
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
@@ -21,23 +21,6 @@ class FakeSupplierClient:
 
     def list_products(self) -> list[dict[str, Any]]:
         return self.products
-
-
-@dataclass
-class FakeMarketplaceClient:
-    create_calls: list[dict[str, Any]] = field(default_factory=list)
-    update_calls: list[tuple[str, dict[str, Any]]] = field(default_factory=list)
-    _next_id: int = 1
-
-    def create_offer(self, payload: dict[str, Any]) -> dict[str, Any]:
-        self.create_calls.append(payload)
-        offer_id = f"offer-{self._next_id}"
-        self._next_id += 1
-        return {"offer_id": offer_id}
-
-    def update_offer(self, offer_id: str, payload: dict[str, Any]) -> dict[str, Any]:
-        self.update_calls.append((offer_id, payload))
-        return {"offer_id": offer_id}
 
 
 def _settings_for_tests() -> Settings:
@@ -76,7 +59,9 @@ def db_session() -> Generator[Session, None, None]:
     yield from _db_session()
 
 
-def test_product_sync_creates_supplier_offer_and_mapping(db_session: Session) -> None:
+def test_product_sync_imports_supplier_products_without_creating_offers(
+    db_session: Session,
+) -> None:
     db = db_session
     supplier_client = FakeSupplierClient(
         products=[
@@ -91,13 +76,11 @@ def test_product_sync_creates_supplier_offer_and_mapping(db_session: Session) ->
             }
         ]
     )
-    marketplace_client = FakeMarketplaceClient()
 
     result = sync_products(
         db=db,
         settings=_settings_for_tests(),
         supplier_client=supplier_client,
-        marketplace_client=marketplace_client,
         marketplace_name="digiseller",
     )
     db.commit()
@@ -107,67 +90,22 @@ def test_product_sync_creates_supplier_offer_and_mapping(db_session: Session) ->
     mappings = db.execute(select(ProductMapping)).scalars().all()
 
     assert result["products_imported"] == 1
-    assert result["offers_created"] == 1
-    assert result["mappings_created"] == 1
+    assert result["supplier_products_created"] == 1
+    assert result["offers_created"] == 0
+    assert result["offers_updated"] == 0
+    assert result["offers_skipped"] == 1
+    assert result["manual_link_required"] == 1
+    assert result["mappings_created"] == 0
+    assert result["skipped"] == 0
     assert len(suppliers) == 1
-    assert len(offers) == 1
-    assert len(mappings) == 1
-    assert offers[0].marketplace_offer_id == "offer-1"
+    assert len(offers) == 0
+    assert len(mappings) == 0
 
 
-def test_product_sync_builds_bilingual_listing_payload(db_session: Session) -> None:
-    db = db_session
-    supplier_client = FakeSupplierClient(
-        products=[
-            {
-                "id": "202",
-                "title": "Steam Wallet 10 USD",
-                "category": "Gift Cards",
-                "denomination": "10",
-                "region": "Global",
-                "description": "Auto delivery",
-                "cost_usd": "6.00",
-                "image_url": "https://cdn.example.com/steam-10.png",
-            }
-        ]
-    )
-    marketplace_client = FakeMarketplaceClient()
-    settings = Settings(
-        _env_file=None,
-        default_currency="USD",
-        scheduler_enabled=False,
-        listing_title_template_en="[AUTO 24/7] Steam Gift Card {denomination} {currency} | {region}",
-        listing_title_template_ru="[AUTO 24/7] Steam Gift Card {denomination} {currency} | {region}",
-    )
-
-    result = sync_products(
-        db=db,
-        settings=settings,
-        supplier_client=supplier_client,
-        marketplace_client=marketplace_client,
-        marketplace_name="digiseller",
-    )
-    db.commit()
-
-    assert result["offers_created"] == 1
-    assert len(marketplace_client.create_calls) == 1
-
-    payload = marketplace_client.create_calls[0]
-    assert payload["title"] == "[AUTO 24/7] Steam Gift Card 10 USD | Global"
-    assert payload["title_localized"] == [
-        {"locale": "en-US", "value": "[AUTO 24/7] Steam Gift Card 10 USD | Global"},
-        {"locale": "ru-RU", "value": "[AUTO 24/7] Steam Gift Card 10 USD | Global"},
-    ]
-    assert payload["description_ru"].startswith("Мгновенная цифровая доставка")
-    assert payload["thumbnail_url"] == "https://cdn.example.com/steam-10.png"
-
-
-def test_product_sync_second_run_updates_existing_offer_without_duplicates(
+def test_product_sync_second_run_updates_supplier_without_touching_offers(
     db_session: Session,
 ) -> None:
     db = db_session
-    marketplace_client = FakeMarketplaceClient()
-
     first_pass_supplier = FakeSupplierClient(
         products=[
             {
@@ -193,14 +131,12 @@ def test_product_sync_second_run_updates_existing_offer_without_duplicates(
         db=db,
         settings=_settings_for_tests(),
         supplier_client=first_pass_supplier,
-        marketplace_client=marketplace_client,
         marketplace_name="digiseller",
     )
-    first_result = sync_products(
+    second_result = sync_products(
         db=db,
         settings=_settings_for_tests(),
         supplier_client=second_pass_supplier,
-        marketplace_client=marketplace_client,
         marketplace_name="digiseller",
     )
     db.commit()
@@ -210,53 +146,19 @@ def test_product_sync_second_run_updates_existing_offer_without_duplicates(
     mappings = db.execute(select(ProductMapping)).scalars().all()
 
     assert len(suppliers) == 1
-    assert len(offers) == 1
-    assert len(mappings) == 1
-    assert len(marketplace_client.create_calls) == 1
-    assert len(marketplace_client.update_calls) == 1
-    assert first_result["offers_updated"] == 1
+    assert len(offers) == 0
+    assert len(mappings) == 0
+    assert second_result["supplier_products_updated"] == 1
+    assert second_result["offers_created"] == 0
+    assert second_result["offers_updated"] == 0
+    assert second_result["offers_skipped"] == 1
+    assert second_result["manual_link_required"] == 1
     assert suppliers[0].title == "PSN Card 20 USD Updated"
+    assert suppliers[0].cost_usd == Decimal("11.50")
 
 
-def test_product_sync_creates_offer_when_category_is_missing(
-    db_session: Session,
-) -> None:
+def test_product_sync_does_not_auto_link_existing_offers(db_session: Session) -> None:
     db = db_session
-    supplier_client = FakeSupplierClient(
-        products=[
-            {
-                "id": "900",
-                "title": "Unknown Product",
-                "cost_usd": "3.50",
-            }
-        ]
-    )
-    marketplace_client = FakeMarketplaceClient()
-
-    result = sync_products(
-        db=db,
-        settings=_settings_for_tests(),
-        supplier_client=supplier_client,
-        marketplace_client=marketplace_client,
-        marketplace_name="ggsel",
-    )
-    db.commit()
-
-    suppliers = db.execute(select(SupplierProduct)).scalars().all()
-    offers = db.execute(select(MarketplaceOffer)).scalars().all()
-
-    assert result["products_imported"] == 1
-    assert result["skipped"] == 0
-    assert result["offers_created"] == 1
-    assert len(suppliers) == 1
-    assert len(offers) == 1
-
-
-def test_product_sync_links_mapping_when_offer_already_exists_without_mapping(
-    db_session: Session,
-) -> None:
-    db = db_session
-
     supplier = SupplierProduct(
         supplier="gengine",
         supplier_product_id="4000",
@@ -276,7 +178,7 @@ def test_product_sync_links_mapping_when_offer_already_exists_without_mapping(
         marketplace="digiseller",
         marketplace_offer_id="existing-42",
         supplier_product_id=supplier.id,
-        title="Old Offer Title",
+        title="Existing Manual Offer",
         price=Decimal("12.00"),
         currency="USD",
         is_enabled=False,
@@ -294,12 +196,11 @@ def test_product_sync_links_mapping_when_offer_already_exists_without_mapping(
             }
         ]
     )
-    marketplace_client = FakeMarketplaceClient()
+
     result = sync_products(
         db=db,
         settings=_settings_for_tests(),
         supplier_client=supplier_client,
-        marketplace_client=marketplace_client,
         marketplace_name="digiseller",
     )
     db.commit()
@@ -307,8 +208,75 @@ def test_product_sync_links_mapping_when_offer_already_exists_without_mapping(
     mappings = db.execute(select(ProductMapping)).scalars().all()
     offers = db.execute(select(MarketplaceOffer)).scalars().all()
 
-    assert result["offers_updated"] == 1
-    assert result["mappings_created"] == 1
-    assert len(mappings) == 1
+    assert result["offers_created"] == 0
+    assert result["offers_updated"] == 0
+    assert result["mappings_created"] == 0
+    assert result["manual_link_required"] == 1
+    assert len(mappings) == 0
     assert len(offers) == 1
     assert offers[0].marketplace_offer_id == "existing-42"
+    assert offers[0].title == "Existing Manual Offer"
+
+
+def test_product_sync_without_marketplace_key_imports_products_without_link_warning(
+    db_session: Session,
+) -> None:
+    db = db_session
+    supplier_client = FakeSupplierClient(
+        products=[
+            {
+                "id": "900",
+                "title": "Unknown Product",
+                "cost_usd": "3.50",
+            }
+        ]
+    )
+
+    result = sync_products(
+        db=db,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_name=None,
+    )
+    db.commit()
+
+    suppliers = db.execute(select(SupplierProduct)).scalars().all()
+    offers = db.execute(select(MarketplaceOffer)).scalars().all()
+
+    assert result["products_imported"] == 1
+    assert result["manual_link_required"] == 0
+    assert result["offers_skipped"] == 0
+    assert result["skipped"] == 0
+    assert len(suppliers) == 1
+    assert len(offers) == 0
+
+
+def test_product_sync_skips_products_missing_core_fields(db_session: Session) -> None:
+    db = db_session
+    supplier_client = FakeSupplierClient(
+        products=[
+            {"id": "missing-title", "cost_usd": "1.00"},
+            {"title": "Missing Cost"},
+        ]
+    )
+
+    result = sync_products(
+        db=db,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_name="ggsel",
+    )
+    db.commit()
+
+    suppliers = db.execute(select(SupplierProduct)).scalars().all()
+    offers = db.execute(select(MarketplaceOffer)).scalars().all()
+    mappings = db.execute(select(ProductMapping)).scalars().all()
+
+    assert result["products_received"] == 2
+    assert result["products_imported"] == 0
+    assert result["skipped"] == 2
+    assert result["manual_link_required"] == 0
+    assert result["offers_skipped"] == 0
+    assert len(suppliers) == 0
+    assert len(offers) == 0
+    assert len(mappings) == 0

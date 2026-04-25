@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
@@ -42,6 +42,20 @@ class MappingImportItem(BaseModel):
 
 class MappingImportRequest(BaseModel):
     items: list[MappingImportItem] = Field(default_factory=list)
+
+
+class ManualOfferLinkRequest(BaseModel):
+    marketplace: Literal["digiseller", "ggsel"]
+    marketplace_offer_id: str
+    supplier_product_id: int
+    title: str
+    price: Decimal
+    currency: str = "RUB"
+    offer_enabled: bool = False
+    mapping_enabled: bool = True
+    min_margin_percent: Decimal | None = None
+    min_profit_usd: Decimal | None = None
+    max_price: Decimal | None = None
 
 
 def _serialize_datetime(value: datetime | None) -> str | None:
@@ -282,3 +296,95 @@ def disable_mapping(mapping_id: int, db: Session = Depends(get_db)) -> dict[str,
 @app.post("/sync/orders")
 def sync_orders() -> dict[str, int | str]:
     return run_order_sync()
+
+
+@app.post("/offers/manual-link")
+def manual_link_offer(
+    payload: ManualOfferLinkRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    supplier = db.get(SupplierProduct, payload.supplier_product_id)
+    if supplier is None:
+        raise HTTPException(status_code=404, detail="Supplier product not found.")
+
+    offer_stmt = select(MarketplaceOffer).where(
+        MarketplaceOffer.marketplace == payload.marketplace,
+        MarketplaceOffer.marketplace_offer_id == payload.marketplace_offer_id,
+    )
+    offer = db.execute(offer_stmt).scalars().first()
+    offer_created = False
+
+    if offer is None:
+        offer = MarketplaceOffer(
+            marketplace=payload.marketplace,
+            marketplace_offer_id=payload.marketplace_offer_id,
+            supplier_product_id=payload.supplier_product_id,
+            title=payload.title,
+            price=payload.price,
+            currency=payload.currency.upper(),
+            is_enabled=payload.offer_enabled,
+            last_synced_at=datetime.utcnow(),
+        )
+        db.add(offer)
+        db.flush()
+        offer_created = True
+    else:
+        offer.supplier_product_id = payload.supplier_product_id
+        offer.title = payload.title
+        offer.price = payload.price
+        offer.currency = payload.currency.upper()
+        offer.is_enabled = payload.offer_enabled
+        offer.last_synced_at = datetime.utcnow()
+        db.add(offer)
+        db.flush()
+
+    mapping_stmt = select(ProductMapping).where(
+        ProductMapping.supplier_product_id == payload.supplier_product_id,
+        ProductMapping.marketplace_offer_id == offer.id,
+    )
+    mapping = db.execute(mapping_stmt).scalars().first()
+    mapping_created = False
+
+    if mapping is None:
+        mapping = ProductMapping(
+            supplier_product_id=payload.supplier_product_id,
+            marketplace_offer_id=offer.id,
+            enabled=payload.mapping_enabled,
+            min_margin_percent=payload.min_margin_percent,
+            min_profit_usd=payload.min_profit_usd,
+            max_price=payload.max_price,
+        )
+        db.add(mapping)
+        mapping_created = True
+    else:
+        mapping.enabled = payload.mapping_enabled
+        mapping.min_margin_percent = payload.min_margin_percent
+        mapping.min_profit_usd = payload.min_profit_usd
+        mapping.max_price = payload.max_price
+        db.add(mapping)
+
+    db.commit()
+    db.refresh(offer)
+    db.refresh(mapping)
+
+    return {
+        "status": "ok",
+        "offer_created": offer_created,
+        "mapping_created": mapping_created,
+        "offer": {
+            "id": offer.id,
+            "marketplace": offer.marketplace,
+            "marketplace_offer_id": offer.marketplace_offer_id,
+            "supplier_product_id": offer.supplier_product_id,
+            "title": offer.title,
+            "price": _serialize_decimal(offer.price),
+            "currency": offer.currency,
+            "is_enabled": offer.is_enabled,
+        },
+        "mapping": {
+            "id": mapping.id,
+            "enabled": mapping.enabled,
+            "supplier_product_id": mapping.supplier_product_id,
+            "marketplace_offer_id": mapping.marketplace_offer_id,
+        },
+    }

@@ -1,6 +1,6 @@
 # Gift-Card VPS Middleware (G-Engine <-> GGSEL/Digiseller)
 
-Backend service for automatic gift-card resale with safe cost-based pricing, balance-aware stock control, and idempotent order handling.
+Backend service for gift-card resale automation with safe cost-based pricing, balance-aware stock control, and idempotent order handling.
 
 This repository currently includes Stage 1-5 foundations:
 - FastAPI skeleton
@@ -10,9 +10,12 @@ This repository currently includes Stage 1-5 foundations:
 - Pricing engine (no competitor data)
 - Stock rule engine
 - API client layer with confirmed endpoint wiring where available, and explicit TODO `NotImplementedError` for unresolved operations
-- Product sync service with supplier product upsert, marketplace offer create/update flow, and mapping auto-linking
-- Tests for pricing, stock rules, and idempotency decisions
+- Product sync service that imports/upserts G-Engine supplier products only
+- Manual marketplace offer linking via `/offers/manual-link` and `/mappings/import`
+- Tests for pricing, stock rules, product import, client behavior, and idempotency decisions
 - Docker + docker-compose deployment baseline
+
+Important: this app does not auto-create marketplace listings. Create GGSEL/Digiseller offers manually in the marketplace, then link them to imported supplier products inside this app.
 
 API integrations are partially implemented and continue to evolve as endpoint mappings are confirmed from official docs.
 
@@ -44,25 +47,29 @@ Compatibility aliases are also supported:
 
 If `DEFAULT_CURRENCY=RUB`, set `MANUAL_USD_RUB_RATE` before running price sync logic.
 
-For Digiseller auto-listing:
-- Set `DIGISELLER_CATEGORY_ID` (required for product creation).
-- Optional: set `DIGISELLER_CATEGORY_OWNER` (default `3` for GGSEL marketplace category).
-- Optional: set `DIGISELLER_CONTENT_TYPE` (default `Text`).
+There are intentionally no listing template, category, or publish-switch settings. Marketplace listings are created manually outside this app.
 
-Bilingual listing templates are configurable:
-- `LISTING_TITLE_TEMPLATE_EN`
-- `LISTING_TITLE_TEMPLATE_RU`
-- `LISTING_DESCRIPTION_TEMPLATE_EN`
-- `LISTING_DESCRIPTION_TEMPLATE_RU`
+For first VPS testing, keep `SCHEDULER_ENABLED=false` and trigger actions manually. Enable the scheduler only after product sync, price sync, stock sync, and order sync are fully implemented and verified.
 
-Supported template placeholders:
-- `{supplier_title}`
-- `{denomination}`
-- `{currency}`
-- `{region}`
-- `{category}`
-- `{delivery_type}`
-- `{delivery_type_ru}`
+## Management menu
+
+The repo includes a small helper menu:
+
+```bash
+python manage.py
+```
+
+Useful direct commands:
+
+```bash
+python manage.py check-config
+python manage.py init-db
+python manage.py check
+python manage.py run-api
+python manage.py sync-products
+python manage.py list-products
+python manage.py manual-link-example
+```
 
 ## Local setup (test PC)
 
@@ -85,15 +92,19 @@ cp .env.example .env
 4. Run checks:
 
 ```bash
-python -m pytest
-python -m ruff check .
-python -m mypy app
+python manage.py check
 ```
 
 5. Run API:
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+python manage.py run-api
+```
+
+6. Or run the local admin menu:
+
+```bash
+python manage.py
 ```
 
 ## Docker run
@@ -126,33 +137,41 @@ sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plug
 3. Clone repository on VPS.
 4. Create `.env` from `.env.example`.
 5. Add API keys.
-6. Set `MANUAL_USD_RUB_RATE` if using RUB listings.
-7. Start service:
+6. Set `MANUAL_USD_RUB_RATE` if using RUB prices.
+7. Run validation before starting the service:
+
+```bash
+python manage.py check-config
+python manage.py init-db
+python manage.py check
+```
+
+8. Start service:
 
 ```bash
 docker compose up -d
 ```
 
-8. Check logs:
+9. Check logs:
 
 ```bash
 docker compose logs -f
 ```
 
-9. Add VPS public IP to G-Engine production whitelist.
-10. Trigger manual sync endpoints after API clients are implemented.
+10. Add VPS public IP to G-Engine production whitelist.
+11. Trigger manual sync endpoints after API clients are implemented.
 
 ## Safe first-run procedure
 
-1. Run service with API clients in dry-run mode if implemented.
-2. Sync G-Engine products.
-3. Check calculated prices.
-4. Create only 1-3 test offers first.
+1. Sync G-Engine products.
+2. Check imported products and calculated prices.
+3. Create a small number of marketplace offers manually in GGSEL/Digiseller.
+4. Link those offers with `/offers/manual-link`.
 5. Test one cheap product purchase manually.
 6. Confirm delivery works.
 7. Enable stock sync.
 8. Enable order sync.
-9. Gradually enable more products.
+9. Gradually link more products.
 
 ## Current admin endpoints
 
@@ -160,6 +179,7 @@ docker compose logs -f
 - `GET /balance`
 - `GET /products`
 - `GET /offers`
+- `POST /offers/manual-link`
 - `POST /sync/products`
 - `POST /sync/prices`
 - `POST /sync/stock`
@@ -175,6 +195,7 @@ docker compose logs -f
 - No competitor pricing data is used.
 - No competitor scraping is implemented.
 - No browser automation is used.
-- Digiseller create/update listing flows are implemented for base product sync.
-- GGSEL listing creation/update endpoints remain unresolved in public docs and are still explicit TODOs.
+- No automatic marketplace listing creation is implemented.
+- Base listing edits are intentionally disabled in client code.
+- GGSEL/Digiseller offers must be created manually, then linked to supplier products.
 - Automatic thumbnail transfer from G-Engine is not guaranteed by current public API contracts; set preview images manually when needed.
