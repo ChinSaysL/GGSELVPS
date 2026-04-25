@@ -195,7 +195,7 @@ def test_price_sync_updates_digiseller_rub_price_for_linked_offer(
     assert result["details"][0]["action"] == "updated"
 
 
-def test_price_sync_skips_rub_without_manual_rate(db_session: Session) -> None:
+def test_price_sync_skips_rub_without_manual_or_auto_rate(db_session: Session) -> None:
     _supplier, offer, _mapping = _linked_offer(
         db_session,
         offer_price=Decimal("1700.00"),
@@ -203,9 +203,12 @@ def test_price_sync_skips_rub_without_manual_rate(db_session: Session) -> None:
     )
     client = FakeMarketplacePriceClient()
 
+    settings = _settings_for_tests(default_currency="RUB")
+    settings.auto_usd_rub_rate = False
+
     result = sync_offer_prices(
         db=db_session,
-        settings=_settings_for_tests(default_currency="RUB"),
+        settings=settings,
         marketplace_clients={"digiseller": client},
         dry_run=False,
         refresh_supplier_prices=False,
@@ -216,6 +219,41 @@ def test_price_sync_skips_rub_without_manual_rate(db_session: Session) -> None:
     assert client.calls == []
     assert offer.price == Decimal("1700.00")
     assert "MANUAL_USD_RUB_RATE" in result["details"][0]["reason"]
+
+
+def test_price_sync_uses_auto_resolved_fx_rate_when_manual_rate_missing(
+    db_session: Session,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    supplier, offer, _mapping = _linked_offer(
+        db_session,
+        offer_price=Decimal("1700.00"),
+        offer_currency="RUB",
+    )
+    client = FakeMarketplacePriceClient()
+    settings = _settings_for_tests(default_currency="RUB", manual_usd_rub_rate=None)
+
+    monkeypatch.setattr("app.services.price_sync.resolve_usd_rub_rate", lambda _settings: Decimal("95"))
+
+    result = sync_offer_prices(
+        db=db_session,
+        settings=settings,
+        marketplace_clients={"digiseller": client},
+        dry_run=False,
+        refresh_supplier_prices=False,
+    )
+
+    expected_usd = calculate_final_price_usd(
+        supplier.cost_usd,
+        platform_fee_percent=Decimal(str(settings.platform_fee_percent)),
+        fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
+        risk_buffer_percent=Decimal(str(settings.risk_buffer_percent)),
+    ).final_price_usd
+    expected_rub = convert_usd_to_currency(expected_usd, "RUB", Decimal("95"))
+
+    assert result["prices_updated"] == 1
+    assert offer.price == expected_rub
+    assert client.calls == [("5850465", float(expected_rub), "RUB")]
 
 
 def test_price_sync_respects_mapping_max_price(db_session: Session) -> None:

@@ -6,6 +6,7 @@ from app.config import Settings
 from app.services.order_sync import run_order_sync
 from app.services.price_sync import run_price_sync
 from app.services.product_sync import run_product_sync
+from app.services.fx import refresh_usd_rub_rate
 from app.services.stock_sync import run_stock_sync
 from app.utils.logging import get_logger, log_event
 
@@ -46,6 +47,13 @@ def start_scheduler(settings: Settings) -> None:
         trigger="interval",
         seconds=settings.order_poll_interval_seconds,
         id="order_sync",
+        replace_existing=True,
+    )
+    scheduler.add_job(
+        lambda: refresh_usd_rub_rate(settings),
+        trigger="cron",
+        hour=settings.usd_rub_rate_refresh_hour_utc,
+        id="usd_rub_rate_refresh",
         replace_existing=True,
     )
     scheduler.start()

@@ -14,6 +14,7 @@ from app.config import Settings, get_settings
 from app.db import SessionLocal
 from app.models import MarketplaceOffer, ProductMapping, SupplierProduct, SyncRun
 from app.pricing import PricingConfigError, calculate_final_price_usd, convert_usd_to_currency
+from app.services.fx import resolve_usd_rub_rate
 from app.services.product_sync import sync_products
 from app.utils.logging import get_logger, log_event
 
@@ -238,14 +239,14 @@ def _calculate_price_plan(
     )
 
     currency = (offer.currency or settings.default_currency).upper()
+    usd_rub_rate: Decimal | None = None
+    if currency == "RUB":
+        usd_rub_rate = resolve_usd_rub_rate(settings)
+
     recommended_price = convert_usd_to_currency(
         calculation.final_price_usd,
         currency,
-        manual_usd_rub_rate=(
-            Decimal(str(settings.manual_usd_rub_rate))
-            if settings.manual_usd_rub_rate is not None
-            else None
-        ),
+        manual_usd_rub_rate=usd_rub_rate,
     )
 
     max_price = _to_decimal(mapping.max_price)

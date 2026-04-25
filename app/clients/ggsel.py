@@ -53,6 +53,33 @@ class GGSELClient(BaseAPIClient):
                 return [item for item in data if isinstance(item, dict)]
         return []
 
+    @staticmethod
+    def _matches_offer_id(item: dict[str, Any], offer_id: str) -> bool:
+        candidates = (
+            "id",
+            "goods_id",
+            "good_id",
+            "product_id",
+        )
+        normalized_offer_id = offer_id.strip()
+        for key in candidates:
+            value = item.get(key)
+            if value is None:
+                continue
+            if str(value).strip() == normalized_offer_id:
+                return True
+        return False
+
+    def get_offer_by_id(self, offer_id: str) -> dict[str, Any] | None:
+        normalized = offer_id.strip()
+        if not normalized:
+            return None
+
+        for item in self.list_offers():
+            if self._matches_offer_id(item, normalized):
+                return item
+        return None
+
     def create_offer(self, payload: dict[str, Any]) -> dict[str, Any]:
         _ = payload
         # TODO: Seller API docs used here do not expose a generic "create offer" endpoint.

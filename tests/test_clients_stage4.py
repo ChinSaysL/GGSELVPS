@@ -226,3 +226,55 @@ def test_digiseller_listing_create_and_base_update_are_disabled() -> None:
     with pytest.raises(NotImplementedError):
         client.update_offer(offer_id="10", payload={"title": "x"})
     client.close()
+
+
+def test_ggsel_get_offer_by_id_filters_from_seller_goods() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api_sellers/api/seller-goods"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "data": [
+                        {"id": "101", "name": "PSN 100 TRY"},
+                        {"id": "5850465", "name": "PSN 250 TRY", "price": "7.00"},
+                    ]
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GGSELClient(base_url="https://seller.ggsel.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    offer = client.get_offer_by_id("5850465")
+    client.close()
+
+    assert offer is not None
+    assert offer["id"] == "5850465"
+
+
+def test_digiseller_get_offer_by_id_uses_products_list_when_available() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/products/list"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "items": [
+                        {
+                            "product_id": "5850465",
+                            "name": "Playstation testing 250 TL",
+                            "price": "7.00",
+                            "currency": "USD",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    offer = client.get_offer_by_id("5850465")
+    client.close()
+
+    assert offer is not None
+    assert str(offer["product_id"]) == "5850465"

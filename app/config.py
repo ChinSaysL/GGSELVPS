@@ -48,6 +48,10 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("MANUAL_USD_RUB_RATE"),
     )
+    auto_usd_rub_rate: bool = True
+    usd_rub_rate_url: str = "https://www.cbr-xml-daily.ru/daily_json.js"
+    usd_rub_rate_cache_path: str = "data/usd_rub_rate_cache.json"
+    usd_rub_rate_refresh_hour_utc: int = 2
     default_currency: Literal["USD", "RUB"] = "RUB"
 
     order_poll_interval_seconds: int = 60
@@ -93,6 +97,9 @@ class Settings(BaseSettings):
 
         if self.manual_usd_rub_rate is not None and self.manual_usd_rub_rate <= 0:
             raise ValueError("MANUAL_USD_RUB_RATE must be greater than 0 when set.")
+
+        if not 0 <= int(self.usd_rub_rate_refresh_hour_utc) <= 23:
+            raise ValueError("usd_rub_rate_refresh_hour_utc must be within [0, 23].")
 
         return self
 

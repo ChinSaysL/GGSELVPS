@@ -113,8 +113,11 @@ def action_check_config() -> int:
     warnings: list[str] = []
     if not settings.gengine_api_key:
         missing.append("GENGINE_API_KEY")
-    if settings.default_currency == "RUB" and settings.manual_usd_rub_rate is None:
-        warnings.append("MANUAL_USD_RUB_RATE is needed before RUB price suggestions/sync can run.")
+    if settings.default_currency == "RUB":
+        if settings.manual_usd_rub_rate is None and not settings.auto_usd_rub_rate:
+            warnings.append(
+                "Set MANUAL_USD_RUB_RATE or enable AUTO_USD_RUB_RATE for RUB suggestions/sync."
+            )
 
     if missing:
         print("\nMissing before product import testing:")
@@ -633,8 +636,9 @@ def _default_buyer_input_help(label: str) -> str:
 
 def _suggest_price(product: Any, currency: str) -> Decimal | None:
     try:
-        from app.config import get_settings
         from app.pricing import calculate_final_price_usd, convert_usd_to_currency
+        from app.services.fx import resolve_usd_rub_rate
+        from app.config import get_settings
     except ImportError:
         return None
 
@@ -647,13 +651,147 @@ def _suggest_price(product: Any, currency: str) -> Decimal | None:
     )
     if currency == "USD":
         return calculation.final_price_usd
-    if currency == "RUB" and settings.manual_usd_rub_rate is not None:
+    if currency == "RUB":
+        try:
+            usd_rub_rate = resolve_usd_rub_rate(settings)
+        except Exception:
+            return None
         return convert_usd_to_currency(
             calculation.final_price_usd,
             "RUB",
-            manual_usd_rub_rate=Decimal(str(settings.manual_usd_rub_rate)),
+            manual_usd_rub_rate=usd_rub_rate,
         )
     return None
+
+
+def _payload_first_str(payload: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _payload_first_bool(payload: dict[str, Any], keys: tuple[str, ...]) -> bool | None:
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            return value
+        text = str(value).strip().lower()
+        if text in {"1", "true", "yes", "on"}:
+            return True
+        if text in {"0", "false", "no", "off"}:
+            return False
+    return None
+
+
+def _payload_first_decimal(payload: dict[str, Any], keys: tuple[str, ...]) -> Decimal | None:
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            continue
+    return None
+
+
+def _extract_marketplace_snapshot_fields(payload: dict[str, Any]) -> dict[str, Any]:
+    title = _payload_first_str(
+        payload,
+        (
+            "title",
+            "name",
+            "product_name",
+            "good_name",
+            "goods_name",
+            "caption",
+        ),
+    )
+    denomination = _payload_first_str(payload, ("denomination", "nominal", "variant", "option"))
+    currency = _payload_first_str(payload, ("currency", "currency_code", "valute", "curr"))
+    price = _payload_first_decimal(payload, ("price", "cost", "amount", "sum"))
+    is_enabled = _payload_first_bool(payload, ("enabled", "is_enabled", "active", "is_active"))
+    requires_buyer_input = _payload_first_bool(
+        payload,
+        ("requires_buyer_input", "need_user_data", "require_input"),
+    )
+    buyer_input_label = _payload_first_str(
+        payload,
+        ("buyer_input_label", "user_data_label", "input_label"),
+    )
+    buyer_input_help = _payload_first_str(
+        payload,
+        ("buyer_input_help", "user_data_help", "input_help"),
+    )
+    return {
+        "title": title,
+        "denomination": denomination,
+        "currency": currency.upper() if currency else None,
+        "price": price,
+        "is_enabled": is_enabled,
+        "requires_buyer_input": requires_buyer_input,
+        "buyer_input_label": buyer_input_label,
+        "buyer_input_help": buyer_input_help,
+    }
+
+
+def _fetch_marketplace_offer_snapshot(marketplace: str, marketplace_offer_id: str) -> dict[str, Any] | None:
+    try:
+        from app.clients import DigisellerClient, GGSELClient
+        from app.config import get_settings
+    except ImportError:
+        return None
+
+    settings = get_settings()
+    client: Any | None = None
+    try:
+        if marketplace == "digiseller" and settings.digiseller_api_key:
+            client = DigisellerClient(settings.digiseller_base_url, settings.digiseller_api_key)
+        elif marketplace == "ggsel" and settings.ggsel_api_key:
+            client = GGSELClient(settings.ggsel_base_url, settings.ggsel_api_key)
+        else:
+            return None
+
+        raw = client.get_offer_by_id(marketplace_offer_id)
+        if not isinstance(raw, dict):
+            return None
+
+        fields = _extract_marketplace_snapshot_fields(raw)
+        fields["raw"] = raw
+        return fields
+    except Exception:
+        return None
+    finally:
+        if client is not None:
+            client.close()
+
+
+def _normalize_denom_text(value: str | None) -> str:
+    if not value:
+        return ""
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def _snapshot_matches_selected_product(product: Any, snapshot: dict[str, Any]) -> bool:
+    product_denom = _normalize_denom_text(getattr(product, "denomination", None))
+    if not product_denom:
+        return True
+
+    snapshot_denom = _normalize_denom_text(snapshot.get("denomination"))
+    snapshot_title = _normalize_denom_text(snapshot.get("title"))
+
+    if snapshot_denom and product_denom in snapshot_denom:
+        return True
+    if snapshot_title and product_denom in snapshot_title:
+        return True
+    return False
 
 
 def _choose_product_interactively() -> Any | None:
@@ -851,7 +989,31 @@ def action_manual_link() -> int:
 
     print(f"\nSelected: {_product_label(product)}")
     marketplace_offer_id = _ask_text("Marketplace offer/product id")
-    currency = _ask_text("Marketplace currency", default="RUB").upper()
+
+    snapshot = _fetch_marketplace_offer_snapshot(marketplace, marketplace_offer_id)
+    if snapshot is None:
+        print("Could not fetch marketplace item details by ID; continuing with manual values.")
+    else:
+        print("Fetched marketplace item by ID:")
+        print(f"- title: {snapshot.get('title') or '(unknown)'}")
+        print(f"- denomination: {snapshot.get('denomination') or '(not provided)'}")
+        print(f"- price: {snapshot.get('price') if snapshot.get('price') is not None else '(unknown)'}")
+        print(f"- currency: {snapshot.get('currency') or '(unknown)'}")
+
+        if not _snapshot_matches_selected_product(product, snapshot):
+            print("Warning: selected G-Engine denomination does not match fetched marketplace item.")
+            print(f"- G-Engine denomination: {getattr(product, 'denomination', None) or '(none)'}")
+            print(f"- marketplace denomination: {snapshot.get('denomination') or '(not provided)'}")
+            print(f"- marketplace title: {snapshot.get('title') or '(not provided)'}")
+            if not _ask_bool("Continue linking anyway?", default=False):
+                print("Cancelled.")
+                return 0
+
+    currency_default = snapshot.get("currency") if snapshot else None
+    if currency_default not in VALID_CURRENCIES:
+        currency_default = "RUB"
+
+    currency = _ask_text("Marketplace currency", default=currency_default).upper()
     if currency not in VALID_CURRENCIES:
         print(f"Currency must be one of: {', '.join(VALID_CURRENCIES)}.")
         return 1
@@ -860,28 +1022,49 @@ def action_manual_link() -> int:
     if suggested_price is None:
         print("No automatic price suggestion available; enter the current marketplace price.")
         if currency == "RUB":
-            print("Tip: set MANUAL_USD_RUB_RATE to enable RUB suggestions and price sync.")
+            print("Tip: set MANUAL_USD_RUB_RATE or enable AUTO_USD_RUB_RATE for RUB suggestions.")
     else:
         print(f"Suggested minimum safe price: {suggested_price} {currency}")
 
-    price = _ask_decimal("Marketplace price", default=suggested_price)
-    title = _ask_text("Local offer title", default=_default_offer_title(product))
-    offer_enabled = _ask_bool("Mark local offer enabled?", default=False)
+    price_default = snapshot.get("price") if snapshot else None
+    if price_default is None:
+        price_default = suggested_price
+    price = _ask_decimal("Marketplace price", default=price_default)
+
+    title_default = _default_offer_title(product)
+    if snapshot and snapshot.get("title"):
+        title_default = str(snapshot["title"])
+    title = _ask_text("Local offer title", default=title_default)
+
+    offer_enabled_default = bool(snapshot.get("is_enabled")) if snapshot else False
+    offer_enabled = _ask_bool("Mark local offer enabled?", default=offer_enabled_default)
     mapping_enabled = _ask_bool("Enable this product mapping?", default=True)
+
+    requires_buyer_input_default = bool(snapshot.get("requires_buyer_input")) if snapshot else False
     requires_buyer_input = _ask_bool(
         "Does this listing require buyer text/input, like a Steam friend code?",
-        default=False,
+        default=requires_buyer_input_default,
     )
     buyer_input_label: str | None = None
     buyer_input_help: str | None = None
     if requires_buyer_input:
+        buyer_input_label_default = (
+            str(snapshot.get("buyer_input_label"))
+            if snapshot and snapshot.get("buyer_input_label")
+            else _default_buyer_input_label(product)
+        )
         buyer_input_label = _ask_text(
             "Buyer input label",
-            default=_default_buyer_input_label(product),
+            default=buyer_input_label_default,
+        )
+        buyer_input_help_default = (
+            str(snapshot.get("buyer_input_help"))
+            if snapshot and snapshot.get("buyer_input_help")
+            else _default_buyer_input_help(buyer_input_label)
         )
         buyer_input_help = _ask_text(
             "Buyer input help text",
-            default=_default_buyer_input_help(buyer_input_label),
+            default=buyer_input_help_default,
             required=False,
         )
 

@@ -46,7 +46,12 @@ Compatibility aliases are also supported:
 - `GGSELToken`
 - `DigisellerToken`
 
-If `DEFAULT_CURRENCY=RUB`, set `MANUAL_USD_RUB_RATE` before running price preview or price sync. The app does not fetch live FX rates in v1.
+For RUB pricing, the app resolves USD/RUB using this priority:
+- `MANUAL_USD_RUB_RATE` when explicitly set
+- automatic daily fetch (cached) when `AUTO_USD_RUB_RATE=true`
+
+Default automatic source is `USD_RUB_RATE_URL=https://www.cbr-xml-daily.ru/daily_json.js`.
+Cache path is controlled by `USD_RUB_RATE_CACHE_PATH`.
 
 There are intentionally no listing template, category, or publish-switch settings. Marketplace listings are created manually outside this app.
 
@@ -79,8 +84,9 @@ python manage.py manual-link-example
 - choosing `digiseller` or `ggsel`
 - pasting the G-Engine product link or product ID
 - selecting the exact imported denomination/sub-item for that G-Engine product
-- entering the marketplace offer/product ID
-- entering the local marketplace price
+- entering the marketplace offer/product ID and attempting to fetch marketplace metadata
+- confirming denomination match between selected G-Engine row and fetched marketplace item
+- entering/confirming marketplace price and currency (prefilled when fetched)
 - optionally marking that buyer text is required, such as a Steam friend code
 
 The current link model is one marketplace offer/product ID to one exact G-Engine denomination/sub-item. If a marketplace page has choices such as `250 TRY` and `500 TRY`, create or identify the separate marketplace product/variant IDs first, then link each one separately.
@@ -158,7 +164,7 @@ sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plug
 3. Clone repository on VPS.
 4. Create `.env` from `.env.example`.
 5. Add API keys.
-6. Set `MANUAL_USD_RUB_RATE` if using RUB prices.
+6. For RUB prices, either set `MANUAL_USD_RUB_RATE` or keep automatic FX enabled (`AUTO_USD_RUB_RATE=true`).
 7. Run validation before starting the service:
 
 ```bash

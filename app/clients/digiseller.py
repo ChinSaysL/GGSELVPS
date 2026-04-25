@@ -39,6 +39,85 @@ class DigisellerClient(BaseAPIClient):
             "Please provide endpoint details for listing all seller offers."
         )
 
+    @staticmethod
+    def _matches_offer_id(item: dict[str, Any], offer_id: str) -> bool:
+        candidates = (
+            "id",
+            "product_id",
+            "productId",
+            "goods_id",
+            "good_id",
+        )
+        normalized_offer_id = offer_id.strip()
+        for key in candidates:
+            value = item.get(key)
+            if value is None:
+                continue
+            if str(value).strip() == normalized_offer_id:
+                return True
+        return False
+
+    @staticmethod
+    def _extract_offer(item: dict[str, Any], offer_id: str) -> dict[str, Any] | None:
+        if DigisellerClient._matches_offer_id(item, offer_id):
+            return item
+
+        for key in ("items", "products", "data", "result"):
+            value = item.get(key)
+            if isinstance(value, list):
+                for child in value:
+                    if isinstance(child, dict) and DigisellerClient._matches_offer_id(child, offer_id):
+                        return child
+            if isinstance(value, dict):
+                matched = DigisellerClient._extract_offer(value, offer_id)
+                if matched is not None:
+                    return matched
+        return None
+
+    def get_offer_by_id(self, offer_id: str) -> dict[str, Any] | None:
+        normalized = offer_id.strip()
+        if not normalized:
+            return None
+
+        api_offer_id: int | str
+        try:
+            api_offer_id = int(normalized)
+        except ValueError:
+            api_offer_id = normalized
+
+        attempts: list[tuple[str, str, dict[str, Any] | None]] = [
+            ("POST", "/api/products/list", {"ids": [api_offer_id]}),
+            ("POST", "/api/products/list", {"product_ids": [api_offer_id]}),
+            ("POST", "/api/products/list", {"products": [api_offer_id]}),
+            ("GET", f"/api/products/{normalized}", None),
+            ("GET", f"/api/product/{normalized}", None),
+        ]
+
+        for method, path, body in attempts:
+            try:
+                response = self._request_json(
+                    method=method,
+                    path=path,
+                    params=self._auth_query_params(),
+                    json_body=body,
+                )
+            except Exception:
+                continue
+
+            if isinstance(response, dict):
+                extracted = self._extract_offer(response, normalized)
+                if extracted is not None:
+                    return extracted
+                if self._matches_offer_id(response, normalized):
+                    return response
+
+            if isinstance(response, list):
+                for item in response:
+                    if isinstance(item, dict) and self._matches_offer_id(item, normalized):
+                        return item
+
+        return None
+
     def create_offer(self, payload: dict[str, Any]) -> dict[str, Any]:
         _ = payload
         raise NotImplementedError(
