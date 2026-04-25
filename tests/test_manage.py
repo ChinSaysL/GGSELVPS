@@ -98,6 +98,25 @@ def test_product_reference_matches_direct_supplier_product_id() -> None:
     assert manage._product_matches_reference(product, reference)
 
 
+def test_product_reference_does_not_match_local_database_id() -> None:
+    product = SimpleNamespace(
+        id=5,
+        title="60 BRL",
+        category="Gift Card, Roblox",
+        denomination="60 BRL",
+        supplier_product_id="716",
+        raw_payload_json='{"id":"716","product_id":"999"}',
+    )
+    reference = manage.GEngineProductReference(
+        kind="shop",
+        product_id="5",
+        slug="playstation-store-wallet-turkey",
+        source="link",
+    )
+
+    assert not manage._product_matches_reference(product, reference)
+
+
 def test_default_offer_title_includes_distinct_denomination() -> None:
     product = SimpleNamespace(title="Turkey Gift Card", denomination="500 TL")
     assert manage._default_offer_title(product) == "Turkey Gift Card - 500 TL"

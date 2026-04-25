@@ -182,7 +182,7 @@ def _format_money(value: object) -> str:
 
 def _product_label(product: Any) -> str:
     return (
-        f"[{product.id}] {product.title} | denomination={product.denomination or ''} | "
+        f"[local {product.id}] {product.title} | denomination={product.denomination or ''} | "
         f"category={product.category or ''} | supplier_id={product.supplier_product_id} | "
         f"cost_usd={_format_money(product.cost_usd)} | stock={product.supplier_stock}"
     )
@@ -190,13 +190,13 @@ def _product_label(product: Any) -> str:
 
 def _product_search_blob(product: Any) -> str:
     parts = (
-        product.id,
-        product.title,
-        product.category,
-        product.denomination,
-        product.region,
-        product.supplier_product_id,
-        product.supplier_stock,
+        getattr(product, "id", None),
+        getattr(product, "title", None),
+        getattr(product, "category", None),
+        getattr(product, "denomination", None),
+        getattr(product, "region", None),
+        getattr(product, "supplier_product_id", None),
+        getattr(product, "supplier_stock", None),
         getattr(product, "raw_payload_json", None),
     )
     return _normalize_search_text(" ".join("" if part is None else str(part) for part in parts))
@@ -286,7 +286,6 @@ def _product_reference_ids(product: Any) -> set[str]:
         str(value).strip()
         for value in (
             getattr(product, "supplier_product_id", None),
-            getattr(product, "id", None),
         )
         if value not in {None, ""}
     }
@@ -535,7 +534,7 @@ def _choose_product_interactively() -> Any | None:
             print(f"...and {len(matches) - len(visible_matches)} more rows.")
 
         selected = input(
-            "\nEnter local product id from [] or paste another G-Engine link/id: "
+            "\nEnter local row id from [local ...] or paste another G-Engine link/id: "
         ).strip()
         if selected.lower() in {"s", "search", "again"}:
             continue
