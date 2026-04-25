@@ -85,11 +85,11 @@ python manage.py manual-link-example
 `python manage.py manual-link` walks through:
 - choosing `digiseller` or `ggsel`
 - pasting the G-Engine product link or product ID
-- selecting the exact imported denomination/sub-item for that G-Engine product
 - entering the marketplace offer/product ID and attempting to fetch marketplace metadata
-- confirming denomination match between selected G-Engine row and fetched marketplace item
+- auto-mapping marketplace option values (for example `250 TRY`, `500 TRY`) to imported G-Engine rows by exact denomination/signature
+- showing unmatched/ambiguous option values and optionally allowing manual mapping for only those leftovers
 - entering/confirming marketplace price and currency (prefilled when fetched)
-- optionally marking that buyer text is required, such as a Steam friend code
+- auto-detecting required buyer text fields (such as Steam friend code), with optional manual override
 
 `python manage.py auto-link` walks through:
 - choosing marketplace (`digiseller` or `ggsel`)
@@ -98,7 +98,7 @@ python manage.py manual-link-example
 - matching denominations/signatures (for example `250 TRY`, `500 TRY`)
 - creating/updating local links in one batch
 
-The current link model is one marketplace offer/product ID to one exact G-Engine denomination/sub-item. If a marketplace page has choices such as `250 TRY` and `500 TRY`, create or identify the separate marketplace product/variant IDs first, then link each one separately.
+For marketplace pages with option values like `250 TRY` and `500 TRY`, keep those option texts aligned with G-Engine denominations and `manual-link` can map the whole page in one run.
 
 `python manage.py price-preview` refreshes linked G-Engine costs when possible and shows the recommended cost-based price. `python manage.py sync-prices` applies those prices to supported linked marketplaces. In v1, Digiseller RUB price updates are implemented; GGSEL price updates remain disabled until the exact update payload schema is confirmed.
 

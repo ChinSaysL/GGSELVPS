@@ -952,6 +952,54 @@ def _products_matching_variant(products: list[Any], variant_value: str) -> list[
     return sorted(fuzzy_matches, key=lambda item: int(item.id))
 
 
+def _products_matching_variant_exact(products: list[Any], variant_value: str) -> list[Any]:
+    target_key = _variant_match_key(variant_value)
+    if not target_key:
+        return []
+    exact_matches = [
+        product
+        for product in products
+        if _product_variant_key(product) == target_key
+    ]
+    return sorted(exact_matches, key=lambda item: int(item.id))
+
+
+def _auto_match_option_entries_to_products(
+    products: list[Any],
+    option_entries: list[dict[str, str]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    matches: list[dict[str, Any]] = []
+    unmatched: list[dict[str, Any]] = []
+    ambiguous: list[dict[str, Any]] = []
+
+    for entry in option_entries:
+        option_label = str(entry.get("option_label") or "Option")
+        variant_value = str(entry.get("variant_value") or "").strip()
+        if not variant_value:
+            continue
+        found = _products_matching_variant_exact(products, variant_value)
+        if len(found) == 1:
+            matches.append(
+                {
+                    "entry": entry,
+                    "product": found[0],
+                    "option_description": f"{option_label}: {variant_value}",
+                }
+            )
+            continue
+        if not found:
+            unmatched.append({"entry": entry})
+            continue
+        ambiguous.append(
+            {
+                "entry": entry,
+                "products": found,
+            }
+        )
+
+    return matches, unmatched, ambiguous
+
+
 def _print_reference_products(products: list[Any], *, limit: int = 50) -> None:
     visible = products[:limit]
     for product in visible:
@@ -1639,6 +1687,10 @@ def action_manual_link() -> int:
         "This links an existing marketplace offer to imported G-Engine rows. "
         "It does not create or edit marketplace listings."
     )
+    print(
+        "When the marketplace offer has option values (for example 250 TRY, 500 TRY), "
+        "the command can auto-map the whole page by exact denomination/signature."
+    )
 
     marketplace = _ask_text("Marketplace/listing platform (digiseller or ggsel)", default="digiseller")
     marketplace = marketplace.lower()
@@ -1697,16 +1749,67 @@ def action_manual_link() -> int:
     _print_linked_rows_for_offer(marketplace, marketplace_offer_id)
 
     targets_by_product_id: dict[int, dict[str, Any]] = {}
-    if option_variant_entries and _ask_bool(
-        "Process detected option values one by one now?",
-        default=True,
-    ):
+    remaining_entries_for_manual: list[dict[str, str]] = []
+    if option_variant_entries:
+        auto_match_all = _ask_bool(
+            "Auto-map all option values by exact denomination/signature?",
+            default=True,
+        )
+        if auto_match_all:
+            auto_matches, unmatched_entries, ambiguous_entries = _auto_match_option_entries_to_products(
+                reference_products,
+                option_variant_entries,
+            )
+            for item in auto_matches:
+                _add_link_target(
+                    targets_by_product_id,
+                    product=item["product"],
+                    option_description=str(item["option_description"]),
+                )
+
+            print(
+                "\nAuto-map summary: "
+                f"matched {len(auto_matches)}/{len(option_variant_entries)} option values."
+            )
+            if unmatched_entries:
+                print("Unmatched option values:")
+                for item in unmatched_entries[:20]:
+                    entry = item["entry"]
+                    option_label = str(entry.get("option_label") or "Option")
+                    variant_value = str(entry.get("variant_value") or "")
+                    print(f"- {option_label}: {variant_value}")
+                if len(unmatched_entries) > 20:
+                    print(f"...and {len(unmatched_entries) - 20} more unmatched values.")
+            if ambiguous_entries:
+                print("Ambiguous option values (multiple local matches):")
+                for item in ambiguous_entries[:20]:
+                    entry = item["entry"]
+                    option_label = str(entry.get("option_label") or "Option")
+                    variant_value = str(entry.get("variant_value") or "")
+                    product_ids = ", ".join(str(product.id) for product in item["products"][:5])
+                    print(f"- {option_label}: {variant_value} -> local ids {product_ids}")
+                if len(ambiguous_entries) > 20:
+                    print(f"...and {len(ambiguous_entries) - 20} more ambiguous values.")
+
+            if (unmatched_entries or ambiguous_entries) and _ask_bool(
+                "Map unmatched/ambiguous option values manually now?",
+                default=False,
+            ):
+                remaining_entries_for_manual = [
+                    item["entry"] for item in unmatched_entries
+                ] + [
+                    item["entry"] for item in ambiguous_entries
+                ]
+        else:
+            remaining_entries_for_manual = option_variant_entries
+
+    if remaining_entries_for_manual:
         print(
-            "\nFor each marketplace option value, choose the matching local row "
+            "\nFor each remaining marketplace option value, choose the matching local row "
             "(blank skips that value)."
         )
-        total = len(option_variant_entries)
-        for index, entry in enumerate(option_variant_entries, start=1):
+        total = len(remaining_entries_for_manual)
+        for index, entry in enumerate(remaining_entries_for_manual, start=1):
             option_label = str(entry.get("option_label") or "Option")
             variant_value = str(entry.get("variant_value") or "")
             print(f"\nOption value {index}/{total}: {option_label}: {variant_value}")

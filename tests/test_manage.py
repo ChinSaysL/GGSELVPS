@@ -289,3 +289,52 @@ def test_products_matching_variant_uses_denomination_signature() -> None:
     matches = manage._products_matching_variant(products, "500 TL")
 
     assert [product.id for product in matches] == [11]
+
+
+def test_products_matching_variant_exact_ignores_fuzzy_results() -> None:
+    products = [
+        SimpleNamespace(
+            id=10,
+            title="Google Gift Card",
+            category="Gift Card, Google",
+            denomination="500 TRY",
+        ),
+        SimpleNamespace(
+            id=11,
+            title="Playstation Store Wallet Turkey",
+            category="Gift Card, PlayStation",
+            denomination="250 TRY",
+        ),
+    ]
+
+    matches = manage._products_matching_variant_exact(products, "Playstation")
+
+    assert matches == []
+
+
+def test_auto_match_option_entries_to_products_matches_exact_signatures() -> None:
+    products = [
+        SimpleNamespace(
+            id=142,
+            title="Playstation Store Wallet Turkey",
+            category="Gift Card, PlayStation",
+            denomination="250 TRY",
+        ),
+        SimpleNamespace(
+            id=143,
+            title="Playstation Store Wallet Turkey",
+            category="Gift Card, PlayStation",
+            denomination="500 TRY",
+        ),
+    ]
+    entries = [
+        {"option_label": "Gift Card Amount", "variant_value": "250 TRY"},
+        {"option_label": "Gift Card Amount", "variant_value": "500 TRY"},
+        {"option_label": "Gift Card Amount", "variant_value": "750 TRY"},
+    ]
+
+    matches, unmatched, ambiguous = manage._auto_match_option_entries_to_products(products, entries)
+
+    assert [item["product"].id for item in matches] == [142, 143]
+    assert [item["entry"]["variant_value"] for item in unmatched] == ["750 TRY"]
+    assert ambiguous == []
