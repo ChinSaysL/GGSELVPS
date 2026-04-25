@@ -41,6 +41,79 @@ def test_product_search_matches_denominations_and_categories() -> None:
     assert not manage._product_matches_query(product, "250 tl")
 
 
+def test_product_search_matches_slug_and_currency_aliases() -> None:
+    product = SimpleNamespace(
+        id=20,
+        title="PlayStation Store Wallet Turkey",
+        category="Gift Card, PlayStation",
+        denomination="250 TRY",
+        region=None,
+        supplier_product_id="ps-tr-250",
+        supplier_stock="300+",
+        raw_payload_json='{"slug":"playstation-store-wallet-turkey"}',
+    )
+
+    assert manage._product_matches_query(product, "playstation-store-wallet-turkey")
+    assert manage._product_matches_query(product, "250 TL")
+    assert manage._product_matches_query(product, "psn turkey")
+
+
+def test_product_search_handles_generic_slug_words_as_optional() -> None:
+    product = SimpleNamespace(
+        id=21,
+        title="250 TRY",
+        category="Gift Card, PlayStation",
+        denomination="250 TRY",
+        region=None,
+        supplier_product_id="ps-tr-250",
+        supplier_stock="300+",
+        raw_payload_json="{}",
+    )
+
+    assert manage._product_matches_query(product, "playstation-store-wallet-turkey")
+
+
+def test_product_search_sorts_more_specific_matches_first() -> None:
+    playstation = SimpleNamespace(
+        id=21,
+        title="250 TRY",
+        category="Gift Card, PlayStation",
+        denomination="250 TRY",
+        region=None,
+        supplier_product_id="ps-tr-250",
+        supplier_stock="300+",
+        raw_payload_json='{"slug":"playstation-store-wallet-turkey"}',
+    )
+    steam = SimpleNamespace(
+        id=22,
+        title="250 TRY",
+        category="Gift Card, Steam",
+        denomination="250 TRY",
+        region=None,
+        supplier_product_id="steam-tr-250",
+        supplier_stock="300+",
+        raw_payload_json="{}",
+    )
+
+    results = manage._sort_products_for_query([steam, playstation], "playstation 250 try")
+    assert results == [playstation, steam]
+
+
+def test_product_search_does_not_match_tl_inside_unrelated_words() -> None:
+    product = SimpleNamespace(
+        id=30,
+        title="60 CAD",
+        category="Gift Card, Battle.net",
+        denomination="60 CAD",
+        region=None,
+        supplier_product_id="621",
+        supplier_stock="1",
+        raw_payload_json="{}",
+    )
+
+    assert not manage._product_matches_query(product, "TL")
+
+
 def test_default_offer_title_includes_distinct_denomination() -> None:
     product = SimpleNamespace(title="Turkey Gift Card", denomination="500 TL")
     assert manage._default_offer_title(product) == "Turkey Gift Card - 500 TL"

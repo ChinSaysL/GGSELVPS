@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 import shutil
 import subprocess
 import sys
@@ -41,6 +42,17 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
 
 VALID_MARKETPLACES = ("digiseller", "ggsel")
 VALID_CURRENCIES = ("RUB", "USD")
+OPTIONAL_SEARCH_TERMS = {"card", "code", "digital", "gift", "store", "wallet"}
+SEARCH_ALIASES: dict[str, tuple[str, ...]] = {
+    "psn": ("playstation", "ps", "sony"),
+    "playstation": ("psn", "ps", "sony"),
+    "ps": ("playstation", "psn", "sony"),
+    "sony": ("playstation", "psn"),
+    "tl": ("try", "turkey", "turkish"),
+    "try": ("tl", "turkey", "turkish"),
+    "turkey": ("try", "tl", "turkish"),
+    "turkish": ("turkey", "try", "tl"),
+}
 
 
 def _run_command(command: Sequence[str]) -> int:
@@ -185,16 +197,97 @@ def _product_search_blob(product: Any) -> str:
         product.region,
         product.supplier_product_id,
         product.supplier_stock,
+        getattr(product, "raw_payload_json", None),
     )
-    return " ".join("" if part is None else str(part) for part in parts).lower()
+    return _normalize_search_text(" ".join("" if part is None else str(part) for part in parts))
+
+
+def _normalize_search_text(value: object) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
+
+
+def _search_groups(query: str) -> list[tuple[str, set[str]]]:
+    terms = [term for term in _normalize_search_text(query).split() if term]
+    groups: list[tuple[str, set[str]]] = []
+    for term in terms:
+        variants = {term, *SEARCH_ALIASES.get(term, ())}
+        groups.append((term, variants))
+    return groups
 
 
 def _product_matches_query(product: Any, query: str) -> bool:
-    terms = [term for term in query.lower().split() if term]
-    if not terms:
-        return True
+    return _product_match_score(product, query) > 0
+
+
+def _product_match_score(product: Any, query: str) -> int:
+    groups = _search_groups(query)
+    if not groups:
+        return 1
+
     blob = _product_search_blob(product)
-    return all(term in blob for term in terms)
+    tokens = set(blob.split())
+    required_groups = [
+        (term, variants) for term, variants in groups if term not in OPTIONAL_SEARCH_TERMS
+    ]
+    if not required_groups:
+        required_groups = groups
+
+    required_matches = sum(
+        1 for _, variants in required_groups if _variant_group_matches(blob, tokens, variants)
+    )
+    if required_matches != len(required_groups):
+        return 0
+
+    optional_matches = sum(
+        1
+        for term, variants in groups
+        if term in OPTIONAL_SEARCH_TERMS and _variant_group_matches(blob, tokens, variants)
+    )
+
+    # Prefer products where the important terms match, then use optional/product-detail
+    # matches to sort friendlier results first.
+    return (required_matches * 100) + (optional_matches * 10) + _product_detail_score(product, groups)
+
+
+def _variant_group_matches(blob: str, tokens: set[str], variants: set[str]) -> bool:
+    return any(_blob_contains(blob, tokens, variant) for variant in variants)
+
+
+def _product_detail_score(product: Any, groups: list[tuple[str, set[str]]]) -> int:
+    detail_fields = (
+        ("title", 8),
+        ("denomination", 6),
+        ("category", 4),
+        ("supplier_product_id", 3),
+        ("raw_payload_json", 2),
+    )
+    score = 0
+    for field_name, weight in detail_fields:
+        value = getattr(product, field_name, None)
+        if value is None:
+            continue
+        field_blob = _normalize_search_text(value)
+        field_tokens = set(field_blob.split())
+        for _, variants in groups:
+            if _variant_group_matches(field_blob, field_tokens, variants):
+                score += weight
+    return score
+
+
+def _sort_products_for_query(products: list[Any], query: str) -> list[Any]:
+    if not _search_groups(query):
+        return products
+    return sorted(products, key=lambda product: (-_product_match_score(product, query), product.id))
+
+
+def _blob_contains(blob: str, tokens: set[str], term: str) -> bool:
+    if not term:
+        return False
+    if term in tokens:
+        return True
+    if len(term) >= 4:
+        return any(term in token or token in term for token in tokens)
+    return f" {term} " in f" {blob} "
 
 
 def _load_recent_products(limit: int = 200) -> list[Any]:
@@ -376,14 +469,24 @@ def _choose_product_interactively() -> Any | None:
         print("No imported products yet. Run product sync first.")
         return None
 
+    next_query: str | None = None
     while True:
-        query = input(
-            "\nSearch product/sub-item by title, denomination, category, or supplier id "
-            "(blank shows latest 25): "
-        ).strip()
-        matches = [product for product in products if _product_matches_query(product, query)]
+        if next_query is None:
+            query = input(
+                "\nSearch product/sub-item by title, denomination, category, slug, or supplier id "
+                "(examples: playstation turkey, 250 TRY, 500 TL, psn; blank shows latest 25): "
+            ).strip()
+        else:
+            query = next_query
+            next_query = None
+            print(f"\nSearching again for: {query}")
+
+        matches = [
+            product for product in products if _product_matches_query(product, query)
+        ]
+        matches = _sort_products_for_query(matches, query)
         if not matches:
-            print("No matches. Try a broader search like 'TL', 'Roblox', or 'Steam'.")
+            print("No matches. Try a broader search like 'playstation', 'TRY', 'Roblox', or 'Steam'.")
             continue
 
         visible_matches = matches[:25]
@@ -398,7 +501,7 @@ def _choose_product_interactively() -> Any | None:
         if selected in {"s", "search"}:
             continue
         if not selected.isdigit():
-            print("Please enter a numeric local product id.")
+            next_query = selected
             continue
 
         product_id = int(selected)
