@@ -53,7 +53,7 @@ class Settings(BaseSettings):
     order_poll_interval_seconds: int = 60
     product_sync_interval_minutes: int = 60
     stock_sync_interval_minutes: int = 5
-    price_sync_interval_minutes: int = 30
+    price_sync_interval_minutes: int = 60
     scheduler_enabled: bool = False
 
     log_level: str = "INFO"

@@ -8,7 +8,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
@@ -38,8 +38,10 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
     MenuAction("9", "List products", "list-products", "Show imported supplier products."),
     MenuAction("10", "List offers", "list-offers", "Show manually linked marketplace offers."),
     MenuAction("11", "Manual link offer", "manual-link", "Link a marketplace offer interactively."),
-    MenuAction("12", "Manual link help", "manual-link-example", "Print an example link request."),
-    MenuAction("13", "Docker build", "docker-build", "Run docker compose build."),
+    MenuAction("12", "Preview prices", "price-preview", "Show recommended prices for linked offers."),
+    MenuAction("13", "Sync prices", "sync-prices", "Update linked marketplace offer prices."),
+    MenuAction("14", "Manual link help", "manual-link-example", "Print an example link request."),
+    MenuAction("15", "Docker build", "docker-build", "Run docker compose build."),
 )
 
 VALID_MARKETPLACES = ("digiseller", "ggsel")
@@ -112,7 +114,7 @@ def action_check_config() -> int:
     if not settings.gengine_api_key:
         missing.append("GENGINE_API_KEY")
     if settings.default_currency == "RUB" and settings.manual_usd_rub_rate is None:
-        warnings.append("MANUAL_USD_RUB_RATE is needed before RUB price updates are implemented.")
+        warnings.append("MANUAL_USD_RUB_RATE is needed before RUB price suggestions/sync can run.")
 
     if missing:
         print("\nMissing before product import testing:")
@@ -185,6 +187,103 @@ def action_sync_products() -> int:
     for key, value in result.items():
         print(f"{key}: {value}")
     return 0
+
+
+def _print_price_sync_result(result: dict[str, Any]) -> None:
+    summary_keys = (
+        "status",
+        "dry_run",
+        "offers_checked",
+        "prices_previewed",
+        "prices_updated",
+        "skipped",
+        "errors",
+        "supplier_refresh_products_checked",
+        "supplier_products_refreshed",
+        "supplier_refresh_errors",
+    )
+    for key in summary_keys:
+        if key in result:
+            print(f"{key}: {result[key]}")
+
+    details = result.get("details")
+    if not isinstance(details, list) or not details:
+        return
+
+    print("\nDetails:")
+    for item in details[:25]:
+        if not isinstance(item, dict):
+            continue
+        action = item.get("action")
+        marketplace = item.get("marketplace")
+        marketplace_offer_id = item.get("marketplace_offer_id")
+        title = item.get("title")
+        denomination = item.get("denomination")
+        old_price = item.get("old_price")
+        recommended_price = item.get("recommended_price")
+        currency = item.get("currency")
+        reason = item.get("reason")
+
+        line = (
+            f"- {action}: {marketplace}:{marketplace_offer_id} | {title} "
+            f"{denomination or ''} | {old_price} -> {recommended_price} {currency or ''}"
+        )
+        if reason:
+            line += f" | reason={reason}"
+        print(line)
+
+    if len(details) > 25:
+        print(f"...and {len(details) - 25} more details.")
+
+
+def action_price_preview() -> int:
+    _print_header("Price Preview")
+    print(
+        "This refreshes linked G-Engine costs when possible, then shows cost-based "
+        "recommended prices. It does not update marketplace listings."
+    )
+    try:
+        from app.services.price_sync import run_price_sync
+    except ImportError as exc:
+        print(f"Could not import app dependencies: {exc}")
+        print("Run: python -m pip install -r requirements.txt")
+        return 1
+
+    try:
+        result = run_price_sync(dry_run=True)
+    except Exception as exc:  # noqa: BLE001 - CLI should show a readable failure.
+        print(f"Price preview failed: {exc}")
+        return 1
+
+    _print_price_sync_result(result)
+    return 0 if result.get("errors", 0) == 0 else 1
+
+
+def action_sync_prices() -> int:
+    _print_header("Price Sync")
+    print(
+        "This refreshes linked G-Engine costs when possible, then updates prices for "
+        "already-linked marketplace offers. It does not create marketplace listings."
+    )
+    if sys.stdin.isatty() and not _ask_bool("Update marketplace prices now?", default=False):
+        print("Cancelled.")
+        return 0
+
+    try:
+        from app.services.price_sync import run_price_sync
+    except ImportError as exc:
+        print(f"Could not import app dependencies: {exc}")
+        print("Run: python -m pip install -r requirements.txt")
+        return 1
+
+    try:
+        result = run_price_sync(dry_run=False)
+    except Exception as exc:  # noqa: BLE001 - CLI should show a readable failure.
+        print(f"Price sync failed: {exc}")
+        return 1
+
+    _print_price_sync_result(result)
+    return 0 if result.get("errors", 0) == 0 else 1
 
 
 def _format_money(value: object) -> str:
@@ -680,7 +779,7 @@ def _upsert_manual_link(
                 requires_buyer_input=requires_buyer_input,
                 buyer_input_label=buyer_input_label,
                 buyer_input_help=buyer_input_help,
-                last_synced_at=datetime.utcnow(),
+                last_synced_at=datetime.now(timezone.utc),
             )
             db.add(offer)
             db.flush()
@@ -694,7 +793,7 @@ def _upsert_manual_link(
             offer.requires_buyer_input = requires_buyer_input
             offer.buyer_input_label = buyer_input_label
             offer.buyer_input_help = buyer_input_help
-            offer.last_synced_at = datetime.utcnow()
+            offer.last_synced_at = datetime.now(timezone.utc)
             db.add(offer)
             db.flush()
 
@@ -735,6 +834,10 @@ def action_manual_link() -> int:
         "This links an existing marketplace offer to one exact G-Engine product/sub-item. "
         "It does not create or edit marketplace listings."
     )
+    print(
+        "If one marketplace listing has several choices like 250 TRY and 500 TRY, "
+        "create/link each marketplace product or variant ID separately for now."
+    )
 
     marketplace = _ask_text("Marketplace/listing platform (digiseller or ggsel)", default="digiseller")
     marketplace = marketplace.lower()
@@ -756,6 +859,8 @@ def action_manual_link() -> int:
     suggested_price = _suggest_price(product, currency)
     if suggested_price is None:
         print("No automatic price suggestion available; enter the current marketplace price.")
+        if currency == "RUB":
+            print("Tip: set MANUAL_USD_RUB_RATE to enable RUB suggestions and price sync.")
     else:
         print(f"Suggested minimum safe price: {suggested_price} {currency}")
 
@@ -838,6 +943,8 @@ COMMANDS: dict[str, Callable[[], int]] = {
     "check": action_check,
     "run-api": action_run_api,
     "sync-products": action_sync_products,
+    "price-preview": action_price_preview,
+    "sync-prices": action_sync_prices,
     "list-products": action_list_products,
     "list-offers": action_list_offers,
     "manual-link": action_manual_link,

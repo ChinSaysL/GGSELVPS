@@ -12,6 +12,7 @@ This repository currently includes Stage 1-5 foundations:
 - API client layer with confirmed endpoint wiring where available, and explicit TODO `NotImplementedError` for unresolved operations
 - Product sync service that imports/upserts G-Engine supplier products only
 - Manual marketplace offer linking via `/offers/manual-link` and `/mappings/import`
+- Cost-based price preview/sync for already-linked offers
 - Tests for pricing, stock rules, product import, client behavior, and idempotency decisions
 - Docker + docker-compose deployment baseline
 
@@ -45,7 +46,7 @@ Compatibility aliases are also supported:
 - `GGSELToken`
 - `DigisellerToken`
 
-If `DEFAULT_CURRENCY=RUB`, set `MANUAL_USD_RUB_RATE` before running price sync logic.
+If `DEFAULT_CURRENCY=RUB`, set `MANUAL_USD_RUB_RATE` before running price preview or price sync. The app does not fetch live FX rates in v1.
 
 There are intentionally no listing template, category, or publish-switch settings. Marketplace listings are created manually outside this app.
 
@@ -67,6 +68,8 @@ python manage.py init-db
 python manage.py check
 python manage.py run-api
 python manage.py sync-products
+python manage.py price-preview
+python manage.py sync-prices
 python manage.py list-products
 python manage.py manual-link
 python manage.py manual-link-example
@@ -79,6 +82,10 @@ python manage.py manual-link-example
 - entering the marketplace offer/product ID
 - entering the local marketplace price
 - optionally marking that buyer text is required, such as a Steam friend code
+
+The current link model is one marketplace offer/product ID to one exact G-Engine denomination/sub-item. If a marketplace page has choices such as `250 TRY` and `500 TRY`, create or identify the separate marketplace product/variant IDs first, then link each one separately.
+
+`python manage.py price-preview` refreshes linked G-Engine costs when possible and shows the recommended cost-based price. `python manage.py sync-prices` applies those prices to supported linked marketplaces. In v1, Digiseller RUB price updates are implemented; GGSEL price updates remain disabled until the exact update payload schema is confirmed.
 
 Supported G-Engine link shapes include:
 - `https://b2b.g-engine.net/en/shop/5/playstation-store-wallet-turkey`
@@ -173,12 +180,13 @@ docker compose logs -f
 ```
 
 10. Add VPS public IP to G-Engine production whitelist.
-11. Trigger manual sync endpoints after API clients are implemented.
+11. Run `python manage.py price-preview` before any real price update.
+12. Trigger manual sync endpoints after API clients are implemented.
 
 ## Safe first-run procedure
 
 1. Sync G-Engine products.
-2. Check imported products and calculated prices.
+2. Check imported products and calculated prices with `python manage.py price-preview`.
 3. Create a small number of marketplace offers manually in GGSEL/Digiseller.
 4. Link those offers with `/offers/manual-link`.
 5. Test one cheap product purchase manually.
@@ -196,6 +204,7 @@ docker compose logs -f
 - `POST /offers/manual-link`
 - `POST /sync/products`
 - `POST /sync/prices`
+- `POST /sync/prices?dry_run=true`
 - `POST /sync/stock`
 - `POST /sync/orders`
 - `GET /orders`
@@ -208,6 +217,7 @@ docker compose logs -f
 
 - No competitor pricing data is used.
 - No competitor scraping is implemented.
+- Price sync uses supplier cost, fee/buffer settings, markup tiers, and minimum profit only.
 - No browser automation is used.
 - No automatic marketplace listing creation is implemented.
 - Base listing edits are intentionally disabled in client code.

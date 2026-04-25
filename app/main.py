@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Literal
 
@@ -171,8 +171,8 @@ def sync_products() -> dict[str, Any]:
 
 
 @app.post("/sync/prices")
-def sync_prices() -> dict[str, int | str]:
-    return run_price_sync()
+def sync_prices(dry_run: bool = Query(default=False)) -> dict[str, Any]:
+    return run_price_sync(dry_run=dry_run)
 
 
 @app.post("/sync/stock")
@@ -332,7 +332,7 @@ def manual_link_offer(
             requires_buyer_input=payload.requires_buyer_input,
             buyer_input_label=payload.buyer_input_label,
             buyer_input_help=payload.buyer_input_help,
-            last_synced_at=datetime.utcnow(),
+            last_synced_at=datetime.now(timezone.utc),
         )
         db.add(offer)
         db.flush()
@@ -346,7 +346,7 @@ def manual_link_offer(
         offer.requires_buyer_input = payload.requires_buyer_input
         offer.buyer_input_label = payload.buyer_input_label
         offer.buyer_input_help = payload.buyer_input_help
-        offer.last_synced_at = datetime.utcnow()
+        offer.last_synced_at = datetime.now(timezone.utc)
         db.add(offer)
         db.flush()
 
