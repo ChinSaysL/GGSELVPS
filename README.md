@@ -73,6 +73,7 @@ python manage.py init-db
 python manage.py check
 python manage.py run-api
 python manage.py sync-products
+python manage.py auto-link
 python manage.py price-preview
 python manage.py sync-prices
 python manage.py list-products
@@ -88,6 +89,13 @@ python manage.py manual-link-example
 - confirming denomination match between selected G-Engine row and fetched marketplace item
 - entering/confirming marketplace price and currency (prefilled when fetched)
 - optionally marking that buyer text is required, such as a Steam friend code
+
+`python manage.py auto-link` walks through:
+- choosing marketplace (`digiseller` or `ggsel`)
+- selecting one G-Engine product link/id (and importing rows if needed)
+- loading marketplace offers (by explicit IDs or by auto-discovery keyword)
+- matching denominations/signatures (for example `250 TRY`, `500 TRY`)
+- creating/updating local links in one batch
 
 The current link model is one marketplace offer/product ID to one exact G-Engine denomination/sub-item. If a marketplace page has choices such as `250 TRY` and `500 TRY`, create or identify the separate marketplace product/variant IDs first, then link each one separately.
 

@@ -278,3 +278,29 @@ def test_digiseller_get_offer_by_id_uses_products_list_when_available() -> None:
 
     assert offer is not None
     assert str(offer["product_id"]) == "5850465"
+
+
+def test_digiseller_list_offers_normalizes_products_list_payload() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/products/list"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "data": {
+                        "items": [
+                            {"product_id": "5850465", "name": "PSN 250 TRY"},
+                            {"product_id": "5850466", "name": "PSN 500 TRY"},
+                        ]
+                    }
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    offers = client.list_offers()
+    client.close()
+
+    ids = {str(item.get("product_id")) for item in offers}
+    assert ids == {"5850465", "5850466"}

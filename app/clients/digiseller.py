@@ -31,13 +31,75 @@ class DigisellerClient(BaseAPIClient):
         api_key = self._require_api_key()
         return {"token": api_key}
 
+    @staticmethod
+    def _collect_offer_dicts(value: object) -> list[dict[str, Any]]:
+        collected: list[dict[str, Any]] = []
+        if isinstance(value, list):
+            for item in value:
+                collected.extend(DigisellerClient._collect_offer_dicts(item))
+            return collected
+        if not isinstance(value, dict):
+            return collected
+
+        if DigisellerClient._extract_offer_id(value) is not None:
+            collected.append(value)
+
+        for nested in value.values():
+            collected.extend(DigisellerClient._collect_offer_dicts(nested))
+        return collected
+
+    @staticmethod
+    def _extract_offer_id(item: dict[str, Any]) -> str | None:
+        for key in ("id", "product_id", "productId", "goods_id", "good_id"):
+            value = item.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return None
+
     def list_offers(self) -> list[dict[str, Any]]:
-        # TODO: Swagger exposes /api/products/list for ID-based lookup; a dedicated
-        # "list all seller offers" endpoint is not confirmed in the provided docs.
-        raise NotImplementedError(
-            "Digiseller list_offers is not implemented. "
-            "Please provide endpoint details for listing all seller offers."
+        """
+        Best-effort listing from /api/products/list.
+
+        Digiseller docs are inconsistent across accounts for accepted body shape, so we
+        try several common payload variants and normalize whatever product-like dicts
+        come back. Duplicates are de-duplicated by offer id.
+        """
+        attempts: tuple[dict[str, Any], ...] = (
+            {},
+            {"ids": []},
+            {"product_ids": []},
+            {"products": []},
+            {"page": 1, "per_page": 1000},
+            {"offset": 0, "limit": 1000},
         )
+        merged: dict[str, dict[str, Any]] = {}
+
+        for body in attempts:
+            try:
+                response = self._request_json(
+                    method="POST",
+                    path="/api/products/list",
+                    params=self._auth_query_params(),
+                    json_body=body,
+                )
+            except Exception:
+                continue
+
+            items = self._collect_offer_dicts(response)
+            for item in items:
+                offer_id = self._extract_offer_id(item)
+                if offer_id is None:
+                    continue
+                merged.setdefault(offer_id, item)
+
+            if merged:
+                # Stop after first successful non-empty response to reduce API load.
+                break
+
+        return list(merged.values())
 
     @staticmethod
     def _matches_offer_id(item: dict[str, Any], offer_id: str) -> bool:

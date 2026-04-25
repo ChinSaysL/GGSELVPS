@@ -25,6 +25,11 @@ def test_parse_args_accepts_manual_link_command() -> None:
     assert args.command == "manual-link"
 
 
+def test_parse_args_accepts_auto_link_command() -> None:
+    args = manage.parse_args(["auto-link"])
+    assert args.command == "auto-link"
+
+
 def test_parse_gengine_shop_reference_from_url() -> None:
     reference = manage._parse_gengine_reference(
         "https://b2b.g-engine.net/en/shop/5/playstation-store-wallet-turkey"
@@ -155,3 +160,45 @@ def test_title_from_slug_formats_readable_title() -> None:
         manage._title_from_slug("playstation-store-wallet-turkey")
         == "Playstation Store Wallet Turkey"
     )
+
+
+def test_extract_denomination_signature_normalizes_tl_to_try() -> None:
+    assert manage._extract_denomination_signature("Playstation 500 TL") == "500 TRY"
+
+
+def test_auto_match_products_and_snapshots_by_signature() -> None:
+    products = [
+        SimpleNamespace(
+            id=1,
+            title="Playstation Store Wallet Turkey",
+            category="Gift Card, PlayStation",
+            denomination="250 TRY",
+            supplier_product_id="5",
+            raw_payload_json="{}",
+            cost_usd="5.50",
+            supplier_stock="300+",
+        ),
+        SimpleNamespace(
+            id=2,
+            title="Playstation Store Wallet Turkey",
+            category="Gift Card, PlayStation",
+            denomination="500 TRY",
+            supplier_product_id="6",
+            raw_payload_json="{}",
+            cost_usd="11.00",
+            supplier_stock="300+",
+        ),
+    ]
+    snapshots = [
+        {"marketplace_offer_id": "5850465", "title": "PSN 250 TRY", "denomination": "250 TRY"},
+        {"marketplace_offer_id": "5850466", "title": "PSN 500 TRY", "denomination": "500 TRY"},
+    ]
+
+    matches, unmatched_products, unmatched_snapshots, ambiguous = (
+        manage._auto_match_products_and_snapshots(products, snapshots)
+    )
+
+    assert len(matches) == 2
+    assert unmatched_products == []
+    assert unmatched_snapshots == []
+    assert ambiguous == []

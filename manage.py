@@ -38,10 +38,16 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
     MenuAction("9", "List products", "list-products", "Show imported supplier products."),
     MenuAction("10", "List offers", "list-offers", "Show manually linked marketplace offers."),
     MenuAction("11", "Manual link offer", "manual-link", "Link a marketplace offer interactively."),
-    MenuAction("12", "Preview prices", "price-preview", "Show recommended prices for linked offers."),
-    MenuAction("13", "Sync prices", "sync-prices", "Update linked marketplace offer prices."),
-    MenuAction("14", "Manual link help", "manual-link-example", "Print an example link request."),
-    MenuAction("15", "Docker build", "docker-build", "Run docker compose build."),
+    MenuAction("12", "Auto-link offers", "auto-link", "Auto-link marketplace offers to G-Engine sub-items."),
+    MenuAction(
+        "13",
+        "Preview prices (dry-run)",
+        "price-preview",
+        "Show recommended prices for linked offers without updating marketplaces.",
+    ),
+    MenuAction("14", "Sync prices (live)", "sync-prices", "Update linked marketplace offer prices."),
+    MenuAction("15", "Manual link help", "manual-link-example", "Print an example link request."),
+    MenuAction("16", "Docker build", "docker-build", "Run docker compose build."),
 )
 
 VALID_MARKETPLACES = ("digiseller", "ggsel")
@@ -268,7 +274,7 @@ def action_sync_prices() -> int:
         "This refreshes linked G-Engine costs when possible, then updates prices for "
         "already-linked marketplace offers. It does not create marketplace listings."
     )
-    if sys.stdin.isatty() and not _ask_bool("Update marketplace prices now?", default=False):
+    if sys.stdin.isatty() and not _ask_bool("Update marketplace prices now (live mode)?", default=True):
         print("Cancelled.")
         return 0
 
@@ -742,6 +748,13 @@ def _extract_marketplace_snapshot_fields(payload: dict[str, Any]) -> dict[str, A
     }
 
 
+def _extract_marketplace_offer_id(payload: dict[str, Any]) -> str | None:
+    return _payload_first_str(
+        payload,
+        ("id", "product_id", "productId", "goods_id", "good_id"),
+    )
+
+
 def _fetch_marketplace_offer_snapshot(marketplace: str, marketplace_offer_id: str) -> dict[str, Any] | None:
     try:
         from app.clients import DigisellerClient, GGSELClient
@@ -764,6 +777,7 @@ def _fetch_marketplace_offer_snapshot(marketplace: str, marketplace_offer_id: st
             return None
 
         fields = _extract_marketplace_snapshot_fields(raw)
+        fields["marketplace_offer_id"] = marketplace_offer_id
         fields["raw"] = raw
         return fields
     except Exception:
@@ -792,6 +806,411 @@ def _snapshot_matches_selected_product(product: Any, snapshot: dict[str, Any]) -
     if snapshot_title and product_denom in snapshot_title:
         return True
     return False
+
+
+def _normalize_currency_code(value: str | None) -> str | None:
+    if not value:
+        return None
+    raw = re.sub(r"[^A-Z]", "", value.upper())
+    if not raw:
+        return None
+    aliases = {
+        "TL": "TRY",
+        "RUR": "RUB",
+        "USDT": "USD",
+    }
+    return aliases.get(raw, raw)
+
+
+def _normalize_amount_text(value: str) -> str:
+    text = value.replace(",", ".").strip()
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def _extract_denomination_signature(*texts: str | None) -> str | None:
+    pattern = re.compile(r"(\d+(?:[.,]\d+)?)\s*([A-Za-z]{2,5})")
+    for text in texts:
+        if not text:
+            continue
+        for match in pattern.finditer(text):
+            amount = _normalize_amount_text(match.group(1))
+            currency = _normalize_currency_code(match.group(2))
+            if amount and currency:
+                return f"{amount} {currency}"
+    return None
+
+
+def _product_denomination_signature(product: Any) -> str | None:
+    return _extract_denomination_signature(
+        str(getattr(product, "denomination", "") or ""),
+        str(getattr(product, "title", "") or ""),
+        str(getattr(product, "category", "") or ""),
+    )
+
+
+def _snapshot_denomination_signature(snapshot: dict[str, Any]) -> str | None:
+    return _extract_denomination_signature(
+        str(snapshot.get("denomination") or ""),
+        str(snapshot.get("title") or ""),
+    )
+
+
+def _reference_query_hint(reference: GEngineProductReference, products: list[Any]) -> str:
+    if reference.slug:
+        return _normalize_search_text(reference.slug)
+    if products:
+        return _normalize_search_text(str(getattr(products[0], "title", "") or ""))
+    return ""
+
+
+def _products_for_reference(reference: GEngineProductReference, products: list[Any]) -> list[Any]:
+    matches = [product for product in products if _product_matches_reference(product, reference)]
+    return _sort_products_for_reference(matches, reference)
+
+
+def _choose_reference_products_interactively() -> tuple[GEngineProductReference, list[Any]] | None:
+    try:
+        products = _load_recent_products(limit=1000)
+    except RuntimeError as exc:
+        print(exc)
+        return None
+
+    if not products:
+        print("No imported products yet. Run product sync first.")
+        return None
+
+    while True:
+        raw_reference = input(
+            "\nPaste G-Engine product link or product ID "
+            "(examples: https://b2b.g-engine.net/en/shop/5/playstation-store-wallet-turkey, "
+            "https://b2b.g-engine.net/en/gifts/4451080/vituber-melody): "
+        ).strip()
+        reference = _parse_gengine_reference(raw_reference)
+        if reference is None:
+            print("Could not read a G-Engine product ID from that value. Paste the full link.")
+            continue
+
+        matches = _products_for_reference(reference, products)
+        if matches:
+            return reference, matches
+
+        print(
+            f"No imported rows matched G-Engine {reference.kind} product ID "
+            f"{reference.product_id}."
+        )
+        if reference.kind in {"shop", "unknown"} and _ask_bool(
+            "Try importing this G-Engine product ID now?",
+            default=True,
+        ):
+            imported = _import_gengine_reference(reference)
+            print(f"Imported rows: {imported}")
+            products = _load_recent_products(limit=2000)
+            matches = _products_for_reference(reference, products)
+            if matches:
+                return reference, matches
+
+        print("If it still does not appear, this G-Engine section may not be")
+        print("imported by the current integration yet.")
+
+
+def _list_marketplace_offer_snapshots(
+    marketplace: str,
+    *,
+    query: str,
+) -> list[dict[str, Any]]:
+    try:
+        from app.clients import DigisellerClient, GGSELClient
+        from app.config import get_settings
+    except ImportError:
+        return []
+
+    settings = get_settings()
+    client: Any | None = None
+    try:
+        if marketplace == "digiseller" and settings.digiseller_api_key:
+            client = DigisellerClient(settings.digiseller_base_url, settings.digiseller_api_key)
+        elif marketplace == "ggsel" and settings.ggsel_api_key:
+            client = GGSELClient(settings.ggsel_base_url, settings.ggsel_api_key)
+        else:
+            return []
+
+        try:
+            offers = client.list_offers()
+        except NotImplementedError:
+            return []
+        if not isinstance(offers, list):
+            return []
+
+        normalized_query = _normalize_search_text(query)
+        snapshots: list[dict[str, Any]] = []
+        seen_ids: set[str] = set()
+        for raw in offers:
+            if not isinstance(raw, dict):
+                continue
+            offer_id = _extract_marketplace_offer_id(raw)
+            if offer_id is None or offer_id in seen_ids:
+                continue
+            fields = _extract_marketplace_snapshot_fields(raw)
+            fields["marketplace_offer_id"] = offer_id
+            fields["raw"] = raw
+
+            if normalized_query:
+                blob = _normalize_search_text(
+                    " ".join(
+                        (
+                            str(offer_id),
+                            str(fields.get("title") or ""),
+                            str(fields.get("denomination") or ""),
+                        )
+                    )
+                )
+                if normalized_query not in blob:
+                    continue
+
+            snapshots.append(fields)
+            seen_ids.add(offer_id)
+        return snapshots
+    except Exception:
+        return []
+    finally:
+        if client is not None:
+            client.close()
+
+
+def _load_snapshots_by_ids(marketplace: str, offer_ids: list[str]) -> list[dict[str, Any]]:
+    snapshots: list[dict[str, Any]] = []
+    seen_ids: set[str] = set()
+    for offer_id in offer_ids:
+        if offer_id in seen_ids:
+            continue
+        snapshot = _fetch_marketplace_offer_snapshot(marketplace, offer_id)
+        if snapshot is None:
+            continue
+        snapshot["marketplace_offer_id"] = offer_id
+        snapshots.append(snapshot)
+        seen_ids.add(offer_id)
+    return snapshots
+
+
+def _auto_match_products_and_snapshots(
+    products: list[Any],
+    snapshots: list[dict[str, Any]],
+) -> tuple[list[tuple[Any, dict[str, Any], str]], list[Any], list[dict[str, Any]], list[str]]:
+    product_by_sig: dict[str, list[Any]] = {}
+    snapshot_by_sig: dict[str, list[dict[str, Any]]] = {}
+
+    for product in products:
+        signature = _product_denomination_signature(product)
+        if signature is None:
+            continue
+        product_by_sig.setdefault(signature, []).append(product)
+
+    for snapshot in snapshots:
+        signature = _snapshot_denomination_signature(snapshot)
+        if signature is None:
+            continue
+        snapshot_by_sig.setdefault(signature, []).append(snapshot)
+
+    matches: list[tuple[Any, dict[str, Any], str]] = []
+    matched_product_ids: set[int] = set()
+    matched_snapshot_ids: set[str] = set()
+    ambiguous: list[str] = []
+
+    signatures = sorted(set(product_by_sig) & set(snapshot_by_sig))
+    for signature in signatures:
+        product_group = product_by_sig[signature]
+        snapshot_group = snapshot_by_sig[signature]
+        if len(product_group) == 1 and len(snapshot_group) == 1:
+            product = product_group[0]
+            snapshot = snapshot_group[0]
+            offer_id = str(snapshot.get("marketplace_offer_id") or "")
+            matches.append((product, snapshot, signature))
+            matched_product_ids.add(int(product.id))
+            if offer_id:
+                matched_snapshot_ids.add(offer_id)
+        else:
+            ambiguous.append(signature)
+
+    unmatched_products = [product for product in products if int(product.id) not in matched_product_ids]
+    unmatched_snapshots = [
+        snapshot
+        for snapshot in snapshots
+        if str(snapshot.get("marketplace_offer_id") or "") not in matched_snapshot_ids
+    ]
+
+    return matches, unmatched_products, unmatched_snapshots, ambiguous
+
+
+def _snapshot_label(snapshot: dict[str, Any]) -> str:
+    return (
+        f"[offer {snapshot.get('marketplace_offer_id')}] "
+        f"{snapshot.get('title') or '(no title)'} | denomination={snapshot.get('denomination') or ''} "
+        f"| price={snapshot.get('price') if snapshot.get('price') is not None else ''} "
+        f"{snapshot.get('currency') or ''}"
+    )
+
+
+def _snapshot_price_or_suggestion(product: Any, snapshot: dict[str, Any], currency: str) -> Decimal | None:
+    raw_price = snapshot.get("price")
+    if raw_price is not None:
+        try:
+            price = Decimal(str(raw_price))
+            if price > 0:
+                return price
+        except (InvalidOperation, ValueError):
+            pass
+    return _suggest_price(product, currency)
+
+
+def action_auto_link() -> int:
+    _print_header("Auto-Link Offers")
+    print(
+        "This fetches marketplace offers and links them to all matched G-Engine sub-items "
+        "by denomination signature (for example 250 TRY, 500 TRY)."
+    )
+
+    marketplace = _ask_text("Marketplace/listing platform (digiseller or ggsel)", default="digiseller")
+    marketplace = marketplace.lower()
+    if marketplace not in VALID_MARKETPLACES:
+        print(f"Marketplace must be one of: {', '.join(VALID_MARKETPLACES)}.")
+        return 1
+
+    chosen = _choose_reference_products_interactively()
+    if chosen is None:
+        return 1
+    reference, products = chosen
+
+    print(f"\nImported rows for G-Engine {reference.kind} product ID {reference.product_id}:")
+    for product in products:
+        signature = _product_denomination_signature(product)
+        print(f"{_product_label(product)} | signature={signature or '(none)'}")
+
+    ids_text = _ask_text(
+        "Marketplace offer IDs (comma-separated, blank = auto-discover by keyword)",
+        required=False,
+    )
+    snapshots: list[dict[str, Any]] = []
+    if ids_text:
+        offer_ids = [
+            offer_id.strip()
+            for offer_id in re.split(r"[,\s]+", ids_text)
+            if offer_id.strip()
+        ]
+        snapshots = _load_snapshots_by_ids(marketplace, offer_ids)
+    else:
+        default_query = _reference_query_hint(reference, products)
+        query = _ask_text(
+            "Marketplace discovery keyword",
+            default=default_query,
+            required=False,
+        )
+        snapshots = _list_marketplace_offer_snapshots(marketplace, query=query)
+
+    if not snapshots:
+        print("No marketplace offers were found for auto-linking.")
+        print("Try providing explicit offer IDs.")
+        return 1
+
+    print(f"\nMarketplace offers loaded: {len(snapshots)}")
+    for snapshot in snapshots[:50]:
+        signature = _snapshot_denomination_signature(snapshot)
+        print(f"{_snapshot_label(snapshot)} | signature={signature or '(none)'}")
+    if len(snapshots) > 50:
+        print(f"...and {len(snapshots) - 50} more offers.")
+
+    matches, unmatched_products, unmatched_snapshots, ambiguous = _auto_match_products_and_snapshots(
+        products,
+        snapshots,
+    )
+    if not matches:
+        print("\nNo unambiguous denomination matches were found.")
+        if ambiguous:
+            print("Ambiguous signatures detected:")
+            for signature in ambiguous:
+                print(f"- {signature}")
+        return 1
+
+    print(f"\nProposed links: {len(matches)}")
+    for product, snapshot, signature in matches:
+        print(
+            f"- {_product_label(product)} <-> {_snapshot_label(snapshot)} | signature={signature}"
+        )
+    if ambiguous:
+        print("\nAmbiguous signatures skipped:")
+        for signature in ambiguous:
+            print(f"- {signature}")
+    if unmatched_products:
+        print(f"\nUnmatched G-Engine rows: {len(unmatched_products)}")
+    if unmatched_snapshots:
+        print(f"Unmatched marketplace offers: {len(unmatched_snapshots)}")
+
+    if not _ask_bool("Create/update these links now?", default=True):
+        print("Cancelled.")
+        return 0
+
+    created_or_updated = 0
+    skipped = 0
+    for product, snapshot, _signature in matches:
+        offer_id = str(snapshot.get("marketplace_offer_id") or "").strip()
+        if not offer_id:
+            skipped += 1
+            print(f"Skipped local {product.id}: missing marketplace offer id.")
+            continue
+
+        currency = str(snapshot.get("currency") or "RUB").upper()
+        if currency not in VALID_CURRENCIES:
+            currency = "RUB"
+
+        price = _snapshot_price_or_suggestion(product, snapshot, currency)
+        if price is None:
+            skipped += 1
+            print(f"Skipped local {product.id}: no valid marketplace/suggested price.")
+            continue
+
+        requires_buyer_input = bool(snapshot.get("requires_buyer_input"))
+        buyer_input_label = (
+            str(snapshot.get("buyer_input_label"))
+            if snapshot.get("buyer_input_label")
+            else None
+        )
+        buyer_input_help = (
+            str(snapshot.get("buyer_input_help"))
+            if snapshot.get("buyer_input_help")
+            else None
+        )
+        if requires_buyer_input and not buyer_input_label:
+            buyer_input_label = _default_buyer_input_label(product)
+        if requires_buyer_input and not buyer_input_help and buyer_input_label:
+            buyer_input_help = _default_buyer_input_help(buyer_input_label)
+
+        title = str(snapshot.get("title") or _default_offer_title(product))
+        offer_enabled = bool(snapshot.get("is_enabled")) if snapshot.get("is_enabled") is not None else False
+
+        try:
+            _upsert_manual_link(
+                marketplace=marketplace,
+                marketplace_offer_id=offer_id,
+                supplier_product_id=int(product.id),
+                title=title,
+                price=price,
+                currency=currency,
+                offer_enabled=offer_enabled,
+                requires_buyer_input=requires_buyer_input,
+                buyer_input_label=buyer_input_label,
+                buyer_input_help=buyer_input_help,
+                mapping_enabled=True,
+            )
+            created_or_updated += 1
+        except Exception as exc:  # noqa: BLE001 - continue batch linking.
+            skipped += 1
+            print(f"Skipped local {product.id} <-> offer {offer_id}: {exc}")
+
+    print("\nAuto-link finished.")
+    print(f"links_created_or_updated: {created_or_updated}")
+    print(f"links_skipped: {skipped}")
+    return 0 if created_or_updated > 0 else 1
 
 
 def _choose_product_interactively() -> Any | None:
@@ -1126,6 +1545,7 @@ COMMANDS: dict[str, Callable[[], int]] = {
     "check": action_check,
     "run-api": action_run_api,
     "sync-products": action_sync_products,
+    "auto-link": action_auto_link,
     "price-preview": action_price_preview,
     "sync-prices": action_sync_prices,
     "list-products": action_list_products,
