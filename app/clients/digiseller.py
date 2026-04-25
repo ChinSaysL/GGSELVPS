@@ -249,18 +249,22 @@ class DigisellerClient(BaseAPIClient):
             "Please provide the exact payload field for enable/disable."
         )
 
-    def set_offer_price(self, offer_id: str, price: float, currency: str) -> dict[str, Any]:
-        if currency.upper() != "RUB":
-            raise NotImplementedError(
-                "Digiseller set_offer_price currently supports RUB listings only in v1."
-            )
-
-        request_payload: list[dict[str, Any]] = [
-            {
-                "product_id": int(offer_id),
-                "price": float(price),
-            }
-        ]
+    def set_offer_price(
+        self,
+        offer_id: str,
+        price: float,
+        currency: str,
+        *,
+        variants: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        _ = currency
+        request_item: dict[str, Any] = {
+            "product_id": int(offer_id),
+            "price": float(price),
+        }
+        if variants:
+            request_item["variants"] = variants
+        request_payload: list[dict[str, Any]] = [request_item]
         response = self._request_json(
             method="POST",
             path="/api/product/edit/prices",

@@ -100,7 +100,7 @@ python manage.py manual-link-example
 
 For marketplace pages with option values like `250 TRY` and `500 TRY`, keep those option texts aligned with G-Engine denominations and `manual-link` can map the whole page in one run.
 
-`python manage.py price-preview` refreshes linked G-Engine costs when possible and shows the recommended cost-based price. `python manage.py sync-prices` applies those prices to supported linked marketplaces. In v1, Digiseller RUB price updates are implemented; GGSEL price updates remain disabled until the exact update payload schema is confirmed.
+`python manage.py price-preview` refreshes linked G-Engine costs when possible and shows the recommended cost-based price. `python manage.py sync-prices` applies those prices to supported linked marketplaces. Digiseller price updates support USD/RUB product prices and, when variant IDs are linked, per-variant price modifiers. GGSEL price updates remain disabled until the exact update payload schema is confirmed.
 
 Supported G-Engine link shapes include:
 - `https://b2b.g-engine.net/en/shop/5/playstation-store-wallet-turkey`

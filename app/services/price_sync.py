@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -314,6 +314,52 @@ def _error_detail(
     stats["details"].append(detail)
 
 
+def _group_mappings_by_offer(mappings: list[ProductMapping]) -> dict[int, list[ProductMapping]]:
+    grouped: dict[int, list[ProductMapping]] = {}
+    for mapping in mappings:
+        offer = mapping.marketplace_offer
+        if offer is None:
+            continue
+        grouped.setdefault(int(offer.id), []).append(mapping)
+    return grouped
+
+
+def _digiseller_variant_payload(
+    plans: list[tuple[ProductMapping, MarketplaceOffer, _PricePlan]],
+) -> tuple[Decimal, list[dict[str, Any]]]:
+    base_candidates: list[Decimal] = []
+    for mapping, _offer, plan in plans:
+        if mapping.marketplace_variant_id is None:
+            base_candidates.append(plan.recommended_price)
+
+    if base_candidates:
+        base_price = base_candidates[0]
+    else:
+        base_price = min(plan.recommended_price for _mapping, _offer, plan in plans)
+
+    variants: list[dict[str, Any]] = []
+    for mapping, _offer, plan in plans:
+        variant_id = mapping.marketplace_variant_id
+        if variant_id is None:
+            continue
+        delta = plan.recommended_price - base_price
+        if delta >= Decimal("0"):
+            variant_type = 2  # PricePlus
+            rate = delta
+        else:
+            variant_type = 3  # PriceMinus
+            rate = -delta
+        variants.append(
+            {
+                "variant_id": int(variant_id),
+                "rate": float(rate),
+                "type": variant_type,
+            }
+        )
+
+    return base_price, variants
+
+
 def sync_offer_prices(
     *,
     db: Session,
@@ -354,6 +400,8 @@ def sync_offer_prices(
 
     stats["offers_checked"] = len(mappings)
     now = datetime.now(timezone.utc)
+    mappings_by_offer = _group_mappings_by_offer(mappings)
+    processed_offer_ids: set[int] = set()
 
     for mapping in mappings:
         offer = mapping.marketplace_offer
@@ -366,6 +414,194 @@ def sync_offer_prices(
 
         if offer is None or supplier_product is None:
             _skip_detail(stats, detail, reason="mapping_missing_offer_or_supplier")
+            continue
+
+        if int(offer.id) in processed_offer_ids:
+            continue
+
+        group = mappings_by_offer.get(int(offer.id), [mapping])
+        marketplace = offer.marketplace.lower()
+        is_digiseller_variant_group = marketplace == "digiseller" and len(group) > 1
+
+        if is_digiseller_variant_group:
+            processed_offer_ids.add(int(offer.id))
+            if not any(item.marketplace_variant_id is not None for item in group):
+                for grouped_mapping in group:
+                    grouped_detail = _base_detail(
+                        mapping=grouped_mapping,
+                        offer=grouped_mapping.marketplace_offer,
+                        supplier_product=grouped_mapping.supplier_product,
+                    )
+                    _skip_detail(
+                        stats,
+                        grouped_detail,
+                        reason="multiple_mappings_for_offer_require_variant_ids",
+                    )
+                continue
+
+            plans: list[tuple[ProductMapping, MarketplaceOffer, _PricePlan]] = []
+            group_currencies: set[str] = set()
+            for grouped_mapping in group:
+                grouped_offer = grouped_mapping.marketplace_offer
+                grouped_supplier = grouped_mapping.supplier_product
+                grouped_detail = _base_detail(
+                    mapping=grouped_mapping,
+                    offer=grouped_offer,
+                    supplier_product=grouped_supplier,
+                )
+
+                if grouped_offer is None or grouped_supplier is None:
+                    _skip_detail(stats, grouped_detail, reason="mapping_missing_offer_or_supplier")
+                    continue
+
+                refresh_reference = _supplier_refresh_reference(grouped_supplier)
+                if (
+                    refresh_supplier_prices
+                    and refresh_reference is not None
+                    and refresh_reference.product_id in failed_refresh_product_ids
+                ):
+                    _skip_detail(stats, grouped_detail, reason="supplier_price_refresh_failed")
+                    continue
+
+                try:
+                    grouped_plan = _calculate_price_plan(
+                        settings=settings,
+                        mapping=grouped_mapping,
+                        offer=grouped_offer,
+                        supplier_product=grouped_supplier,
+                    )
+                except _PriceSyncSkip as exc:
+                    _skip_detail(stats, grouped_detail, reason=str(exc))
+                    continue
+                except PricingConfigError as exc:
+                    _skip_detail(stats, grouped_detail, reason=str(exc))
+                    continue
+
+                group_currencies.add(grouped_plan.currency)
+                plans.append((grouped_mapping, grouped_offer, grouped_plan))
+
+            if not plans:
+                continue
+
+            if len(group_currencies) > 1:
+                for grouped_mapping, grouped_offer, _grouped_plan in plans:
+                    grouped_detail = _base_detail(
+                        mapping=grouped_mapping,
+                        offer=grouped_offer,
+                        supplier_product=grouped_mapping.supplier_product,
+                    )
+                    _skip_detail(
+                        stats,
+                        grouped_detail,
+                        reason="variant_group_currency_mismatch",
+                    )
+                continue
+
+            base_price, variant_payload = _digiseller_variant_payload(plans)
+            plan_currency = plans[0][2].currency
+            client = marketplace_clients.get("digiseller")
+            if client is None:
+                for grouped_mapping, grouped_offer, grouped_plan in plans:
+                    grouped_detail = _base_detail(
+                        mapping=grouped_mapping,
+                        offer=grouped_offer,
+                        supplier_product=grouped_mapping.supplier_product,
+                    )
+                    grouped_detail.update(
+                        {
+                            "recommended_price": _decimal_to_str(grouped_plan.recommended_price),
+                            "currency": grouped_plan.currency,
+                        }
+                    )
+                    _skip_detail(
+                        stats,
+                        grouped_detail,
+                        reason="marketplace_price_client_not_configured",
+                    )
+                continue
+            if dry_run:
+                for grouped_mapping, grouped_offer, grouped_plan in plans:
+                    grouped_detail = _base_detail(
+                        mapping=grouped_mapping,
+                        offer=grouped_offer,
+                        supplier_product=grouped_mapping.supplier_product,
+                    )
+                    grouped_detail.update(
+                        {
+                            "recommended_price": _decimal_to_str(grouped_plan.recommended_price),
+                            "currency": grouped_plan.currency,
+                            "group_base_price": _decimal_to_str(base_price),
+                            "variant_id": grouped_mapping.marketplace_variant_id,
+                            "variant_name": grouped_mapping.marketplace_variant_name,
+                        }
+                    )
+                    grouped_detail["action"] = "preview"
+                    stats["details"].append(grouped_detail)
+                    stats["prices_previewed"] += 1
+                continue
+
+            try:
+                digiseller_client = cast(Any, client)
+                digiseller_client.set_offer_price(
+                    offer.marketplace_offer_id,
+                    float(base_price),
+                    plan_currency,
+                    variants=variant_payload,
+                )
+            except NotImplementedError as exc:
+                for grouped_mapping, grouped_offer, grouped_plan in plans:
+                    grouped_detail = _base_detail(
+                        mapping=grouped_mapping,
+                        offer=grouped_offer,
+                        supplier_product=grouped_mapping.supplier_product,
+                    )
+                    grouped_detail.update(
+                        {
+                            "recommended_price": _decimal_to_str(grouped_plan.recommended_price),
+                            "currency": grouped_plan.currency,
+                        }
+                    )
+                    _skip_detail(stats, grouped_detail, reason=str(exc))
+                continue
+            except Exception as exc:  # noqa: BLE001 - keep other offers running.
+                for grouped_mapping, grouped_offer, grouped_plan in plans:
+                    grouped_detail = _base_detail(
+                        mapping=grouped_mapping,
+                        offer=grouped_offer,
+                        supplier_product=grouped_mapping.supplier_product,
+                    )
+                    grouped_detail.update(
+                        {
+                            "recommended_price": _decimal_to_str(grouped_plan.recommended_price),
+                            "currency": grouped_plan.currency,
+                        }
+                    )
+                    _error_detail(stats, grouped_detail, reason=str(exc))
+                continue
+
+            offer.price = base_price
+            offer.currency = plan_currency
+            offer.last_synced_at = now
+            db.add(offer)
+            for grouped_mapping, grouped_offer, grouped_plan in plans:
+                grouped_detail = _base_detail(
+                    mapping=grouped_mapping,
+                    offer=grouped_offer,
+                    supplier_product=grouped_mapping.supplier_product,
+                )
+                grouped_detail.update(
+                    {
+                        "recommended_price": _decimal_to_str(grouped_plan.recommended_price),
+                        "currency": grouped_plan.currency,
+                        "group_base_price": _decimal_to_str(base_price),
+                        "variant_id": grouped_mapping.marketplace_variant_id,
+                        "variant_name": grouped_mapping.marketplace_variant_name,
+                        "variant_mode": True,
+                    }
+                )
+                grouped_detail["action"] = "updated"
+                stats["details"].append(grouped_detail)
+                stats["prices_updated"] += 1
             continue
 
         refresh_reference = _supplier_refresh_reference(supplier_product)
@@ -412,7 +648,6 @@ def sync_offer_prices(
             _skip_detail(stats, detail, reason="price_unchanged")
             continue
 
-        marketplace = offer.marketplace.lower()
         client = marketplace_clients.get(marketplace)
         if client is None:
             _skip_detail(stats, detail, reason="marketplace_price_client_not_configured")

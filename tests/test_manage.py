@@ -270,6 +270,28 @@ def test_extract_marketplace_snapshot_fields_handles_mixed_options() -> None:
     assert snapshot["detected_buyer_input_label"] == "Steam friend code"
 
 
+def test_extract_marketplace_snapshot_fields_keeps_variant_ids() -> None:
+    snapshot = manage._extract_marketplace_snapshot_fields(
+        {
+            "name": "Playstation testing",
+            "options": [
+                {
+                    "label": "Gift Card Amount",
+                    "variants": [
+                        {"variant_id": 1001, "text": "250 TRY"},
+                        {"variant_id": 1002, "text": "500 TRY"},
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert snapshot["option_variant_entries"] == [
+        {"option_label": "Gift Card Amount", "variant_value": "250 TRY", "variant_id": 1001},
+        {"option_label": "Gift Card Amount", "variant_value": "500 TRY", "variant_id": 1002},
+    ]
+
+
 def test_products_matching_variant_uses_denomination_signature() -> None:
     products = [
         SimpleNamespace(

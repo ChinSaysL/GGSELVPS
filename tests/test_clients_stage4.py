@@ -212,11 +212,36 @@ def test_ggsel_unresolved_methods_remain_explicitly_not_implemented() -> None:
     client.close()
 
 
-def test_digiseller_set_offer_price_rub_only_for_v1() -> None:
+def test_digiseller_set_offer_price_supports_variants_payload() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/product/edit/prices"):
+            captured["query"] = dict(request.url.params)
+            captured["json"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(status_code=200, json={"status": "ok"})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
     client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
-    with pytest.raises(NotImplementedError):
-        client.set_offer_price(offer_id="10", price=99.9, currency="USD")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    result = client.set_offer_price(
+        offer_id="10",
+        price=7.75,
+        currency="USD",
+        variants=[{"variant_id": 5001, "rate": 7.35, "type": 2}],
+    )
     client.close()
+
+    assert result == {"status": "ok"}
+    assert captured["query"]["token"] == "secret"
+    assert captured["json"] == [
+        {
+            "product_id": 10,
+            "price": 7.75,
+            "variants": [{"variant_id": 5001, "rate": 7.35, "type": 2}],
+        }
+    ]
 
 
 def test_digiseller_listing_create_and_base_update_are_disabled() -> None:

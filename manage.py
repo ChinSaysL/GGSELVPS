@@ -579,7 +579,7 @@ def action_manual_link_example() -> int:
 
 curl -X POST http://127.0.0.1:8000/offers/manual-link \\
   -H "Content-Type: application/json" \\
-  -d "{\\"marketplace\\":\\"digiseller\\",\\"marketplace_offer_id\\":\\"123456\\",\\"supplier_product_id\\":1,\\"title\\":\\"Steam Gift Card 10 USD\\",\\"price\\":\\"999.00\\",\\"currency\\":\\"RUB\\",\\"offer_enabled\\":false,\\"requires_buyer_input\\":true,\\"buyer_input_label\\":\\"Steam friend code\\",\\"buyer_input_help\\":\\"Ask the buyer to provide their Steam friend code before fulfillment.\\",\\"mapping_enabled\\":true}"
+  -d "{\\"marketplace\\":\\"digiseller\\",\\"marketplace_offer_id\\":\\"123456\\",\\"supplier_product_id\\":1,\\"title\\":\\"Steam Gift Card 10 USD\\",\\"price\\":\\"999.00\\",\\"currency\\":\\"RUB\\",\\"offer_enabled\\":false,\\"requires_buyer_input\\":true,\\"buyer_input_label\\":\\"Steam friend code\\",\\"buyer_input_help\\":\\"Ask the buyer to provide their Steam friend code before fulfillment.\\",\\"mapping_enabled\\":true,\\"marketplace_variant_id\\":42,\\"marketplace_variant_name\\":\\"250 TRY\\"}"
 """
     )
     return 0
@@ -713,11 +713,11 @@ def _payload_first_decimal(payload: dict[str, Any], keys: tuple[str, ...]) -> De
     return None
 
 
-def _extract_option_variant_values(option: dict[str, Any]) -> list[str]:
+def _extract_option_variant_items(option: dict[str, Any]) -> list[dict[str, Any]]:
     variant_containers = ("variants", "values", "items", "options")
     variant_value_keys = ("text", "label", "name", "value", "title")
-    values: list[str] = []
-    seen: set[str] = set()
+    items: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
 
     for container_key in variant_containers:
         container = option.get(container_key)
@@ -725,20 +725,42 @@ def _extract_option_variant_values(option: dict[str, Any]) -> list[str]:
             continue
         for item in container:
             text: str | None = None
+            variant_id: int | None = None
+            is_default: bool = False
             if isinstance(item, dict):
                 text = _payload_first_str(item, variant_value_keys)
+                raw_variant_id = _payload_first_str(item, ("variant_id", "id", "value_id"))
+                if raw_variant_id and raw_variant_id.strip().isdigit():
+                    variant_id = int(raw_variant_id.strip())
+                is_default = bool(_payload_first_bool(item, ("default", "is_default")))
             elif item is not None:
                 text = str(item).strip()
             if not text:
                 continue
             normalized = _normalize_search_text(text)
-            if not normalized or normalized in seen:
+            key = (str(variant_id or ""), normalized)
+            if not normalized or key in seen:
                 continue
-            seen.add(normalized)
-            values.append(text)
-        if values:
+            seen.add(key)
+            items.append(
+                {
+                    "variant_value": text,
+                    "variant_id": variant_id,
+                    "is_default": is_default,
+                }
+            )
+        if items:
             break
 
+    return items
+
+
+def _extract_option_variant_values(option: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for item in _extract_option_variant_items(option):
+        variant_value = str(item.get("variant_value") or "").strip()
+        if variant_value:
+            values.append(variant_value)
     return values
 
 
@@ -776,7 +798,7 @@ def _extract_marketplace_snapshot_fields(payload: dict[str, Any]) -> dict[str, A
     option_parameter_names: list[str] = []
     detected_requires_buyer_input = False
     detected_buyer_input_label: str | None = None
-    seen_variant_entries: set[tuple[str, str]] = set()
+    seen_variant_entries: set[tuple[str, str, str]] = set()
     if isinstance(options, list):
         for option in options:
             if not isinstance(option, dict):
@@ -791,7 +813,7 @@ def _extract_marketplace_snapshot_fields(payload: dict[str, Any]) -> dict[str, A
                 detected_requires_buyer_input = True
                 if detected_buyer_input_label is None:
                     detected_buyer_input_label = option_label
-            variants = _extract_option_variant_values(option)
+            variants = _extract_option_variant_items(option)
             default_variant_text: str | None = None
             raw_variants = option.get("variants")
             default_variant_keys = ("default", "is_default")
@@ -803,25 +825,31 @@ def _extract_marketplace_snapshot_fields(payload: dict[str, Any]) -> dict[str, A
                     if default_variant_text is None and _payload_first_bool(raw_variant, default_variant_keys):
                         default_variant_text = variant_text
 
-            for variant_text in variants:
+            for variant_item in variants:
+                variant_text = str(variant_item.get("variant_value") or "")
+                variant_id = variant_item.get("variant_id")
                 option_variants.append(variant_text)
                 option_key = _normalize_search_text(option_label or "option")
                 variant_key = _normalize_search_text(variant_text)
-                composite_key = (option_key, variant_key)
+                variant_id_key = str(variant_id) if variant_id is not None else ""
+                composite_key = (option_key, variant_key, variant_id_key)
                 if composite_key in seen_variant_entries:
                     continue
                 seen_variant_entries.add(composite_key)
-                option_variant_entries.append(
-                    {
-                        "option_label": option_label or "Option",
-                        "variant_value": variant_text,
-                    }
-                )
+                entry: dict[str, Any] = {
+                    "option_label": option_label or "Option",
+                    "variant_value": variant_text,
+                }
+                if isinstance(variant_id, int):
+                    entry["variant_id"] = variant_id
+                option_variant_entries.append(entry)
 
             if denomination is None and default_variant_text:
                 denomination = default_variant_text
             if denomination is None and variants:
-                denomination = variants[0]
+                first_value = str(variants[0].get("variant_value") or "")
+                if first_value:
+                    denomination = first_value
             if denomination is None and option_label:
                 denomination = option_label
 
@@ -966,7 +994,7 @@ def _products_matching_variant_exact(products: list[Any], variant_value: str) ->
 
 def _auto_match_option_entries_to_products(
     products: list[Any],
-    option_entries: list[dict[str, str]],
+    option_entries: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
     matches: list[dict[str, Any]] = []
     unmatched: list[dict[str, Any]] = []
@@ -1036,14 +1064,24 @@ def _add_link_target(
     *,
     product: Any,
     option_description: str | None,
+    variant_id: int | None = None,
+    variant_value: str | None = None,
 ) -> None:
     product_id = int(product.id)
     item = targets_by_product_id.setdefault(
         product_id,
-        {"product": product, "option_descriptions": []},
+        {"product": product, "option_descriptions": [], "variant_bindings": []},
     )
     if option_description and option_description not in item["option_descriptions"]:
         item["option_descriptions"].append(option_description)
+    if variant_id is not None or variant_value:
+        binding = {
+            "variant_id": variant_id,
+            "variant_value": variant_value,
+        }
+        existing_bindings = item["variant_bindings"]
+        if binding not in existing_bindings:
+            existing_bindings.append(binding)
 
 
 def _linked_rows_for_marketplace_offer(
@@ -1085,6 +1123,8 @@ def _linked_rows_for_marketplace_offer(
                 "title": supplier.title,
                 "denomination": supplier.denomination,
                 "enabled": mapping.enabled,
+                "marketplace_variant_id": mapping.marketplace_variant_id,
+                "marketplace_variant_name": mapping.marketplace_variant_name,
             }
         )
     return linked
@@ -1100,7 +1140,9 @@ def _print_linked_rows_for_offer(marketplace: str, marketplace_offer_id: str) ->
         print(
             f"- mapping {row['mapping_id']}: local {row['local_supplier_product_id']} | "
             f"supplier_id={row['supplier_product_id']} | "
-            f"{row['title']} | denomination={row['denomination'] or ''} | enabled={row['enabled']}"
+            f"{row['title']} | denomination={row['denomination'] or ''} | "
+            f"variant_id={row['marketplace_variant_id']} | "
+            f"variant_name={row['marketplace_variant_name'] or ''} | enabled={row['enabled']}"
         )
 
 
@@ -1602,6 +1644,8 @@ def _upsert_manual_link(
     buyer_input_label: str | None,
     buyer_input_help: str | None,
     mapping_enabled: bool,
+    marketplace_variant_id: int | None = None,
+    marketplace_variant_name: str | None = None,
 ) -> dict[str, Any]:
     from sqlalchemy import select
 
@@ -1662,11 +1706,15 @@ def _upsert_manual_link(
                 supplier_product_id=supplier_product_id,
                 marketplace_offer_id=offer.id,
                 enabled=mapping_enabled,
+                marketplace_variant_id=marketplace_variant_id,
+                marketplace_variant_name=marketplace_variant_name,
             )
             db.add(mapping)
             mapping_created = True
         else:
             mapping.enabled = mapping_enabled
+            mapping.marketplace_variant_id = marketplace_variant_id
+            mapping.marketplace_variant_name = marketplace_variant_name
             db.add(mapping)
 
         db.commit()
@@ -1757,10 +1805,15 @@ def action_manual_link() -> int:
             option_variant_entries,
         )
         for item in auto_matches:
+            entry = item["entry"]
+            raw_variant_id = entry.get("variant_id")
+            variant_id = int(raw_variant_id) if isinstance(raw_variant_id, int) else None
             _add_link_target(
                 targets_by_product_id,
                 product=item["product"],
                 option_description=str(item["option_description"]),
+                variant_id=variant_id,
+                variant_value=str(entry.get("variant_value") or ""),
             )
 
         print(
@@ -1920,11 +1973,18 @@ def action_manual_link() -> int:
     for target in targets:
         product = target["product"]
         option_descriptions = target["option_descriptions"]
+        variant_bindings = target["variant_bindings"]
+        variant_text = ""
+        if variant_bindings:
+            binding = variant_bindings[0]
+            variant_id = binding.get("variant_id")
+            variant_value = binding.get("variant_value")
+            variant_text = f" | variant_id={variant_id} | variant_value={variant_value}"
         if option_descriptions:
             joined = "; ".join(option_descriptions)
-            print(f"  {_product_label(product)} | option values: {joined}")
+            print(f"  {_product_label(product)} | option values: {joined}{variant_text}")
         else:
-            print(f"  {_product_label(product)}")
+            print(f"  {_product_label(product)}{variant_text}")
     print(f"- title: {title}")
     print(f"- price: {price} {currency}")
     print(f"- local offer enabled: {offer_enabled}")
@@ -1942,6 +2002,15 @@ def action_manual_link() -> int:
     failed = 0
     for target in targets:
         product = target["product"]
+        variant_bindings = target["variant_bindings"]
+        primary_binding = variant_bindings[0] if variant_bindings else {}
+        variant_id = primary_binding.get("variant_id")
+        marketplace_variant_id = int(variant_id) if isinstance(variant_id, int) else None
+        marketplace_variant_name = (
+            str(primary_binding.get("variant_value"))
+            if primary_binding.get("variant_value") is not None
+            else None
+        )
         try:
             _upsert_manual_link(
                 marketplace=marketplace,
@@ -1955,6 +2024,8 @@ def action_manual_link() -> int:
                 buyer_input_label=buyer_input_label,
                 buyer_input_help=buyer_input_help,
                 mapping_enabled=mapping_enabled,
+                marketplace_variant_id=marketplace_variant_id,
+                marketplace_variant_name=marketplace_variant_name,
             )
             successful += 1
         except Exception as exc:  # noqa: BLE001 - continue remaining links.
@@ -1965,6 +2036,21 @@ def action_manual_link() -> int:
     print(f"links_created_or_updated: {successful}")
     print(f"links_failed: {failed}")
     _print_linked_rows_for_offer(marketplace, marketplace_offer_id)
+    if successful > 0 and sys.stdin.isatty() and _ask_bool(
+        "Run live price sync now to push calculated prices?",
+        default=True,
+    ):
+        try:
+            from app.services.price_sync import run_price_sync
+
+            sync_result = run_price_sync(dry_run=False, refresh_supplier_prices=False)
+            print("Price sync result:")
+            print(
+                f"- prices_updated: {sync_result.get('prices_updated')} | "
+                f"skipped: {sync_result.get('skipped')} | errors: {sync_result.get('errors')}"
+            )
+        except Exception as exc:  # noqa: BLE001 - keep manual link successful even if sync fails.
+            print(f"Price sync failed after linking: {exc}")
     return 0 if successful > 0 and failed == 0 else (0 if successful > 0 else 1)
 
 

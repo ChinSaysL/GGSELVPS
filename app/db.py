@@ -89,3 +89,23 @@ def _run_sqlite_migrations() -> None:
         for column_name, statement in migrations.items():
             if column_name not in existing_columns:
                 connection.execute(text(statement))
+
+    if not inspector.has_table("product_mappings"):
+        return
+
+    mapping_columns = {
+        column["name"] for column in inspector.get_columns("product_mappings")
+    }
+    mapping_migrations = {
+        "marketplace_variant_id": (
+            "ALTER TABLE product_mappings ADD COLUMN marketplace_variant_id INTEGER"
+        ),
+        "marketplace_variant_name": (
+            "ALTER TABLE product_mappings ADD COLUMN marketplace_variant_name VARCHAR(255)"
+        ),
+    }
+
+    with engine.begin() as connection:
+        for column_name, statement in mapping_migrations.items():
+            if column_name not in mapping_columns:
+                connection.execute(text(statement))

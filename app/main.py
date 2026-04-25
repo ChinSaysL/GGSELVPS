@@ -56,6 +56,8 @@ class ManualOfferLinkRequest(BaseModel):
     buyer_input_label: str | None = None
     buyer_input_help: str | None = None
     mapping_enabled: bool = True
+    marketplace_variant_id: int | None = None
+    marketplace_variant_name: str | None = None
     min_margin_percent: Decimal | None = None
     min_profit_usd: Decimal | None = None
     max_price: Decimal | None = None
@@ -159,6 +161,8 @@ def list_offers(
                 ),
                 "mapping_id": mapping.id if mapping else None,
                 "mapping_enabled": mapping.enabled if mapping else None,
+                "mapping_variant_id": mapping.marketplace_variant_id if mapping else None,
+                "mapping_variant_name": mapping.marketplace_variant_name if mapping else None,
                 "last_synced_at": _serialize_datetime(offer.last_synced_at),
             }
         )
@@ -362,6 +366,8 @@ def manual_link_offer(
             supplier_product_id=payload.supplier_product_id,
             marketplace_offer_id=offer.id,
             enabled=payload.mapping_enabled,
+            marketplace_variant_id=payload.marketplace_variant_id,
+            marketplace_variant_name=payload.marketplace_variant_name,
             min_margin_percent=payload.min_margin_percent,
             min_profit_usd=payload.min_profit_usd,
             max_price=payload.max_price,
@@ -370,6 +376,8 @@ def manual_link_offer(
         mapping_created = True
     else:
         mapping.enabled = payload.mapping_enabled
+        mapping.marketplace_variant_id = payload.marketplace_variant_id
+        mapping.marketplace_variant_name = payload.marketplace_variant_name
         mapping.min_margin_percent = payload.min_margin_percent
         mapping.min_profit_usd = payload.min_profit_usd
         mapping.max_price = payload.max_price
@@ -401,5 +409,7 @@ def manual_link_offer(
             "enabled": mapping.enabled,
             "supplier_product_id": mapping.supplier_product_id,
             "marketplace_offer_id": mapping.marketplace_offer_id,
+            "marketplace_variant_id": mapping.marketplace_variant_id,
+            "marketplace_variant_name": mapping.marketplace_variant_name,
         },
     }
