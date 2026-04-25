@@ -55,6 +55,17 @@ class GEngineProductReference:
     source: str
 
 
+@dataclass
+class _ListSupplierClient:
+    products: list[dict[str, Any]]
+
+    def list_products(self) -> list[dict[str, Any]]:
+        return self.products
+
+    def close(self) -> None:
+        return None
+
+
 def _run_command(command: Sequence[str]) -> int:
     print(f"\n$ {' '.join(command)}\n")
     return subprocess.run(command, cwd=REPO_ROOT, check=False).returncode
@@ -206,6 +217,23 @@ def _normalize_search_text(value: object) -> str:
     return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
 
 
+def _title_from_slug(slug: str | None) -> str | None:
+    if not slug:
+        return None
+    normalized = _normalize_search_text(slug)
+    if not normalized:
+        return None
+    replacements = {
+        "psn": "PSN",
+        "ru": "RU",
+        "cis": "CIS",
+        "try": "TRY",
+        "tl": "TL",
+    }
+    words = [replacements.get(word, word.capitalize()) for word in normalized.split()]
+    return " ".join(words)
+
+
 def _parse_gengine_reference(value: str) -> GEngineProductReference | None:
     raw_value = value.strip()
     if not raw_value:
@@ -311,6 +339,54 @@ def _sort_products_for_reference(
         return (direct_id_score, product.id)
 
     return sorted(products, key=score)
+
+
+def _import_gengine_reference(reference: GEngineProductReference) -> int:
+    if reference.kind not in {"shop", "unknown"}:
+        print(
+            f"On-demand import for G-Engine '{reference.kind}' links is not implemented yet. "
+            "Run the normal product sync, or use a local product row already imported."
+        )
+        return 0
+
+    try:
+        from app.clients import GEngineClient
+        from app.config import get_settings
+        from app.db import SessionLocal
+        from app.services.product_sync import sync_products
+    except ImportError as exc:
+        print(f"Could not import app dependencies: {exc}")
+        print("Run: python -m pip install -r requirements.txt")
+        return 0
+
+    settings = get_settings()
+    client = GEngineClient(settings.gengine_base_url, settings.gengine_api_key)
+    try:
+        products = client.list_product_denominations(
+            reference.product_id,
+            fallback_title=_title_from_slug(reference.slug),
+            source_slug=reference.slug,
+        )
+    except Exception as exc:  # noqa: BLE001 - CLI should show a readable failure.
+        print(f"Could not fetch G-Engine product ID {reference.product_id}: {exc}")
+        return 0
+    finally:
+        client.close()
+
+    if not products:
+        print(f"G-Engine returned no denominations for product ID {reference.product_id}.")
+        return 0
+
+    with SessionLocal() as db:
+        result = sync_products(
+            db=db,
+            settings=settings,
+            supplier_client=_ListSupplierClient(products),
+            marketplace_name=None,
+        )
+        db.commit()
+
+    return int(result["products_imported"])
 
 
 def _load_recent_products(limit: int = 200) -> list[Any]:
@@ -518,8 +594,16 @@ def _choose_product_interactively() -> Any | None:
                 f"No imported rows matched G-Engine {reference.kind} product ID "
                 f"{reference.product_id}."
             )
-            print("Run product sync first. If it still does not appear, this G-Engine section")
-            print("may not be imported by the current integration yet.")
+            if reference.kind in {"shop", "unknown"}:
+                if _ask_bool("Try importing this G-Engine product ID now?", default=True):
+                    imported = _import_gengine_reference(reference)
+                    print(f"Imported rows: {imported}")
+                    products = _load_recent_products(limit=1000)
+                    next_reference = reference
+                    continue
+
+            print("If it still does not appear, this G-Engine section may not be")
+            print("imported by the current integration yet.")
             continue
 
         visible_matches = matches[:50]

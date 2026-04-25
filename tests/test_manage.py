@@ -79,6 +79,25 @@ def test_product_reference_matches_base_product_id_from_raw_payload() -> None:
     assert manage._product_matches_reference(product, reference)
 
 
+def test_product_reference_matches_base_product_id_field() -> None:
+    product = SimpleNamespace(
+        id=130,
+        title="250 TRY",
+        category="Gift Card, PlayStation",
+        denomination="250 TRY",
+        supplier_product_id="5001",
+        raw_payload_json='{"id":"5001","base_product_id":"5"}',
+    )
+    reference = manage.GEngineProductReference(
+        kind="shop",
+        product_id="5",
+        slug="playstation-store-wallet-turkey",
+        source="link",
+    )
+
+    assert manage._product_matches_reference(product, reference)
+
+
 def test_product_reference_matches_direct_supplier_product_id() -> None:
     product = SimpleNamespace(
         id=1,
@@ -129,3 +148,10 @@ def test_default_buyer_input_label_prefers_steam_friend_code() -> None:
         denomination="Steam Key RU+CIS",
     )
     assert manage._default_buyer_input_label(product) == "Steam friend code"
+
+
+def test_title_from_slug_formats_readable_title() -> None:
+    assert (
+        manage._title_from_slug("playstation-store-wallet-turkey")
+        == "Playstation Store Wallet Turkey"
+    )

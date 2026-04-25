@@ -114,6 +114,72 @@ def test_gengine_list_products_expands_denominations() -> None:
     assert any(path.endswith("/shop/denominations/100") for path in call_paths)
 
 
+def test_gengine_list_product_denominations_fetches_direct_product_id() -> None:
+    captured_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_paths.append(request.url.path)
+        if request.url.path.endswith("/shop/denominations/5"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "data": {
+                        "denominations": [
+                            {
+                                "id": "5001",
+                                "price": "5.50",
+                                "denomination": "250 TRY",
+                                "stock": "300+",
+                            },
+                            {
+                                "id": "5002",
+                                "price": "11.00",
+                                "denomination": "500 TRY",
+                                "stock": "300+",
+                            },
+                        ]
+                    }
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    products = client.list_product_denominations(
+        "5",
+        fallback_title="Playstation Store Wallet Turkey",
+        source_slug="playstation-store-wallet-turkey",
+    )
+    client.close()
+
+    assert captured_paths == ["/v2.1/shop/denominations/5"]
+    assert products == [
+        {
+            "product_id": "5",
+            "base_product_id": "5",
+            "source_slug": "playstation-store-wallet-turkey",
+            "title": "Playstation Store Wallet Turkey",
+            "name": "Playstation Store Wallet Turkey",
+            "id": "5001",
+            "price": "5.50",
+            "denomination": "250 TRY",
+            "stock": "300+",
+        },
+        {
+            "product_id": "5",
+            "base_product_id": "5",
+            "source_slug": "playstation-store-wallet-turkey",
+            "title": "Playstation Store Wallet Turkey",
+            "name": "Playstation Store Wallet Turkey",
+            "id": "5002",
+            "price": "11.00",
+            "denomination": "500 TRY",
+            "stock": "300+",
+        },
+    ]
+
+
 def test_gengine_list_products_falls_back_to_base_product_when_denominations_fail() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path

@@ -128,6 +128,65 @@ class GEngineClient(BaseAPIClient):
 
         return expanded_products
 
+    def list_product_denominations(
+        self,
+        product_id: str,
+        *,
+        fallback_title: str | None = None,
+        source_slug: str | None = None,
+    ) -> list[dict[str, Any]]:
+        detail_response = self.get_product(product_id)
+        denominations = self._extract_denominations(detail_response)
+        base_product = self._extract_product_detail_base(
+            detail_response,
+            product_id=product_id,
+            fallback_title=fallback_title,
+            source_slug=source_slug,
+        )
+
+        if not denominations:
+            return [base_product]
+
+        expanded_products: list[dict[str, Any]] = []
+        for index, denomination in enumerate(denominations, start=1):
+            combined = {**base_product, **denomination}
+            combined.setdefault("product_id", product_id)
+            combined.setdefault("base_product_id", product_id)
+            combined.setdefault("source_slug", source_slug)
+            if combined.get("id") is None:
+                combined["id"] = f"{product_id}:{index}"
+            expanded_products.append(combined)
+        return expanded_products
+
+    def _extract_product_detail_base(
+        self,
+        response: dict[str, Any],
+        *,
+        product_id: str,
+        fallback_title: str | None,
+        source_slug: str | None,
+    ) -> dict[str, Any]:
+        data = response.get("data")
+        detail = data if isinstance(data, dict) else response
+        base: dict[str, Any] = {
+            "product_id": product_id,
+            "base_product_id": product_id,
+            "source_slug": source_slug,
+        }
+
+        if isinstance(detail, dict):
+            for key, value in detail.items():
+                if isinstance(value, (dict, list)):
+                    continue
+                if key in {"denominations", "items"}:
+                    continue
+                base[key] = value
+
+        if fallback_title:
+            base.setdefault("title", fallback_title)
+            base.setdefault("name", fallback_title)
+        return base
+
     def get_product(self, product_id: str) -> dict[str, Any]:
         response = self._request_json(
             method="GET",
