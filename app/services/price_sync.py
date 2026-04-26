@@ -328,15 +328,10 @@ def _group_mappings_by_offer(mappings: list[ProductMapping]) -> dict[int, list[P
 def _digiseller_variant_payload(
     plans: list[tuple[ProductMapping, MarketplaceOffer, _PricePlan]],
 ) -> tuple[Decimal, list[dict[str, Any]]]:
-    base_candidates: list[Decimal] = []
-    for mapping, _offer, plan in plans:
-        if mapping.marketplace_variant_id is None:
-            base_candidates.append(plan.recommended_price)
-
-    if base_candidates:
-        base_price = base_candidates[0]
-    else:
-        base_price = min(plan.recommended_price for _mapping, _offer, plan in plans)
+    # Digiseller uses fixed base product price + per-variant modifiers.
+    # Keep base anchored at the minimum recommended absolute price so every
+    # modifier can be represented as a non-negative PricePlus value.
+    base_price = min(plan.recommended_price for _mapping, _offer, plan in plans)
 
     variants: list[dict[str, Any]] = []
     for mapping, _offer, plan in plans:
@@ -344,10 +339,9 @@ def _digiseller_variant_payload(
         if variant_id is None:
             continue
         delta = plan.recommended_price - base_price
-        # Keep payload compatible with Digiseller UI model:
-        # base product price + only non-zero "PricePlus" modifiers per variant.
-        if delta <= Decimal("0"):
-            continue
+        if delta < Decimal("0"):
+            delta = Decimal("0")
+        delta = delta.quantize(Decimal("0.01"))
         variants.append(
             {
                 "variant_id": int(variant_id),

@@ -436,5 +436,8 @@ def test_price_sync_updates_digiseller_variant_group_with_single_api_call(
     assert currency == "USD"
     assert variants is not None
     variant_ids = {item["variant_id"] for item in variants}
-    assert variant_ids == {1002}
+    assert variant_ids == {1001, 1002}
+    variant_rates = {int(item["variant_id"]): Decimal(str(item["rate"])) for item in variants}
+    assert variant_rates[1001] == Decimal("0.0")
+    assert variant_rates[1002] > Decimal("0")
     assert base_price > 0
