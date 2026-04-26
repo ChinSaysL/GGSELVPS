@@ -535,6 +535,86 @@ def test_digiseller_set_offer_price_refreshes_apilogin_token_after_401() -> None
     assert state["apilogin_calls"] == 2
 
 
+def test_digiseller_set_offer_enabled_uses_bulk_status_endpoint() -> None:
+    calls: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/product/edit/V2/status"):
+            calls["status_payload"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                status_code=200,
+                json={"retval": 0, "retdesc": None, "errors": None, "content": "task-123"},
+            )
+        if request.url.path.endswith("/api/product/edit/UpdateProductsTaskStatus"):
+            calls["status_query"] = dict(request.url.params)
+            return httpx.Response(
+                status_code=200,
+                json={"TaskId": "task-123", "Status": 3, "ErrorCount": 0},
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    result = client.set_offer_enabled("5850465", False)
+    client.close()
+
+    assert result.get("status") == "ok"
+    assert result.get("task_id") == "task-123"
+    assert calls["status_payload"] == {"new_status": "disabled", "products": [5850465]}
+    assert calls["status_query"]["taskId"] == "task-123"
+
+
+def test_digiseller_set_offer_variant_visible_edits_target_variant() -> None:
+    calls: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/products/options/list/5850465"):
+            return httpx.Response(
+                status_code=200,
+                json={"retval": 0, "content": [{"id": 777}]},
+            )
+        if request.url.path.endswith("/api/products/options/777"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "retval": 0,
+                    "content": {
+                        "id": 777,
+                        "variants": [
+                            {
+                                "variant_id": 19472011,
+                                "name": [{"locale": "en-US", "value": "250 TRY"}],
+                                "type": "priceplus",
+                                "rate": 0,
+                                "is_default": True,
+                                "visible": True,
+                                "order": 1,
+                            }
+                        ],
+                    },
+                },
+            )
+        if request.url.path.endswith("/api/products/options/777/variants/19472011"):
+            calls["variant_payload"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(
+                status_code=200,
+                json={"retval": 0, "content": {"status": "Success"}},
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    result = client.set_offer_variant_visible("5850465", 19472011, False)
+    client.close()
+
+    assert result["status"] == "ok"
+    assert result["variant_id"] == 19472011
+    assert result["visible"] is False
+    assert calls["variant_payload"]["visible"] is False
+
+
 def test_digiseller_listing_create_and_base_update_are_disabled() -> None:
     client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
     with pytest.raises(NotImplementedError):

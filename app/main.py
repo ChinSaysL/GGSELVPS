@@ -180,7 +180,7 @@ def sync_prices(dry_run: bool = Query(default=False)) -> dict[str, Any]:
 
 
 @app.post("/sync/stock")
-def sync_stock() -> dict[str, int | str]:
+def sync_stock() -> dict[str, Any]:
     return run_stock_sync()
 
 

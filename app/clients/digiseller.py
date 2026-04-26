@@ -367,12 +367,31 @@ class DigisellerClient(BaseAPIClient):
         )
 
     def set_offer_enabled(self, offer_id: str, enabled: bool) -> dict[str, Any]:
-        _ = (offer_id, enabled)
-        # TODO: Availability flag field name is not confirmed in the docs used here.
-        raise NotImplementedError(
-            "Digiseller set_offer_enabled is not implemented. "
-            "Please provide the exact payload field for enable/disable."
+        token = self._get_access_token()
+        response = self._request_json(
+            method="POST",
+            path="/api/product/edit/V2/status",
+            params={"token": token},
+            json_body={
+                "new_status": "enabled" if enabled else "disabled",
+                "products": [int(offer_id)],
+            },
         )
+        if not isinstance(response, dict):
+            raise APIRequestError("Digiseller status update returned unexpected response format.")
+        self._ensure_success_response(response, context="Digiseller status update failed")
+
+        task_id = self._extract_task_id(response)
+        if task_id is None:
+            content = response.get("content")
+            if isinstance(content, str) and content.strip():
+                task_id = content.strip()
+
+        if task_id:
+            task_status = self._wait_for_price_update_task(task_id=task_id, token=token)
+            task_status.setdefault("task_id", task_id)
+            return task_status
+        return {"status": "ok"}
 
     def _request_price_update(
         self,
@@ -547,6 +566,180 @@ class DigisellerClient(BaseAPIClient):
                 f"({task_id}), last status={status_code}"
             )
         raise APIRequestError(f"Digiseller price update task timed out ({task_id}).")
+
+    @staticmethod
+    def _response_is_success(response: dict[str, Any]) -> bool:
+        retval = response.get("retval")
+        if retval is None:
+            return True
+        return retval in (0, "0")
+
+    @staticmethod
+    def _response_error_message(response: dict[str, Any]) -> str:
+        errors = response.get("errors")
+        if isinstance(errors, list):
+            parts: list[str] = []
+            for item in errors:
+                if isinstance(item, dict):
+                    code = str(item.get("code") or "").strip()
+                    message = str(item.get("message") or "").strip()
+                    if code and message:
+                        parts.append(f"{code}: {message}")
+                    elif message:
+                        parts.append(message)
+            if parts:
+                return "; ".join(parts)
+        if isinstance(errors, dict):
+            parts = [
+                f"{str(key).strip()}: {str(value).strip()}"
+                for key, value in errors.items()
+                if str(value).strip()
+            ]
+            if parts:
+                return "; ".join(parts)
+
+        for key in ("retdesc", "desc", "message"):
+            value = response.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return "unknown api error"
+
+    def _ensure_success_response(self, response: dict[str, Any], *, context: str) -> None:
+        if self._response_is_success(response):
+            return
+        reason = self._response_error_message(response)
+        raise APIRequestError(f"{context}: {reason}")
+
+    @staticmethod
+    def _extract_option_id(payload: object) -> int | None:
+        if not isinstance(payload, dict):
+            return None
+        for key in ("id", "option_id", "optionId"):
+            raw = payload.get(key)
+            if raw is None:
+                continue
+            try:
+                return int(str(raw).strip())
+            except ValueError:
+                continue
+        return None
+
+    @staticmethod
+    def _extract_variant_id(payload: object) -> int | None:
+        if not isinstance(payload, dict):
+            return None
+        for key in ("variant_id", "variantId", "id"):
+            raw = payload.get(key)
+            if raw is None:
+                continue
+            try:
+                return int(str(raw).strip())
+            except ValueError:
+                continue
+        return None
+
+    def _list_product_option_ids(self, product_id: str, *, token: str) -> list[int]:
+        response = self._request_json(
+            method="GET",
+            path=f"/api/products/options/list/{product_id}",
+            params={"token": token},
+        )
+        if not isinstance(response, dict):
+            raise APIRequestError("Digiseller options list returned unexpected response format.")
+        self._ensure_success_response(response, context="Digiseller options/list failed")
+
+        content = response.get("content")
+        if not isinstance(content, list):
+            return []
+        option_ids: list[int] = []
+        for item in content:
+            option_id = self._extract_option_id(item)
+            if option_id is None:
+                continue
+            option_ids.append(option_id)
+        return option_ids
+
+    def _get_product_option(self, option_id: int, *, token: str) -> dict[str, Any]:
+        response = self._request_json(
+            method="GET",
+            path=f"/api/products/options/{option_id}",
+            params={"token": token},
+        )
+        if not isinstance(response, dict):
+            raise APIRequestError("Digiseller option details returned unexpected response format.")
+        self._ensure_success_response(response, context="Digiseller options/details failed")
+
+        content = response.get("content")
+        if not isinstance(content, dict):
+            raise APIRequestError("Digiseller option details missing content object.")
+        return content
+
+    def _find_variant_payload(
+        self,
+        *,
+        product_id: str,
+        variant_id: int,
+        token: str,
+    ) -> tuple[int, dict[str, Any]]:
+        option_ids = self._list_product_option_ids(product_id, token=token)
+        for option_id in option_ids:
+            option = self._get_product_option(option_id, token=token)
+            variants = option.get("variants")
+            if not isinstance(variants, list):
+                continue
+            for variant in variants:
+                if not isinstance(variant, dict):
+                    continue
+                if self._extract_variant_id(variant) == variant_id:
+                    return option_id, variant
+        raise APIRequestError(
+            f"Digiseller variant {variant_id} was not found on product {product_id}."
+        )
+
+    def set_offer_variant_visible(
+        self,
+        offer_id: str,
+        variant_id: int,
+        visible: bool,
+    ) -> dict[str, Any]:
+        token = self._get_access_token()
+        option_id, variant = self._find_variant_payload(
+            product_id=offer_id,
+            variant_id=variant_id,
+            token=token,
+        )
+
+        current_visible = bool(variant.get("visible"))
+        if current_visible == bool(visible):
+            return {"status": "ok", "unchanged": True}
+
+        payload: dict[str, Any] = {
+            "name": variant.get("name"),
+            "type": variant.get("type", "priceplus"),
+            "rate": variant.get("rate", 0),
+            "default": bool(variant.get("is_default", variant.get("default", False))),
+            "visible": bool(visible),
+            "order": int(variant.get("order", 1)),
+        }
+        response = self._request_json(
+            method="POST",
+            path=f"/api/products/options/{option_id}/variants/{variant_id}",
+            params={"token": token},
+            json_body=payload,
+        )
+        if not isinstance(response, dict):
+            raise APIRequestError("Digiseller variant update returned unexpected response format.")
+        self._ensure_success_response(response, context="Digiseller variant visibility update failed")
+        return {
+            "status": "ok",
+            "offer_id": offer_id,
+            "option_id": option_id,
+            "variant_id": variant_id,
+            "visible": bool(visible),
+        }
 
     def set_offer_price(
         self,

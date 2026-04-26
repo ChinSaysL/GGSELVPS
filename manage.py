@@ -46,8 +46,14 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
         "Show recommended prices for linked offers without updating marketplaces.",
     ),
     MenuAction("14", "Sync prices (live)", "sync-prices", "Update linked marketplace offer prices."),
-    MenuAction("15", "Manual link help", "manual-link-example", "Print an example link request."),
-    MenuAction("16", "Docker build", "docker-build", "Run docker compose build."),
+    MenuAction(
+        "15",
+        "Sync stock (live)",
+        "sync-stock",
+        "Apply stock/availability updates from supplier stock and usable balance.",
+    ),
+    MenuAction("16", "Manual link help", "manual-link-example", "Print an example link request."),
+    MenuAction("17", "Docker build", "docker-build", "Run docker compose build."),
 )
 
 VALID_MARKETPLACES = ("digiseller", "ggsel")
@@ -311,6 +317,64 @@ def action_sync_prices() -> int:
         return 1
 
     _print_price_sync_result(result)
+    return 0 if result.get("errors", 0) == 0 else 1
+
+
+def action_sync_stock() -> int:
+    _print_header("Stock Sync (Manual Trigger)")
+    print(
+        "This checks supplier stock and usable balance, then applies stock visibility "
+        "updates for linked offers."
+    )
+    if sys.stdin.isatty() and not _ask_bool("Update stock status now (live mode)?", default=True):
+        print("Cancelled.")
+        return 0
+
+    try:
+        from app.services.stock_sync import run_stock_sync
+    except ImportError as exc:
+        print(f"Could not import app dependencies: {exc}")
+        print("Run: python -m pip install -r requirements.txt")
+        return 1
+
+    try:
+        result = run_stock_sync()
+    except Exception as exc:  # noqa: BLE001 - CLI should show a readable failure.
+        print(f"Stock sync failed: {exc}")
+        return 1
+
+    for key in (
+        "status",
+        "balance_usd",
+        "usable_balance_usd",
+        "offers_checked",
+        "offers_enabled",
+        "offers_disabled",
+        "skipped",
+        "errors",
+    ):
+        if key in result:
+            print(f"{key}: {result[key]}")
+
+    details = result.get("details")
+    if isinstance(details, list):
+        skip_details = [item for item in details if isinstance(item, dict) and item.get("action") == "skipped"]
+        if skip_details:
+            print("Skipped reasons (first 10):")
+            for item in skip_details[:10]:
+                print(
+                    f"- {item.get('marketplace')}:{item.get('marketplace_offer_id')} | "
+                    f"mapping={item.get('mapping_id')} | reason={item.get('reason')}"
+                )
+        error_details = [item for item in details if isinstance(item, dict) and item.get("action") == "error"]
+        if error_details:
+            print("Error reasons (first 10):")
+            for item in error_details[:10]:
+                print(
+                    f"- {item.get('marketplace')}:{item.get('marketplace_offer_id')} | "
+                    f"mapping={item.get('mapping_id')} | reason={item.get('reason')}"
+                )
+
     return 0 if result.get("errors", 0) == 0 else 1
 
 
@@ -2220,6 +2284,7 @@ COMMANDS: dict[str, Callable[[], int]] = {
     "auto-link": action_auto_link,
     "price-preview": action_price_preview,
     "sync-prices": action_sync_prices,
+    "sync-stock": action_sync_stock,
     "list-products": action_list_products,
     "list-offers": action_list_offers,
     "manual-link": action_manual_link,

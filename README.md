@@ -9,16 +9,17 @@ This repository currently includes Stage 1-5 foundations:
 - Structured logging
 - Pricing engine (no competitor data)
 - Stock rule engine
-- API client layer with confirmed endpoint wiring where available, and explicit TODO `NotImplementedError` for unresolved operations
+- API client layer with confirmed endpoint wiring where available
 - Product sync service that imports/upserts G-Engine supplier products only
 - Manual marketplace offer linking via `/offers/manual-link` and `/mappings/import`
 - Cost-based price preview/sync for already-linked offers
+- Stock sync with balance-aware decisions; Digiseller variant-level visibility updates for linked option mappings
 - Tests for pricing, stock rules, product import, client behavior, and idempotency decisions
 - Docker + docker-compose deployment baseline
 
 Important: this app does not auto-create marketplace listings. Create GGSEL/Digiseller offers manually in the marketplace, then link them to imported supplier products inside this app.
 
-API integrations are partially implemented and continue to evolve as endpoint mappings are confirmed from official docs.
+API integrations are partially implemented and continue to evolve as endpoint mappings are confirmed from official docs (notably GGSEL stock/price toggles and order delivery flows).
 
 ## Tech
 
@@ -88,6 +89,7 @@ python manage.py sync-products
 python manage.py auto-link
 python manage.py price-preview
 python manage.py sync-prices
+python manage.py sync-stock
 python manage.py list-products
 python manage.py manual-link
 python manage.py manual-link-example
@@ -112,6 +114,12 @@ python manage.py manual-link-example
 For marketplace pages with option values like `250 TRY` and `500 TRY`, keep those option texts aligned with G-Engine denominations and `manual-link` can map the whole page in one run.
 
 `python manage.py price-preview` refreshes linked G-Engine costs when possible and shows the recommended cost-based price. `python manage.py sync-prices` applies those prices to supported linked marketplaces. Digiseller price updates support USD/RUB product prices and, when variant IDs are linked, per-variant price modifiers. GGSEL price updates remain disabled until the exact update payload schema is confirmed.
+
+`POST /sync/stock` now:
+- fetches G-Engine balance and writes a `balance_snapshots` row
+- evaluates each linked mapping with stock rules (supplier availability, supplier stock, usable balance)
+- for Digiseller mappings with `marketplace_variant_id`, toggles each variant visibility individually (so one denomination can be out of stock while others remain available)
+- falls back to whole-offer enable/disable only when variant-level control is unavailable or not applicable
 
 Supported G-Engine link shapes include:
 - `https://b2b.g-engine.net/en/shop/5/playstation-store-wallet-turkey`
@@ -246,6 +254,6 @@ docker compose logs -f
 - Price sync uses supplier cost, fee/buffer settings, markup tiers, and minimum profit only.
 - No browser automation is used.
 - No automatic marketplace listing creation is implemented.
-- Base listing edits are intentionally disabled in client code.
+- Automatic listing creation is disabled in client code.
 - GGSEL/Digiseller offers must be created manually, then linked to supplier products.
 - Automatic thumbnail transfer from G-Engine is not guaranteed by current public API contracts; set preview images manually when needed.
