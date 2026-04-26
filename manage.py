@@ -1482,12 +1482,89 @@ _SINGLE_OFFER_GENERIC_TOKENS = {
 }
 
 
+_CURRENCY_REGION_TOKENS = {
+    "RUB": {"rub", "rur", "ru", "cis", "russia", "russian"},
+    "TRY": {"try", "tl", "tr", "turkey", "turkiye"},
+    "PHP": {"php", "philippines", "philippine"},
+    "USD": {"usd", "us", "usa", "america", "american"},
+    "EUR": {"eur", "euro", "eu", "europe", "european"},
+}
+
+
 def _meaningful_match_tokens(value: object) -> set[str]:
     return {
         token
         for token in _normalize_search_text(value).split()
         if token and token not in _SINGLE_OFFER_GENERIC_TOKENS
     }
+
+
+def _snapshot_match_text(snapshot: dict[str, Any]) -> str:
+    option_names = snapshot.get("option_parameter_names")
+    option_text = ""
+    if isinstance(option_names, list):
+        option_text = " ".join(str(item) for item in option_names)
+
+    return " ".join(
+        [
+            str(snapshot.get("title") or ""),
+            str(snapshot.get("denomination") or ""),
+            str(snapshot.get("buyer_input_label") or ""),
+            str(snapshot.get("detected_buyer_input_label") or ""),
+            option_text,
+        ]
+    )
+
+
+def _currency_hints_from_text(value: object) -> set[str]:
+    hints: set[str] = set()
+    for token in _normalize_search_text(value).split():
+        currency = _normalize_currency_code(token.upper())
+        if currency in _CURRENCY_REGION_TOKENS:
+            hints.add(currency)
+    return hints
+
+
+def _is_direct_service_product(product: Any) -> bool:
+    if _product_denomination_signature(product) is not None:
+        return False
+    category = _normalize_search_text(getattr(product, "category", None) or "")
+    return "gift card" not in category
+
+
+def _direct_service_products(products: list[Any]) -> list[Any]:
+    return sorted(
+        [product for product in products if _is_direct_service_product(product)],
+        key=lambda item: int(item.id),
+    )
+
+
+def _product_matches_currency_hint(product: Any, currency: str) -> bool:
+    region_tokens = _CURRENCY_REGION_TOKENS.get(currency, set())
+    if not region_tokens:
+        return False
+    product_tokens = set(_product_search_blob(product).split())
+    return bool(product_tokens & region_tokens)
+
+
+def _products_matching_input_currency_hint(
+    products: list[Any],
+    snapshot: dict[str, Any],
+) -> list[Any]:
+    currency_hints = _currency_hints_from_text(_snapshot_match_text(snapshot))
+    if not currency_hints:
+        return []
+
+    direct_products = _direct_service_products(products)
+    if not direct_products:
+        return []
+
+    matches = [
+        product
+        for product in direct_products
+        if any(_product_matches_currency_hint(product, currency) for currency in currency_hints)
+    ]
+    return sorted(matches, key=lambda item: int(item.id))
 
 
 def _products_matching_snapshot_single_offer(
@@ -1504,12 +1581,7 @@ def _products_matching_snapshot_single_offer(
             candidate_products = signature_matches
 
     snapshot_text = _normalize_search_text(
-        " ".join(
-            [
-                str(snapshot.get("title") or ""),
-                str(snapshot.get("denomination") or ""),
-            ]
-        )
+        _snapshot_match_text(snapshot)
     )
     snapshot_tokens = _meaningful_match_tokens(snapshot_text)
     matches: list[Any] = []
@@ -1554,6 +1626,10 @@ def _auto_select_single_offer_product(
         if len(snapshot_matches) == 1:
             return snapshot_matches[0], "marketplace title/denomination matched one local row"
 
+        currency_matches = _products_matching_input_currency_hint(products, snapshot)
+        if len(currency_matches) == 1:
+            return currency_matches[0], "marketplace buyer-input currency matched one direct row"
+
     direct_id_matches = [
         product
         for product in products
@@ -1572,6 +1648,17 @@ def _auto_select_single_offer_product(
         return specific_products[0], "parent G-Engine product matched one non-denomination row"
 
     return None, None
+
+
+def _single_offer_manual_candidates(
+    reference: GEngineProductReference,
+    products: list[Any],
+) -> list[Any]:
+    if reference.kind == "recharge":
+        direct_products = _direct_service_products(products)
+        if direct_products:
+            return direct_products
+    return products
 
 
 def _reference_query_hint(reference: GEngineProductReference, products: list[Any]) -> str:
@@ -2292,10 +2379,16 @@ def action_manual_link() -> int:
             )
             print(_product_label(selected_product))
         else:
+            manual_candidates = _single_offer_manual_candidates(reference, reference_products)
             print("\nNo option-value list found on marketplace item. Select one local row to link:")
-            _print_reference_products(reference_products, limit=25)
+            if len(manual_candidates) < len(reference_products):
+                print(
+                    "Showing direct recharge/top-up candidates only; "
+                    "gift-card denomination rows were hidden from this prompt."
+                )
+            _print_reference_products(manual_candidates, limit=25)
             selected_product = _choose_product_from_reference_rows(
-                reference_products,
+                manual_candidates,
                 prompt="Local row id",
                 default_product_id=None,
                 allow_skip=False,

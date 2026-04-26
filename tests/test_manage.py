@@ -441,6 +441,88 @@ def test_auto_select_single_offer_uses_snapshot_title() -> None:
     assert reason == "marketplace title/denomination matched one local row"
 
 
+def test_auto_select_single_offer_uses_buyer_input_currency_hint() -> None:
+    reference = manage.GEngineProductReference(
+        kind="recharge",
+        product_id="1",
+        slug="steam",
+        source="https://b2b.g-engine.net/en/recharge/1/steam",
+    )
+    products = [
+        SimpleNamespace(
+            id=1,
+            title="Steam RU+CIS",
+            category="Games, Steam",
+            denomination="Steam Key RU+CIS",
+            supplier_product_id="718",
+            raw_payload_json='{"recharge_product_id":"1"}',
+        ),
+        SimpleNamespace(
+            id=2,
+            title="Steam Worldwide",
+            category="Games, Steam",
+            denomination="Worldwide",
+            supplier_product_id="719",
+            raw_payload_json='{"recharge_product_id":"1"}',
+        ),
+        SimpleNamespace(
+            id=136,
+            title="100 PHP",
+            category="Gift Card, Steam",
+            denomination="100 PHP",
+            supplier_product_id="547",
+            raw_payload_json='{"recharge_product_id":"1"}',
+        ),
+    ]
+
+    product, reason = manage._auto_select_single_offer_product(
+        reference,
+        products,
+        {
+            "title": "Playstation Testing",
+            "denomination": None,
+            "option_parameter_names": ["Account (String)", "Quantity (RUB)"],
+        },
+    )
+
+    assert product is not None
+    assert product.id == 1
+    assert reason == "marketplace buyer-input currency matched one direct row"
+
+
+def test_single_offer_manual_candidates_hide_gift_card_rows_for_recharge() -> None:
+    reference = manage.GEngineProductReference(
+        kind="recharge",
+        product_id="1",
+        slug="steam",
+        source="https://b2b.g-engine.net/en/recharge/1/steam",
+    )
+    products = [
+        SimpleNamespace(
+            id=1,
+            title="Steam RU+CIS",
+            category="Games, Steam",
+            denomination="Steam Key RU+CIS",
+        ),
+        SimpleNamespace(
+            id=2,
+            title="Steam Worldwide",
+            category="Games, Steam",
+            denomination="Worldwide",
+        ),
+        SimpleNamespace(
+            id=136,
+            title="100 PHP",
+            category="Gift Card, Steam",
+            denomination="100 PHP",
+        ),
+    ]
+
+    candidates = manage._single_offer_manual_candidates(reference, products)
+
+    assert [product.id for product in candidates] == [1, 2]
+
+
 def test_auto_select_single_offer_uses_snapshot_denomination_signature() -> None:
     reference = manage.GEngineProductReference(
         kind="shop",
