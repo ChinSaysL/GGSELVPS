@@ -32,9 +32,12 @@ class FakeDigisellerStockClient:
     variant_calls: list[tuple[str, int, bool]] = field(default_factory=list)
     variant_state_calls: list[tuple[str, int, bool, bool | None]] = field(default_factory=list)
     variant_state_error_ids: set[int] = field(default_factory=set)
+    offer_error: Exception | None = None
 
     def set_offer_enabled(self, offer_id: str, enabled: bool) -> dict[str, Any]:
         self.offer_calls.append((offer_id, enabled))
+        if self.offer_error is not None:
+            raise self.offer_error
         return {"status": "ok"}
 
     def set_offer_variant_visible(
@@ -300,6 +303,145 @@ def test_stock_sync_disables_digiseller_variant_parent_when_no_variant_is_fulfil
     assert client.variant_state_calls == []
     assert client.offer_calls == [("5850465", False)]
     assert offer.is_enabled is False
+
+
+def test_stock_sync_treats_digiseller_disable_current_status_error_as_unavailable(
+    db_session: Session,
+) -> None:
+    supplier_250 = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="5",
+        title="Playstation Store Wallet Turkey",
+        category="Gift Card, PlayStation",
+        denomination="250 TRY",
+        region=None,
+        cost_usd=Decimal("5.50"),
+        supplier_stock="10",
+        is_available=True,
+        raw_payload_json="{}",
+    )
+    supplier_500 = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="6",
+        title="Playstation Store Wallet Turkey",
+        category="Gift Card, PlayStation",
+        denomination="500 TRY",
+        region=None,
+        cost_usd=Decimal("11.00"),
+        supplier_stock="10",
+        is_available=True,
+        raw_payload_json="{}",
+    )
+    db_session.add_all([supplier_250, supplier_500])
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="digiseller",
+        marketplace_offer_id="5850465",
+        supplier_product_id=supplier_250.id,
+        title="Playstation testing",
+        price=Decimal("7.00"),
+        currency="USD",
+        is_enabled=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+
+    db_session.add_all(
+        [
+            ProductMapping(
+                supplier_product_id=supplier_250.id,
+                marketplace_offer_id=offer.id,
+                enabled=True,
+                marketplace_variant_id=19472011,
+                marketplace_variant_name="250 TRY",
+            ),
+            ProductMapping(
+                supplier_product_id=supplier_500.id,
+                marketplace_offer_id=offer.id,
+                enabled=True,
+                marketplace_variant_id=19472020,
+                marketplace_variant_name="500 TRY",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    client = FakeDigisellerStockClient(
+        offer_error=RuntimeError(
+            "Digiseller price update task failed (task-id): 5850465: "
+            "The current status of product does not allow the specified action to be applied"
+        )
+    )
+    stats = sync_offer_stock(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_balance_client=FakeSupplierBalanceClient({"balance": "0.00"}),
+        marketplace_clients={"digiseller": client},
+    )
+
+    assert stats["errors"] == 0
+    assert client.offer_calls == [("5850465", False)]
+    assert offer.is_enabled is False
+    assert any(
+        str(item.get("reason", "")).startswith("parent_offer_already_unavailable")
+        for item in stats["details"]
+        if isinstance(item, dict)
+    )
+
+
+def test_stock_sync_skips_marketplace_call_when_mapping_is_disabled(
+    db_session: Session,
+) -> None:
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="7",
+        title="Steam RU+CIS",
+        category="Games, Steam",
+        denomination="Steam Key RU+CIS",
+        region=None,
+        cost_usd=Decimal("33.41"),
+        supplier_stock="10",
+        is_available=True,
+        raw_payload_json="{}",
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="digiseller",
+        marketplace_offer_id="142",
+        supplier_product_id=supplier.id,
+        title="Steam RU+CIS",
+        price=Decimal("45.00"),
+        currency="USD",
+        is_enabled=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+
+    db_session.add(
+        ProductMapping(
+            supplier_product_id=supplier.id,
+            marketplace_offer_id=offer.id,
+            enabled=False,
+        )
+    )
+    db_session.commit()
+
+    client = FakeDigisellerStockClient(offer_error=RuntimeError("should not be called"))
+    stats = sync_offer_stock(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_balance_client=FakeSupplierBalanceClient({"balance": "200.00"}),
+        marketplace_clients={"digiseller": client},
+    )
+
+    assert stats["errors"] == 0
+    assert stats["skipped"] == 1
+    assert client.offer_calls == []
+    assert offer.is_enabled is False
+    assert stats["details"][0]["reason"] == "mapping_disabled_no_marketplace_update"
 
 
 def test_stock_sync_enforces_single_offer_status_even_when_local_state_matches(

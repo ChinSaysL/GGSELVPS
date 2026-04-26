@@ -200,6 +200,26 @@ def _is_pending_response(response: dict[str, Any] | None) -> tuple[bool, str | N
     return True, task_id or None
 
 
+def _all_decisions_have_reason(
+    decisions: list[tuple[ProductMapping, SupplierProduct, bool, str, Decimal]],
+    reason: str,
+) -> bool:
+    return bool(decisions) and all(item[3] == reason for item in decisions)
+
+
+def _digiseller_disable_is_already_unavailable_error(reason: str) -> bool:
+    text = reason.strip().lower()
+    if not text:
+        return False
+    return "current status of product does not allow the specified action" in text
+
+
+def _marketplace_disable_error_is_safe_noop(*, marketplace: str, reason: str) -> bool:
+    if marketplace != "digiseller":
+        return False
+    return _digiseller_disable_is_already_unavailable_error(reason)
+
+
 def _set_offer_variant_stock_state(
     *,
     client: MarketplaceVariantStockClientProtocol,
@@ -300,6 +320,21 @@ def sync_offer_stock(
             continue
 
         marketplace = offer.marketplace.lower()
+        if _all_decisions_have_reason(decisions, "mapping_disabled"):
+            offer.is_enabled = False
+            offer.last_synced_at = now
+            db.add(offer)
+            for mapping, supplier, _in_stock, reason, required_balance in decisions:
+                detail = _base_detail(mapping=mapping, offer=offer, supplier=supplier)
+                detail["required_balance_usd"] = str(required_balance)
+                detail["stock_reason"] = reason
+                _skip_detail(
+                    stats,
+                    detail,
+                    reason="mapping_disabled_no_marketplace_update",
+                )
+            continue
+
         client = marketplace_clients.get(marketplace)
         if client is None:
             for mapping, supplier, _in_stock, reason, required_balance in decisions:
@@ -337,11 +372,22 @@ def sync_offer_stock(
                         reason=f"parent_offer_status_not_updated:{str(exc)}",
                     )
                 except Exception as exc:  # noqa: BLE001
-                    _error_detail(
-                        stats,
-                        no_stock_parent_detail,
-                        reason=f"parent_offer_status_update_failed:{str(exc)}",
-                    )
+                    error_reason = str(exc)
+                    if _marketplace_disable_error_is_safe_noop(
+                        marketplace=marketplace,
+                        reason=error_reason,
+                    ):
+                        _skip_detail(
+                            stats,
+                            no_stock_parent_detail,
+                            reason=f"parent_offer_already_unavailable:{error_reason}",
+                        )
+                    else:
+                        _error_detail(
+                            stats,
+                            no_stock_parent_detail,
+                            reason=f"parent_offer_status_update_failed:{error_reason}",
+                        )
                 else:
                     parent_pending, parent_task_id = _is_pending_response(
                         parent_response if isinstance(parent_response, dict) else None
@@ -444,11 +490,23 @@ def sync_offer_stock(
                     reason=f"parent_offer_status_not_updated:{str(exc)}",
                 )
             except Exception as exc:  # noqa: BLE001
-                _error_detail(
-                    stats,
-                    parent_detail,
-                    reason=f"parent_offer_status_update_failed:{str(exc)}",
-                )
+                error_reason = str(exc)
+                if not parent_enabled and _marketplace_disable_error_is_safe_noop(
+                    marketplace=marketplace,
+                    reason=error_reason,
+                ):
+                    _status_detail(
+                        stats,
+                        parent_detail,
+                        action="skipped",
+                        reason=f"parent_offer_already_unavailable:{error_reason}",
+                    )
+                else:
+                    _error_detail(
+                        stats,
+                        parent_detail,
+                        reason=f"parent_offer_status_update_failed:{error_reason}",
+                    )
             else:
                 parent_pending, parent_task_id = _is_pending_response(
                     parent_response if isinstance(parent_response, dict) else None
@@ -494,10 +552,29 @@ def sync_offer_stock(
                 _skip_detail(stats, detail, reason=f"{str(exc)}:{reason}")
             continue
         except Exception as exc:  # noqa: BLE001
+            error_reason = str(exc)
+            disable_safe_noop = (
+                not target_enabled
+                and _marketplace_disable_error_is_safe_noop(
+                    marketplace=marketplace,
+                    reason=error_reason,
+                )
+            )
             for mapping, supplier, _in_stock, reason, required_balance in decisions:
                 detail = _base_detail(mapping=mapping, offer=offer, supplier=supplier)
                 detail["required_balance_usd"] = str(required_balance)
-                _error_detail(stats, detail, reason=f"{str(exc)}:{reason}")
+                if disable_safe_noop:
+                    _skip_detail(
+                        stats,
+                        detail,
+                        reason=f"offer_already_unavailable:{error_reason}:{reason}",
+                    )
+                else:
+                    _error_detail(stats, detail, reason=f"{error_reason}:{reason}")
+            if disable_safe_noop:
+                offer.is_enabled = False
+                offer.last_synced_at = now
+                db.add(offer)
             continue
 
         is_pending, task_id = _is_pending_response(response if isinstance(response, dict) else None)
