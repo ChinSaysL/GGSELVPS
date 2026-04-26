@@ -789,9 +789,11 @@ def test_ggsel_get_offer_by_id_surfaces_auth_errors() -> None:
 
 def test_ggsel_get_offer_by_id_prefers_product_data_endpoint() -> None:
     captured_paths: list[str] = []
+    captured_queries: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured_paths.append(request.url.path)
+        captured_queries.append(request.url.query.decode())
         if request.url.path.endswith("/api_sellers/api/products/5850465/data"):
             return httpx.Response(
                 status_code=200,
@@ -825,6 +827,7 @@ def test_ggsel_get_offer_by_id_prefers_product_data_endpoint() -> None:
     assert offer["product_id"] == 5850465
     assert offer["options"][0]["variants"][1]["text"] == "500 TRY"
     assert captured_paths == ["/api_sellers/api/products/5850465/data"]
+    assert captured_queries == [""]
 
 
 def test_ggsel_set_offer_price_uses_bulk_endpoint_and_waits_for_task() -> None:

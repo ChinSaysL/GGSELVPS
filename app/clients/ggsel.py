@@ -217,7 +217,6 @@ class GGSELClient(BaseAPIClient):
                 response = self._request_json(
                     method="GET",
                     path=self._build_path(path),
-                    params=self._auth_query_params(),
                     headers={"Accept": "application/json"},
                 )
             except APIRequestError as exc:
