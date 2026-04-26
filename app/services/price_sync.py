@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, ROUND_UP
 from typing import Any, Protocol, cast
 
 from sqlalchemy import select
@@ -61,10 +61,13 @@ class _SupplierRefreshReference:
 class _PricePlan:
     currency: str
     recommended_price: Decimal
+    target_net_price: Decimal
     final_price_usd: Decimal
     profit_usd: Decimal
     markup_percent: Decimal
     min_profit_usd: Decimal
+    marketplace_commission_percent: Decimal
+    payment_system_commission_percent: Decimal
 
 
 class _PriceSyncSkip(RuntimeError):
@@ -244,11 +247,39 @@ def _calculate_price_plan(
     if currency == "RUB":
         usd_rub_rate = resolve_usd_rub_rate(settings)
 
-    recommended_price = convert_usd_to_currency(
+    target_net_price = convert_usd_to_currency(
         calculation.final_price_usd,
         currency,
         manual_usd_rub_rate=usd_rub_rate,
     )
+    recommended_price = target_net_price
+
+    marketplace_commission_percent = Decimal("0")
+    payment_system_commission_percent = Decimal("0")
+    if offer.marketplace.lower() == "ggsel":
+        mapping_marketplace_commission = _to_decimal(mapping.marketplace_commission_percent)
+        mapping_payment_system_commission = _to_decimal(mapping.payment_system_commission_percent)
+        marketplace_commission_percent = (
+            mapping_marketplace_commission
+            if mapping_marketplace_commission is not None
+            else Decimal(str(settings.ggsel_default_marketplace_commission_percent))
+        )
+        payment_system_commission_percent = (
+            mapping_payment_system_commission
+            if mapping_payment_system_commission is not None
+            else Decimal(str(settings.ggsel_default_payment_system_commission_percent))
+        )
+        if marketplace_commission_percent < 0 or payment_system_commission_percent < 0:
+            raise PricingConfigError("GGSEL commission percents must be >= 0.")
+        total_commission_percent = (
+            marketplace_commission_percent + payment_system_commission_percent
+        )
+        if total_commission_percent >= Decimal("1"):
+            raise PricingConfigError("GGSEL total commission percent must be < 1.")
+        recommended_price = (target_net_price / (Decimal("1") - total_commission_percent)).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_UP,
+        )
 
     max_price = _to_decimal(mapping.max_price)
     if max_price is not None and recommended_price > max_price:
@@ -257,10 +288,13 @@ def _calculate_price_plan(
     return _PricePlan(
         currency=currency,
         recommended_price=recommended_price,
+        target_net_price=target_net_price,
         final_price_usd=calculation.final_price_usd,
         profit_usd=calculation.profit_usd,
         markup_percent=calculation.markup_percent,
         min_profit_usd=calculation.min_profit_usd,
+        marketplace_commission_percent=marketplace_commission_percent,
+        payment_system_commission_percent=payment_system_commission_percent,
     )
 
 
@@ -512,7 +546,14 @@ def sync_offer_prices(
                     grouped_detail.update(
                         {
                             "recommended_price": _decimal_to_str(grouped_plan.recommended_price),
+                            "target_net_price": _decimal_to_str(grouped_plan.target_net_price),
                             "currency": grouped_plan.currency,
+                            "marketplace_commission_percent": _decimal_to_str(
+                                grouped_plan.marketplace_commission_percent
+                            ),
+                            "payment_system_commission_percent": _decimal_to_str(
+                                grouped_plan.payment_system_commission_percent
+                            ),
                         }
                     )
                     _skip_detail(
@@ -531,10 +572,17 @@ def sync_offer_prices(
                     grouped_detail.update(
                         {
                             "recommended_price": _decimal_to_str(grouped_plan.recommended_price),
+                            "target_net_price": _decimal_to_str(grouped_plan.target_net_price),
                             "currency": grouped_plan.currency,
                             "group_base_price": _decimal_to_str(base_price),
                             "variant_id": grouped_mapping.marketplace_variant_id,
                             "variant_name": grouped_mapping.marketplace_variant_name,
+                            "marketplace_commission_percent": _decimal_to_str(
+                                grouped_plan.marketplace_commission_percent
+                            ),
+                            "payment_system_commission_percent": _decimal_to_str(
+                                grouped_plan.payment_system_commission_percent
+                            ),
                         }
                     )
                     grouped_detail["action"] = "preview"
@@ -560,7 +608,14 @@ def sync_offer_prices(
                     grouped_detail.update(
                         {
                             "recommended_price": _decimal_to_str(grouped_plan.recommended_price),
+                            "target_net_price": _decimal_to_str(grouped_plan.target_net_price),
                             "currency": grouped_plan.currency,
+                            "marketplace_commission_percent": _decimal_to_str(
+                                grouped_plan.marketplace_commission_percent
+                            ),
+                            "payment_system_commission_percent": _decimal_to_str(
+                                grouped_plan.payment_system_commission_percent
+                            ),
                         }
                     )
                     _skip_detail(stats, grouped_detail, reason=str(exc))
@@ -578,7 +633,14 @@ def sync_offer_prices(
                     grouped_detail.update(
                         {
                             "recommended_price": _decimal_to_str(grouped_plan.recommended_price),
+                            "target_net_price": _decimal_to_str(grouped_plan.target_net_price),
                             "currency": grouped_plan.currency,
+                            "marketplace_commission_percent": _decimal_to_str(
+                                grouped_plan.marketplace_commission_percent
+                            ),
+                            "payment_system_commission_percent": _decimal_to_str(
+                                grouped_plan.payment_system_commission_percent
+                            ),
                         }
                     )
                     if is_access_error:
@@ -614,12 +676,19 @@ def sync_offer_prices(
                     grouped_detail.update(
                         {
                             "recommended_price": _decimal_to_str(grouped_plan.recommended_price),
+                            "target_net_price": _decimal_to_str(grouped_plan.target_net_price),
                             "currency": grouped_plan.currency,
                             "group_base_price": _decimal_to_str(base_price),
                             "variant_id": grouped_mapping.marketplace_variant_id,
                             "variant_name": grouped_mapping.marketplace_variant_name,
                             "variant_mode": True,
                             "task_id": group_task_id,
+                            "marketplace_commission_percent": _decimal_to_str(
+                                grouped_plan.marketplace_commission_percent
+                            ),
+                            "payment_system_commission_percent": _decimal_to_str(
+                                grouped_plan.payment_system_commission_percent
+                            ),
                         }
                     )
                     _skip_detail(stats, grouped_detail, reason=pending_reason)
@@ -638,11 +707,18 @@ def sync_offer_prices(
                 grouped_detail.update(
                     {
                         "recommended_price": _decimal_to_str(grouped_plan.recommended_price),
+                        "target_net_price": _decimal_to_str(grouped_plan.target_net_price),
                         "currency": grouped_plan.currency,
                         "group_base_price": _decimal_to_str(base_price),
                         "variant_id": grouped_mapping.marketplace_variant_id,
                         "variant_name": grouped_mapping.marketplace_variant_name,
                         "variant_mode": True,
+                        "marketplace_commission_percent": _decimal_to_str(
+                            grouped_plan.marketplace_commission_percent
+                        ),
+                        "payment_system_commission_percent": _decimal_to_str(
+                            grouped_plan.payment_system_commission_percent
+                        ),
                     }
                 )
                 grouped_detail["action"] = "updated"
@@ -676,11 +752,18 @@ def sync_offer_prices(
         detail.update(
             {
                 "recommended_price": _decimal_to_str(plan.recommended_price),
+                "target_net_price": _decimal_to_str(plan.target_net_price),
                 "currency": plan.currency,
                 "final_price_usd": _decimal_to_str(plan.final_price_usd),
                 "profit_usd": _decimal_to_str(plan.profit_usd),
                 "markup_percent": _decimal_to_str(plan.markup_percent),
                 "min_profit_usd": _decimal_to_str(plan.min_profit_usd),
+                "marketplace_commission_percent": _decimal_to_str(
+                    plan.marketplace_commission_percent
+                ),
+                "payment_system_commission_percent": _decimal_to_str(
+                    plan.payment_system_commission_percent
+                ),
             }
         )
 

@@ -9,7 +9,7 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_UP, Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -124,6 +124,14 @@ def action_check_config() -> int:
     print(
         "digiseller_task_poll_interval_seconds: "
         f"{settings.digiseller_task_poll_interval_seconds}"
+    )
+    print(
+        "ggsel_default_marketplace_commission_percent: "
+        f"{settings.ggsel_default_marketplace_commission_percent}"
+    )
+    print(
+        "ggsel_default_payment_system_commission_percent: "
+        f"{settings.ggsel_default_payment_system_commission_percent}"
     )
     print(f"default_currency: {settings.default_currency}")
     print(f"manual_usd_rub_rate configured: {_safe_yes_no(settings.manual_usd_rub_rate is not None)}")
@@ -750,7 +758,10 @@ def _suggest_price(
     product: Any,
     currency: str,
     *,
+    marketplace: str,
     markup_percent: Decimal | None = None,
+    marketplace_commission_percent: Decimal | None = None,
+    payment_system_commission_percent: Decimal | None = None,
 ) -> Decimal | None:
     try:
         from app.pricing import calculate_final_price_usd, convert_usd_to_currency
@@ -768,15 +779,35 @@ def _suggest_price(
         risk_buffer_percent=Decimal(str(settings.risk_buffer_percent)),
         markup_percent=markup_percent,
     )
+    desired_net = calculation.final_price_usd
+    if marketplace == "ggsel":
+        ggsel_marketplace_commission = (
+            marketplace_commission_percent
+            if marketplace_commission_percent is not None
+            else Decimal(str(settings.ggsel_default_marketplace_commission_percent))
+        )
+        ggsel_payment_system_commission = (
+            payment_system_commission_percent
+            if payment_system_commission_percent is not None
+            else Decimal(str(settings.ggsel_default_payment_system_commission_percent))
+        )
+        total_commission = ggsel_marketplace_commission + ggsel_payment_system_commission
+        if total_commission >= Decimal("1"):
+            return None
+        desired_net = (desired_net / (Decimal("1") - total_commission)).quantize(
+            Decimal("0.01"),
+            rounding=ROUND_UP,
+        )
+
     if currency == "USD":
-        return calculation.final_price_usd
+        return desired_net
     if currency == "RUB":
         try:
             usd_rub_rate = resolve_usd_rub_rate(settings)
         except Exception:
             return None
         return convert_usd_to_currency(
-            calculation.final_price_usd,
+            desired_net,
             "RUB",
             manual_usd_rub_rate=usd_rub_rate,
         )
@@ -1281,6 +1312,8 @@ def _linked_rows_for_marketplace_offer(
                 "enabled": mapping.enabled,
                 "marketplace_variant_id": mapping.marketplace_variant_id,
                 "marketplace_variant_name": mapping.marketplace_variant_name,
+                "marketplace_commission_percent": mapping.marketplace_commission_percent,
+                "payment_system_commission_percent": mapping.payment_system_commission_percent,
             }
         )
     return linked
@@ -1298,7 +1331,9 @@ def _print_linked_rows_for_offer(marketplace: str, marketplace_offer_id: str) ->
             f"supplier_id={row['supplier_product_id']} | "
             f"{row['title']} | denomination={row['denomination'] or ''} | "
             f"variant_id={row['marketplace_variant_id']} | "
-            f"variant_name={row['marketplace_variant_name'] or ''} | enabled={row['enabled']}"
+            f"variant_name={row['marketplace_variant_name'] or ''} | enabled={row['enabled']} | "
+            f"marketplace_commission={row['marketplace_commission_percent']} | "
+            f"payment_system_commission={row['payment_system_commission_percent']}"
         )
 
 
@@ -1552,7 +1587,13 @@ def _snapshot_label(snapshot: dict[str, Any]) -> str:
     )
 
 
-def _snapshot_price_or_suggestion(product: Any, snapshot: dict[str, Any], currency: str) -> Decimal | None:
+def _snapshot_price_or_suggestion(
+    product: Any,
+    snapshot: dict[str, Any],
+    currency: str,
+    *,
+    marketplace: str,
+) -> Decimal | None:
     raw_price = snapshot.get("price")
     if raw_price is not None:
         try:
@@ -1561,7 +1602,7 @@ def _snapshot_price_or_suggestion(product: Any, snapshot: dict[str, Any], curren
                 return price
         except (InvalidOperation, ValueError):
             pass
-    return _suggest_price(product, currency)
+    return _suggest_price(product, currency, marketplace=marketplace)
 
 
 def action_auto_link() -> int:
@@ -1663,7 +1704,12 @@ def action_auto_link() -> int:
         if currency not in VALID_CURRENCIES:
             currency = "RUB"
 
-        price = _snapshot_price_or_suggestion(product, snapshot, currency)
+        price = _snapshot_price_or_suggestion(
+            product,
+            snapshot,
+            currency,
+            marketplace=marketplace,
+        )
         if price is None:
             skipped += 1
             print(f"Skipped local {product.id}: no valid marketplace/suggested price.")
@@ -1808,6 +1854,8 @@ def _upsert_manual_link(
     mapping_enabled: bool,
     marketplace_variant_id: int | None = None,
     marketplace_variant_name: str | None = None,
+    marketplace_commission_percent: Decimal | None = None,
+    payment_system_commission_percent: Decimal | None = None,
     min_margin_percent: Decimal | None = None,
     min_profit_usd: Decimal | None = None,
     max_price: Decimal | None = None,
@@ -1873,6 +1921,8 @@ def _upsert_manual_link(
                 enabled=mapping_enabled,
                 marketplace_variant_id=marketplace_variant_id,
                 marketplace_variant_name=marketplace_variant_name,
+                marketplace_commission_percent=marketplace_commission_percent,
+                payment_system_commission_percent=payment_system_commission_percent,
                 min_margin_percent=min_margin_percent,
                 min_profit_usd=min_profit_usd,
                 max_price=max_price,
@@ -1883,6 +1933,8 @@ def _upsert_manual_link(
             mapping.enabled = mapping_enabled
             mapping.marketplace_variant_id = marketplace_variant_id
             mapping.marketplace_variant_name = marketplace_variant_name
+            mapping.marketplace_commission_percent = marketplace_commission_percent
+            mapping.payment_system_commission_percent = payment_system_commission_percent
             mapping.min_margin_percent = min_margin_percent
             mapping.min_profit_usd = min_profit_usd
             mapping.max_price = max_price
@@ -1916,6 +1968,12 @@ def action_manual_link() -> int:
     if marketplace not in VALID_MARKETPLACES:
         print(f"Marketplace must be one of: {', '.join(VALID_MARKETPLACES)}.")
         return 1
+    try:
+        from app.config import get_settings
+    except ImportError as exc:
+        print(f"Could not import app config: {exc}")
+        return 1
+    settings = get_settings()
 
     chosen = _choose_reference_products_interactively()
     if chosen is None:
@@ -2073,10 +2131,34 @@ def action_manual_link() -> int:
     else:
         print("Using automatic markup tier based on cost.")
 
+    default_marketplace_commission_percent = Decimal("0")
+    default_payment_system_commission_percent = Decimal("0")
+    if marketplace == "ggsel":
+        default_marketplace_commission_percent = (
+            Decimal(str(settings.ggsel_default_marketplace_commission_percent)) * Decimal("100")
+        )
+        default_payment_system_commission_percent = (
+            Decimal(str(settings.ggsel_default_payment_system_commission_percent)) * Decimal("100")
+        )
+
+    marketplace_commission_percent = _ask_optional_percent_as_ratio(
+        "Marketplace commission percentage",
+        default_percent=default_marketplace_commission_percent,
+    )
+    payment_system_commission_percent: Decimal | None = None
+    if marketplace == "ggsel":
+        payment_system_commission_percent = _ask_optional_percent_as_ratio(
+            "Payment-system commission percentage",
+            default_percent=default_payment_system_commission_percent,
+        )
+
     suggested_price = _suggest_price(
         primary_product,
         currency,
+        marketplace=marketplace,
         markup_percent=mapping_markup_percent,
+        marketplace_commission_percent=marketplace_commission_percent,
+        payment_system_commission_percent=payment_system_commission_percent,
     )
     if suggested_price is None:
         print("No automatic markup-based price available; enter the current marketplace price.")
@@ -2175,6 +2257,13 @@ def action_manual_link() -> int:
         print(f"- mapping markup rate: {(mapping_markup_percent * Decimal('100'))}%")
     else:
         print("- mapping markup rate: automatic tier")
+    if marketplace_commission_percent is not None:
+        print(f"- marketplace commission: {(marketplace_commission_percent * Decimal('100'))}%")
+    if payment_system_commission_percent is not None:
+        print(
+            f"- payment-system commission: "
+            f"{(payment_system_commission_percent * Decimal('100'))}%"
+        )
     print(f"- local offer enabled: {offer_enabled}")
     print(f"- mapping enabled: {mapping_enabled}")
     print(f"- requires buyer input: {requires_buyer_input}")
@@ -2214,6 +2303,8 @@ def action_manual_link() -> int:
                 mapping_enabled=mapping_enabled,
                 marketplace_variant_id=marketplace_variant_id,
                 marketplace_variant_name=marketplace_variant_name,
+                marketplace_commission_percent=marketplace_commission_percent,
+                payment_system_commission_percent=payment_system_commission_percent,
                 min_margin_percent=mapping_markup_percent,
                 min_profit_usd=None,
                 max_price=None,

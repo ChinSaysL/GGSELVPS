@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from dataclasses import dataclass, field
-from decimal import Decimal
+from decimal import ROUND_UP, Decimal
 from typing import Any, Literal
 
 import pytest
@@ -113,6 +113,8 @@ def _linked_offer(
     supplier_product_id: str = "500",
     mapping_enabled: bool = True,
     max_price: Decimal | None = None,
+    marketplace_commission_percent: Decimal | None = None,
+    payment_system_commission_percent: Decimal | None = None,
     raw_payload_json: str = '{"id":"500","product_id":"5","base_product_id":"5"}',
 ) -> tuple[SupplierProduct, MarketplaceOffer, ProductMapping]:
     supplier = SupplierProduct(
@@ -147,6 +149,8 @@ def _linked_offer(
         marketplace_offer_id=offer.id,
         enabled=mapping_enabled,
         max_price=max_price,
+        marketplace_commission_percent=marketplace_commission_percent,
+        payment_system_commission_percent=payment_system_commission_percent,
     )
     db.add(mapping)
     db.commit()
@@ -206,6 +210,90 @@ def test_price_sync_updates_digiseller_rub_price_for_linked_offer(
     assert offer.price == expected_rub
     assert client.calls == [("5850465", float(expected_rub), "RUB", None)]
     assert result["details"][0]["action"] == "updated"
+
+
+def test_price_sync_uses_ggsel_commission_absorption_formula(
+    db_session: Session,
+) -> None:
+    supplier, offer, _mapping = _linked_offer(
+        db_session,
+        marketplace="ggsel",
+        offer_price=Decimal("12.00"),
+        offer_currency="USD",
+        supplier_cost_usd=Decimal("11.00"),
+    )
+    client = FakeMarketplacePriceClient()
+    settings = _settings_for_tests(default_currency="USD")
+
+    result = sync_offer_prices(
+        db=db_session,
+        settings=settings,
+        marketplace_clients={"ggsel": client},
+        dry_run=False,
+        refresh_supplier_prices=False,
+    )
+
+    expected_target_net = calculate_final_price_usd(
+        supplier.cost_usd,
+        pricing_mode=settings.pricing_mode,
+        platform_fee_percent=Decimal(str(settings.platform_fee_percent)),
+        fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
+        risk_buffer_percent=Decimal(str(settings.risk_buffer_percent)),
+    ).final_price_usd
+    total_commission = Decimal(str(settings.ggsel_default_marketplace_commission_percent)) + Decimal(
+        str(settings.ggsel_default_payment_system_commission_percent)
+    )
+    expected_listed = (expected_target_net / (Decimal("1") - total_commission)).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_UP,
+    )
+
+    assert result["prices_updated"] == 1
+    assert offer.price == expected_listed
+    assert client.calls == [("5850465", float(expected_listed), "USD", None)]
+    assert Decimal(result["details"][0]["target_net_price"]) == expected_target_net
+
+
+def test_price_sync_uses_mapping_commission_override_for_ggsel(
+    db_session: Session,
+) -> None:
+    supplier, offer, _mapping = _linked_offer(
+        db_session,
+        marketplace="ggsel",
+        offer_price=Decimal("12.00"),
+        offer_currency="USD",
+        supplier_cost_usd=Decimal("11.00"),
+        marketplace_commission_percent=Decimal("0.02"),
+        payment_system_commission_percent=Decimal("0.01"),
+    )
+    client = FakeMarketplacePriceClient()
+    settings = _settings_for_tests(default_currency="USD")
+
+    result = sync_offer_prices(
+        db=db_session,
+        settings=settings,
+        marketplace_clients={"ggsel": client},
+        dry_run=False,
+        refresh_supplier_prices=False,
+    )
+
+    expected_target_net = calculate_final_price_usd(
+        supplier.cost_usd,
+        pricing_mode=settings.pricing_mode,
+        platform_fee_percent=Decimal(str(settings.platform_fee_percent)),
+        fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
+        risk_buffer_percent=Decimal(str(settings.risk_buffer_percent)),
+    ).final_price_usd
+    expected_listed = (expected_target_net / Decimal("0.97")).quantize(
+        Decimal("0.01"),
+        rounding=ROUND_UP,
+    )
+
+    assert result["prices_updated"] == 1
+    assert offer.price == expected_listed
+    assert client.calls == [("5850465", float(expected_listed), "USD", None)]
+    assert result["details"][0]["marketplace_commission_percent"] == "0.02"
+    assert result["details"][0]["payment_system_commission_percent"] == "0.01"
 
 
 def test_price_sync_skips_when_marketplace_async_task_is_pending(

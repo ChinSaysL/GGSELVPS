@@ -102,6 +102,8 @@ python manage.py manual-link-example
 - auto-mapping marketplace option values (for example `250 TRY`, `500 TRY`) to imported G-Engine rows by exact denomination/signature
 - showing unmatched/ambiguous option values that were skipped
 - entering/confirming marketplace price and currency (prefilled when fetched)
+- entering marketplace commission percent (manual override per mapping)
+- for GGSEL: entering payment-system commission percent (defaults are configurable in `.env`)
 - auto-detecting required buyer text fields (such as Steam friend code), with optional manual override
 
 `python manage.py auto-link` walks through:
@@ -113,7 +115,9 @@ python manage.py manual-link-example
 
 For marketplace pages with option values like `250 TRY` and `500 TRY`, keep those option texts aligned with G-Engine denominations and `manual-link` can map the whole page in one run.
 
-`python manage.py price-preview` refreshes linked G-Engine costs when possible and shows the recommended cost-based price. `python manage.py sync-prices` applies those prices to supported linked marketplaces. Digiseller price updates support USD/RUB product prices and, when variant IDs are linked, per-variant price modifiers. GGSEL price updates remain disabled until the exact update payload schema is confirmed.
+`python manage.py price-preview` refreshes linked G-Engine costs when possible and shows the recommended cost-based price. `python manage.py sync-prices` applies those prices to linked marketplaces.
+- Digiseller: standard mapped-price sync with optional variant price modifiers.
+- GGSEL: listed price is increased by commission absorption so net received after commissions still matches the target markup/profit.
 
 `POST /sync/stock` now:
 - fetches G-Engine balance and writes a `balance_snapshots` row
@@ -253,6 +257,12 @@ docker compose logs -f
 - No competitor scraping is implemented.
 - Price sync default (`PRICING_MODE=safe`) uses supplier cost, fee/buffer settings, markup tiers, and minimum profit only.
 - Set `PRICING_MODE=cost_plus_markup` to use direct `cost * (1 + markup)` pricing.
+- GGSEL commission defaults are configurable:
+  - `GGSEL_DEFAULT_MARKETPLACE_COMMISSION_PERCENT` (gift-card default `0.09`)
+  - `GGSEL_DEFAULT_PAYMENT_SYSTEM_COMMISSION_PERCENT` (example default `0.029`)
+- GGSEL price formula uses reverse-calculation:
+  - `desired_net = target price from pricing mode`
+  - `listed_price = desired_net / (1 - marketplace_commission - payment_system_commission)`
 - No browser automation is used.
 - No automatic marketplace listing creation is implemented.
 - Automatic listing creation is disabled in client code.

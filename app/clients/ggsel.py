@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
-from app.clients.base import BaseAPIClient
+from app.clients.base import APIRequestError, BaseAPIClient
 
 
 class GGSELClient(BaseAPIClient):
@@ -19,13 +20,22 @@ class GGSELClient(BaseAPIClient):
 
     API_PREFIX = "/api_sellers"
 
-    def __init__(self, base_url: str, api_key: str | None, timeout: float = 20.0) -> None:
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str | None,
+        timeout: float = 20.0,
+        task_poll_timeout_seconds: int = 120,
+        task_poll_interval_seconds: float = 1.0,
+    ) -> None:
         super().__init__(
             service_name="GGSEL",
             base_url=base_url,
             api_key=api_key,
             timeout=timeout,
         )
+        self._task_poll_timeout_seconds = task_poll_timeout_seconds
+        self._task_poll_interval_seconds = task_poll_interval_seconds
 
     def _build_path(self, endpoint: str) -> str:
         if not endpoint.startswith("/"):
@@ -104,14 +114,175 @@ class GGSELClient(BaseAPIClient):
             "Please provide the exact GGSEL endpoint or field to toggle availability."
         )
 
-    def set_offer_price(self, offer_id: str, price: float, currency: str) -> dict[str, Any]:
-        _ = (offer_id, price, currency)
-        # TODO: The endpoint path is known, but request schema for a single-offer update
-        # needs confirmation from API docs/examples before implementation.
-        raise NotImplementedError(
-            "GGSEL set_offer_price is not implemented. "
-            "Please provide the exact price update payload schema."
+    @staticmethod
+    def _extract_task_id(response: dict[str, Any]) -> str | None:
+        for key in ("taskId", "TaskId", "task_id", "task"):
+            value = response.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return None
+
+    @staticmethod
+    def _parse_task_status(value: object) -> int | None:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            text = value.strip()
+            if text.isdigit():
+                return int(text)
+        return None
+
+    @staticmethod
+    def _task_error_descriptions(task_status: dict[str, Any]) -> str:
+        raw_errors = task_status.get("ErrorsDescriptions")
+        if raw_errors is None:
+            raw_errors = task_status.get("errorsDescriptions")
+        if raw_errors is None:
+            raw_errors = task_status.get("errors")
+
+        if isinstance(raw_errors, dict):
+            dict_parts = [
+                f"{str(key).strip()}: {str(value).strip()}"
+                for key, value in raw_errors.items()
+                if str(value).strip()
+            ]
+            return "; ".join(dict_parts)
+
+        if isinstance(raw_errors, list):
+            list_parts: list[str] = []
+            for item in raw_errors:
+                if isinstance(item, dict):
+                    key = str(item.get("Key") or item.get("key") or "").strip()
+                    value = str(item.get("Value") or item.get("value") or "").strip()
+                    if key and value:
+                        list_parts.append(f"{key}: {value}")
+                    elif value:
+                        list_parts.append(value)
+            return "; ".join(list_parts)
+
+        if raw_errors is None:
+            return ""
+        return str(raw_errors).strip()
+
+    def _request_price_update(self, *, request_payload: list[dict[str, Any]]) -> dict[str, Any]:
+        token = self._require_api_key()
+        try:
+            response = self.http.request(
+                method="POST",
+                url=self._build_path("/api/product/edit/prices"),
+                params={"token": token},
+                json=request_payload,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise APIRequestError("GGSEL request failed: POST /api_sellers/api/product/edit/prices") from exc
+
+        if response.is_error:
+            raise APIRequestError(
+                f"GGSEL returned HTTP {response.status_code} for POST /api_sellers/api/product/edit/prices"
+            )
+
+        try:
+            parsed = response.json()
+        except ValueError:
+            task_id = response.text.strip()
+            if not task_id:
+                return {"status": "ok"}
+            if task_id.startswith("<") and "html" in task_id.lower():
+                raise APIRequestError(
+                    "GGSEL returned unexpected HTML for POST /api_sellers/api/product/edit/prices"
+                )
+            return {"status": "ok", "task_id": task_id}
+
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, str):
+            token_value = parsed.strip()
+            if token_value:
+                return {"status": "ok", "task_id": token_value}
+            return {"status": "ok"}
+        if isinstance(parsed, list):
+            return {"status": "ok", "items": parsed}
+        return {"status": "ok", "response": parsed}
+
+    def _fetch_price_update_task_status(self, *, task_id: str) -> dict[str, Any]:
+        token = self._require_api_key()
+        response = self._request_json(
+            method="GET",
+            path=self._build_path("/api/product/edit/UpdateProductsTaskStatus"),
+            params={"taskId": task_id, "token": token},
+            headers={"Accept": "application/json"},
         )
+        if not isinstance(response, dict):
+            raise APIRequestError("GGSEL task status returned unexpected response format.")
+        return response
+
+    def _wait_for_price_update_task(self, *, task_id: str) -> dict[str, Any]:
+        deadline = time.monotonic() + self._task_poll_timeout_seconds
+        last_status_payload: dict[str, Any] | None = None
+
+        while time.monotonic() <= deadline:
+            status_payload = self._fetch_price_update_task_status(task_id=task_id)
+            last_status_payload = status_payload
+            status_code = self._parse_task_status(
+                status_payload.get("Status", status_payload.get("status"))
+            )
+
+            if status_code == 3:
+                error_count_raw = status_payload.get("ErrorCount", status_payload.get("errorCount", 0))
+                try:
+                    error_count = int(str(error_count_raw))
+                except ValueError:
+                    error_count = 0
+                if error_count > 0:
+                    error_text = self._task_error_descriptions(status_payload) or "unknown task failure"
+                    raise APIRequestError(
+                        f"GGSEL price update task completed with errors ({task_id}): {error_text}"
+                    )
+                success_payload = dict(status_payload)
+                success_payload.setdefault("status", "ok")
+                success_payload.setdefault("task_id", task_id)
+                return success_payload
+            if status_code == 2:
+                error_text = self._task_error_descriptions(status_payload) or "unknown task failure"
+                raise APIRequestError(
+                    f"GGSEL price update task failed ({task_id}): {error_text}"
+                )
+
+            time.sleep(self._task_poll_interval_seconds)
+
+        if last_status_payload is not None:
+            status_code = self._parse_task_status(
+                last_status_payload.get("Status", last_status_payload.get("status"))
+            )
+            if status_code in (0, 1):
+                pending_payload = dict(last_status_payload)
+                pending_payload["status"] = "pending"
+                pending_payload["task_id"] = task_id
+                pending_payload["last_status"] = status_code
+                return pending_payload
+            raise APIRequestError(
+                f"GGSEL price update task timed out ({task_id}), last status={status_code}"
+            )
+        raise APIRequestError(f"GGSEL price update task timed out ({task_id}).")
+
+    def set_offer_price(self, offer_id: str, price: float, currency: str) -> dict[str, Any]:
+        _ = currency
+        request_payload: list[dict[str, Any]] = [
+            {
+                "product_id": int(offer_id),
+                "price": float(price),
+            }
+        ]
+        response = self._request_price_update(request_payload=request_payload)
+        task_id = self._extract_task_id(response)
+        if task_id:
+            task_status = self._wait_for_price_update_task(task_id=task_id)
+            task_status.setdefault("task_id", task_id)
+            return task_status
+        return response
 
     def get_latest_sales(self) -> list[dict[str, Any]]:
         response = self._request_json(

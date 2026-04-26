@@ -103,6 +103,12 @@ def _run_sqlite_migrations() -> None:
         "marketplace_variant_name": (
             "ALTER TABLE product_mappings ADD COLUMN marketplace_variant_name VARCHAR(255)"
         ),
+        "marketplace_commission_percent": (
+            "ALTER TABLE product_mappings ADD COLUMN marketplace_commission_percent NUMERIC(8, 4)"
+        ),
+        "payment_system_commission_percent": (
+            "ALTER TABLE product_mappings ADD COLUMN payment_system_commission_percent NUMERIC(8, 4)"
+        ),
     }
 
     with engine.begin() as connection:

@@ -648,6 +648,41 @@ def test_ggsel_get_offer_by_id_filters_from_seller_goods() -> None:
     assert offer["id"] == "5850465"
 
 
+def test_ggsel_set_offer_price_uses_bulk_endpoint_and_waits_for_task() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api_sellers/api/product/edit/prices"):
+            captured["price_query"] = dict(request.url.params)
+            captured["price_json"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(status_code=200, json={"taskId": "ggsel-task-123"})
+        if request.url.path.endswith("/api_sellers/api/product/edit/UpdateProductsTaskStatus"):
+            captured["status_query"] = dict(request.url.params)
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "TaskId": "ggsel-task-123",
+                    "Status": 3,
+                    "SuccessCount": 1,
+                    "ErrorCount": 0,
+                    "TotalCount": 1,
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GGSELClient(base_url="https://seller.ggsel.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    result = client.set_offer_price(offer_id="5850465", price=12.34, currency="USD")
+    client.close()
+
+    assert result.get("status") == "ok"
+    assert result.get("task_id") == "ggsel-task-123"
+    assert captured["price_query"]["token"] == "secret"
+    assert captured["price_json"] == [{"product_id": 5850465, "price": 12.34}]
+    assert captured["status_query"]["taskId"] == "ggsel-task-123"
+
+
 def test_digiseller_get_offer_by_id_uses_products_list_when_available() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/api/products/list"):

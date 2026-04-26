@@ -46,6 +46,8 @@ class Settings(BaseSettings):
     risk_buffer_percent: float = 0.02
     safety_balance_percent: float = 0.15
     pricing_mode: Literal["safe", "cost_plus_markup"] = "safe"
+    ggsel_default_marketplace_commission_percent: float = 0.09
+    ggsel_default_payment_system_commission_percent: float = 0.029
 
     min_profit_cheap_usd: float = 0.50
     min_profit_medium_usd: float = 1.00
@@ -90,6 +92,8 @@ class Settings(BaseSettings):
             "fx_buffer_percent",
             "risk_buffer_percent",
             "safety_balance_percent",
+            "ggsel_default_marketplace_commission_percent",
+            "ggsel_default_payment_system_commission_percent",
         )
         for field_name in percent_fields:
             value = float(getattr(self, field_name))

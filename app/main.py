@@ -35,6 +35,8 @@ class MappingImportItem(BaseModel):
     supplier_product_id: int
     marketplace_offer_id: int
     enabled: bool = True
+    marketplace_commission_percent: Decimal | None = None
+    payment_system_commission_percent: Decimal | None = None
     min_margin_percent: Decimal | None = None
     min_profit_usd: Decimal | None = None
     max_price: Decimal | None = None
@@ -58,6 +60,8 @@ class ManualOfferLinkRequest(BaseModel):
     mapping_enabled: bool = True
     marketplace_variant_id: int | None = None
     marketplace_variant_name: str | None = None
+    marketplace_commission_percent: Decimal | None = None
+    payment_system_commission_percent: Decimal | None = None
     min_margin_percent: Decimal | None = None
     min_profit_usd: Decimal | None = None
     max_price: Decimal | None = None
@@ -163,6 +167,12 @@ def list_offers(
                 "mapping_enabled": mapping.enabled if mapping else None,
                 "mapping_variant_id": mapping.marketplace_variant_id if mapping else None,
                 "mapping_variant_name": mapping.marketplace_variant_name if mapping else None,
+                "mapping_marketplace_commission_percent": (
+                    _serialize_decimal(mapping.marketplace_commission_percent) if mapping else None
+                ),
+                "mapping_payment_system_commission_percent": (
+                    _serialize_decimal(mapping.payment_system_commission_percent) if mapping else None
+                ),
                 "last_synced_at": _serialize_datetime(offer.last_synced_at),
             }
         )
@@ -254,6 +264,8 @@ def import_mappings(
                 supplier_product_id=item.supplier_product_id,
                 marketplace_offer_id=item.marketplace_offer_id,
                 enabled=item.enabled,
+                marketplace_commission_percent=item.marketplace_commission_percent,
+                payment_system_commission_percent=item.payment_system_commission_percent,
                 min_margin_percent=item.min_margin_percent,
                 min_profit_usd=item.min_profit_usd,
                 max_price=item.max_price,
@@ -263,6 +275,8 @@ def import_mappings(
             continue
 
         existing.enabled = item.enabled
+        existing.marketplace_commission_percent = item.marketplace_commission_percent
+        existing.payment_system_commission_percent = item.payment_system_commission_percent
         existing.min_margin_percent = item.min_margin_percent
         existing.min_profit_usd = item.min_profit_usd
         existing.max_price = item.max_price
@@ -368,6 +382,8 @@ def manual_link_offer(
             enabled=payload.mapping_enabled,
             marketplace_variant_id=payload.marketplace_variant_id,
             marketplace_variant_name=payload.marketplace_variant_name,
+            marketplace_commission_percent=payload.marketplace_commission_percent,
+            payment_system_commission_percent=payload.payment_system_commission_percent,
             min_margin_percent=payload.min_margin_percent,
             min_profit_usd=payload.min_profit_usd,
             max_price=payload.max_price,
@@ -378,6 +394,8 @@ def manual_link_offer(
         mapping.enabled = payload.mapping_enabled
         mapping.marketplace_variant_id = payload.marketplace_variant_id
         mapping.marketplace_variant_name = payload.marketplace_variant_name
+        mapping.marketplace_commission_percent = payload.marketplace_commission_percent
+        mapping.payment_system_commission_percent = payload.payment_system_commission_percent
         mapping.min_margin_percent = payload.min_margin_percent
         mapping.min_profit_usd = payload.min_profit_usd
         mapping.max_price = payload.max_price
@@ -411,5 +429,9 @@ def manual_link_offer(
             "marketplace_offer_id": mapping.marketplace_offer_id,
             "marketplace_variant_id": mapping.marketplace_variant_id,
             "marketplace_variant_name": mapping.marketplace_variant_name,
+            "marketplace_commission_percent": _serialize_decimal(mapping.marketplace_commission_percent),
+            "payment_system_commission_percent": _serialize_decimal(
+                mapping.payment_system_commission_percent
+            ),
         },
     }
