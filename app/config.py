@@ -36,6 +36,8 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("DIGISELLER_SELLER_ID", "DigisellerSellerId"),
     )
     digiseller_base_url: str = "https://api.digiseller.com"
+    digiseller_task_poll_timeout_seconds: int = 120
+    digiseller_task_poll_interval_seconds: float = 1.0
 
     database_url: str = "sqlite:///./data/app.db"
 
@@ -99,6 +101,7 @@ class Settings(BaseSettings):
             "product_sync_interval_minutes",
             "stock_sync_interval_minutes",
             "price_sync_interval_minutes",
+            "digiseller_task_poll_timeout_seconds",
         )
         for field_name in interval_fields:
             value = int(getattr(self, field_name))
@@ -111,6 +114,9 @@ class Settings(BaseSettings):
 
         if not 0 <= int(self.usd_rub_rate_refresh_hour_utc) <= 23:
             raise ValueError("usd_rub_rate_refresh_hour_utc must be within [0, 23].")
+
+        if float(self.digiseller_task_poll_interval_seconds) <= 0:
+            raise ValueError("digiseller_task_poll_interval_seconds must be greater than 0.")
 
         return self
 

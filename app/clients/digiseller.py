@@ -26,13 +26,15 @@ class DigisellerClient(BaseAPIClient):
 
     _TOKEN_REFRESH_MARGIN = timedelta(seconds=60)
     _TASK_POLL_INTERVAL_SECONDS = 0.5
-    _TASK_POLL_TIMEOUT_SECONDS = 20.0
+    _TASK_POLL_TIMEOUT_SECONDS = 120.0
 
     def __init__(
         self,
         base_url: str,
         api_key: str | None,
         seller_id: str | int | None = None,
+        task_poll_timeout_seconds: float | None = None,
+        task_poll_interval_seconds: float | None = None,
         timeout: float = 20.0,
     ) -> None:
         super().__init__(
@@ -48,6 +50,16 @@ class DigisellerClient(BaseAPIClient):
         self._access_token_valid_thru: datetime | None = None
         self._last_apilogin_error: str | None = None
         self._last_apilogin_timestamp: int | None = None
+        self._task_poll_timeout_seconds = (
+            float(task_poll_timeout_seconds)
+            if task_poll_timeout_seconds is not None
+            else self._TASK_POLL_TIMEOUT_SECONDS
+        )
+        self._task_poll_interval_seconds = (
+            float(task_poll_interval_seconds)
+            if task_poll_interval_seconds is not None
+            else self._TASK_POLL_INTERVAL_SECONDS
+        )
 
     @staticmethod
     def _parse_valid_thru(value: object) -> datetime | None:
@@ -483,7 +495,7 @@ class DigisellerClient(BaseAPIClient):
         return response
 
     def _wait_for_price_update_task(self, *, task_id: str, token: str) -> dict[str, Any]:
-        deadline = time.monotonic() + self._TASK_POLL_TIMEOUT_SECONDS
+        deadline = time.monotonic() + self._task_poll_timeout_seconds
         last_status_payload: dict[str, Any] | None = None
 
         while time.monotonic() <= deadline:
@@ -518,7 +530,7 @@ class DigisellerClient(BaseAPIClient):
                     f"Digiseller price update task failed ({task_id}): {error_text}"
                 )
 
-            time.sleep(self._TASK_POLL_INTERVAL_SECONDS)
+            time.sleep(self._task_poll_interval_seconds)
 
         if last_status_payload is not None:
             status_code = self._parse_task_status(

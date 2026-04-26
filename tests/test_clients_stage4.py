@@ -382,8 +382,8 @@ def test_digiseller_set_offer_price_returns_pending_when_task_timeout_in_queue()
         return httpx.Response(status_code=404, json={"error": "unexpected path"})
 
     client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
-    client._TASK_POLL_TIMEOUT_SECONDS = 0.01  # type: ignore[attr-defined]
-    client._TASK_POLL_INTERVAL_SECONDS = 0.01  # type: ignore[attr-defined]
+    client._task_poll_timeout_seconds = 0.01  # type: ignore[attr-defined]
+    client._task_poll_interval_seconds = 0.01  # type: ignore[attr-defined]
     _attach_mock_transport(client, httpx.MockTransport(handler))
 
     result = client.set_offer_price(

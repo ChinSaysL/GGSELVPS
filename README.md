@@ -53,6 +53,9 @@ Digiseller auth note:
 tokens via `POST /api/apilogin` using `DIGISELLER_API_KEY` (seller API key).
 - If `DIGISELLER_SELLER_ID` is empty, `DIGISELLER_API_KEY` is treated as a direct token.
 Direct tokens can expire and then price sync may return `401`.
+- Digiseller async task polling can be tuned with:
+  - `DIGISELLER_TASK_POLL_TIMEOUT_SECONDS` (default `120`)
+  - `DIGISELLER_TASK_POLL_INTERVAL_SECONDS` (default `1.0`)
 
 For RUB pricing, the app resolves USD/RUB using this priority:
 - `MANUAL_USD_RUB_RATE` when explicitly set

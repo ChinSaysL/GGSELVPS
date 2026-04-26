@@ -110,6 +110,14 @@ def action_check_config() -> int:
     print(f"database_url: {settings.database_url}")
     print(f"scheduler_enabled: {settings.scheduler_enabled}")
     print(f"price_sync_interval_minutes: {settings.price_sync_interval_minutes}")
+    print(
+        "digiseller_task_poll_timeout_seconds: "
+        f"{settings.digiseller_task_poll_timeout_seconds}"
+    )
+    print(
+        "digiseller_task_poll_interval_seconds: "
+        f"{settings.digiseller_task_poll_interval_seconds}"
+    )
     print(f"default_currency: {settings.default_currency}")
     print(f"manual_usd_rub_rate configured: {_safe_yes_no(settings.manual_usd_rub_rate is not None)}")
     print(f"gengine_api_key: {mask_secret(settings.gengine_api_key)}")
@@ -971,6 +979,8 @@ def _fetch_marketplace_offer_snapshot(
                 settings.digiseller_base_url,
                 settings.digiseller_api_key,
                 seller_id=settings.digiseller_seller_id,
+                task_poll_timeout_seconds=settings.digiseller_task_poll_timeout_seconds,
+                task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
             )
         elif marketplace == "ggsel" and settings.ggsel_api_key:
             client = GGSELClient(settings.ggsel_base_url, settings.ggsel_api_key)
@@ -1352,6 +1362,8 @@ def _list_marketplace_offer_snapshots(
                 settings.digiseller_base_url,
                 settings.digiseller_api_key,
                 seller_id=settings.digiseller_seller_id,
+                task_poll_timeout_seconds=settings.digiseller_task_poll_timeout_seconds,
+                task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
             )
         elif marketplace == "ggsel" and settings.ggsel_api_key:
             client = GGSELClient(settings.ggsel_base_url, settings.ggsel_api_key)
