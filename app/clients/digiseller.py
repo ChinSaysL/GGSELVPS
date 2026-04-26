@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app.clients.base import APIRequestError, BaseAPIClient
+from app.clients.base import APIClientConfigError, APIRequestError, BaseAPIClient
 
 
 class DigisellerClient(BaseAPIClient):
@@ -19,23 +21,129 @@ class DigisellerClient(BaseAPIClient):
     offers must be created manually and linked through /offers/manual-link.
     """
 
-    def __init__(self, base_url: str, api_key: str | None, timeout: float = 20.0) -> None:
+    _TOKEN_REFRESH_MARGIN = timedelta(seconds=60)
+
+    def __init__(
+        self,
+        base_url: str,
+        api_key: str | None,
+        seller_id: str | int | None = None,
+        timeout: float = 20.0,
+    ) -> None:
         super().__init__(
             service_name="Digiseller",
             base_url=base_url,
             api_key=api_key,
             timeout=timeout,
         )
+        self.seller_id = str(seller_id).strip() if seller_id is not None else None
+        if self.seller_id == "":
+            self.seller_id = None
+        self._access_token: str | None = None
+        self._access_token_valid_thru: datetime | None = None
+        self._last_apilogin_error: str | None = None
+        self._last_apilogin_timestamp: int | None = None
 
-    def _auth_query_params(self) -> dict[str, str]:
-        api_key = self._require_api_key()
-        return {"token": api_key}
+    @staticmethod
+    def _parse_valid_thru(value: object) -> datetime | None:
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
 
-    def _auth_headers(self) -> dict[str, str]:
+    def _cached_token_is_usable(self) -> bool:
+        if not self._access_token:
+            return False
+        if self._access_token_valid_thru is None:
+            return True
+        return self._access_token_valid_thru > datetime.now(timezone.utc) + self._TOKEN_REFRESH_MARGIN
+
+    def _next_apilogin_timestamp(self) -> int:
+        timestamp = int(datetime.now(timezone.utc).timestamp())
+        if self._last_apilogin_timestamp is not None and timestamp <= self._last_apilogin_timestamp:
+            timestamp = self._last_apilogin_timestamp + 1
+        self._last_apilogin_timestamp = timestamp
+        return timestamp
+
+    def _fetch_access_token_via_apilogin(self) -> tuple[str, datetime | None]:
+        if not self.seller_id:
+            raise APIClientConfigError(
+                "DIGISELLER_SELLER_ID is required to auto-refresh Digiseller access tokens."
+            )
+        try:
+            seller_id = int(self.seller_id)
+        except ValueError as exc:
+            raise APIClientConfigError("DIGISELLER_SELLER_ID must be an integer.") from exc
+
         api_key = self._require_api_key()
+        timestamp = self._next_apilogin_timestamp()
+        sign = hashlib.sha256(f"{api_key}{timestamp}".encode("utf-8")).hexdigest()
+        response = self._request_json(
+            method="POST",
+            path="/api/apilogin",
+            json_body={
+                "seller_id": seller_id,
+                "timestamp": timestamp,
+                "sign": sign,
+            },
+            headers={"Accept": "application/json"},
+        )
+        if not isinstance(response, dict):
+            raise APIRequestError("Digiseller /api/apilogin returned unexpected response format.")
+
+        retval = response.get("retval")
+        token_raw = response.get("token")
+        token = token_raw.strip() if isinstance(token_raw, str) else ""
+        if retval not in (0, "0") or not token:
+            desc = str(response.get("desc") or "").strip() or "unknown error"
+            raise APIRequestError(f"Digiseller /api/apilogin failed: {desc}")
+
+        return token, self._parse_valid_thru(response.get("valid_thru"))
+
+    def _get_access_token(self, *, force_refresh: bool = False) -> str:
+        api_key = self._require_api_key()
+        if not self.seller_id:
+            return api_key
+
+        if force_refresh:
+            self._access_token = None
+            self._access_token_valid_thru = None
+
+        if self._cached_token_is_usable():
+            return self._access_token or api_key
+
+        try:
+            token, valid_thru = self._fetch_access_token_via_apilogin()
+        except Exception as exc:
+            # Fallback for environments that still provide a direct short-lived token
+            # in DIGISELLER_API_KEY instead of seller API key + seller ID.
+            self._last_apilogin_error = str(exc)
+            return api_key
+
+        self._access_token = token
+        self._access_token_valid_thru = valid_thru
+        self._last_apilogin_error = None
+        return token
+
+    def _auth_query_params(self, *, force_refresh: bool = False) -> dict[str, str]:
+        token = self._get_access_token(force_refresh=force_refresh)
+        return {"token": token}
+
+    def _auth_headers(self, *, force_refresh: bool = False) -> dict[str, str]:
+        token = self._get_access_token(force_refresh=force_refresh)
         return {
-            "token": api_key,
-            "Authorization": f"Bearer {api_key}",
+            "token": token,
+            "Authorization": f"Bearer {token}",
         }
 
     @staticmethod
@@ -265,35 +373,64 @@ class DigisellerClient(BaseAPIClient):
         if variants:
             request_item["variants"] = variants
         request_payload: list[dict[str, Any]] = [request_item]
-        attempts: tuple[tuple[dict[str, Any] | None, dict[str, str] | None], ...] = (
-            (self._auth_query_params(), None),
-            (None, self._auth_headers()),
-            (self._auth_query_params(), self._auth_headers()),
-        )
+
         last_auth_error: APIRequestError | None = None
+        refresh_rounds = (False, True) if self.seller_id else (False,)
 
-        for params, headers in attempts:
-            try:
-                response = self._request_json(
-                    method="POST",
-                    path="/api/product/edit/prices",
-                    params=params,
-                    json_body=request_payload,
-                    headers=headers,
-                )
-            except APIRequestError as exc:
-                # Some Digiseller accounts reject query-token auth on this endpoint.
-                if "HTTP 401" in str(exc):
-                    last_auth_error = exc
-                    continue
-                raise
+        for force_refresh in refresh_rounds:
+            token = self._get_access_token(force_refresh=force_refresh)
+            query_auth = {"token": token}
+            header_auth = {"token": token, "Authorization": f"Bearer {token}"}
+            attempts: tuple[tuple[dict[str, Any] | None, dict[str, str] | None], ...] = (
+                (query_auth, None),
+                (None, header_auth),
+                (query_auth, header_auth),
+            )
 
-            if not isinstance(response, dict):
-                raise TypeError("Unexpected Digiseller price update response format.")
-            return response
+            for params, headers in attempts:
+                try:
+                    response = self._request_json(
+                        method="POST",
+                        path="/api/product/edit/prices",
+                        params=params,
+                        json_body=request_payload,
+                        headers=headers,
+                    )
+                except APIRequestError as exc:
+                    # Some Digiseller accounts reject one auth style for this endpoint.
+                    # Also retry once with a refreshed token when seller_id is configured.
+                    error_text = str(exc)
+                    if "HTTP 401" in error_text or "HTTP 403" in error_text:
+                        last_auth_error = exc
+                        continue
+                    # Header-only attempts can return 400 when this endpoint requires
+                    # query-token auth. Keep trying the remaining auth combinations.
+                    if "HTTP 400" in error_text and params is None and headers is not None:
+                        last_auth_error = exc
+                        continue
+                    raise
+
+                if not isinstance(response, dict):
+                    raise TypeError("Unexpected Digiseller price update response format.")
+                return response
 
         if last_auth_error is not None:
-            raise last_auth_error
+            details = (
+                "Digiseller authorization failed for live price update. "
+                "Ensure token permission includes [Products]: Edit."
+            )
+            if self.seller_id:
+                if self._last_apilogin_error:
+                    details = (
+                        f"{details} Also, /api/apilogin failed with: {self._last_apilogin_error}. "
+                        "Check DIGISELLER_API_KEY (seller API key) and DIGISELLER_SELLER_ID."
+                    )
+            else:
+                details = (
+                    f"{details} Digiseller access tokens are short-lived. "
+                    "Set DIGISELLER_SELLER_ID to auto-refresh token via /api/apilogin."
+                )
+            raise APIRequestError(f"{last_auth_error}. {details}")
         raise APIRequestError("Digiseller price update failed before receiving a response.")
 
     def get_latest_sales(self) -> list[dict[str, Any]]:

@@ -684,6 +684,7 @@ def _build_marketplace_clients(settings: Settings) -> dict[str, MarketplacePrice
         clients["digiseller"] = DigisellerClient(
             settings.digiseller_base_url,
             settings.digiseller_api_key,
+            seller_id=settings.digiseller_seller_id,
         )
     if settings.ggsel_api_key:
         clients["ggsel"] = GGSELClient(settings.ggsel_base_url, settings.ggsel_api_key)

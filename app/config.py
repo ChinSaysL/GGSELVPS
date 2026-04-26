@@ -31,6 +31,10 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("DIGISELLER_API_KEY", "DigisellerToken"),
     )
+    digiseller_seller_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("DIGISELLER_SELLER_ID", "DigisellerSellerId"),
+    )
     digiseller_base_url: str = "https://api.digiseller.com"
 
     database_url: str = "sqlite:///./data/app.db"
@@ -65,6 +69,13 @@ class Settings(BaseSettings):
     @field_validator("manual_usd_rub_rate", mode="before")
     @classmethod
     def empty_rate_to_none(cls, value: object) -> object:
+        if value == "":
+            return None
+        return value
+
+    @field_validator("digiseller_seller_id", mode="before")
+    @classmethod
+    def empty_seller_id_to_none(cls, value: object) -> object:
         if value == "":
             return None
         return value

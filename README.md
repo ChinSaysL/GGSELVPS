@@ -40,11 +40,19 @@ Canonical API key variables:
 - `GENGINE_API_KEY`
 - `GGSEL_API_KEY`
 - `DIGISELLER_API_KEY`
+- `DIGISELLER_SELLER_ID` (recommended for Digiseller live edits)
 
 Compatibility aliases are also supported:
 - `GEngineToken`
 - `GGSELToken`
 - `DigisellerToken`
+- `DigisellerSellerId`
+
+Digiseller auth note:
+- If `DIGISELLER_SELLER_ID` is set, the app auto-fetches/refreshes short-lived access
+tokens via `POST /api/apilogin` using `DIGISELLER_API_KEY` (seller API key).
+- If `DIGISELLER_SELLER_ID` is empty, `DIGISELLER_API_KEY` is treated as a direct token.
+Direct tokens can expire and then price sync may return `401`.
 
 For RUB pricing, the app resolves USD/RUB using this priority:
 - `MANUAL_USD_RUB_RATE` when explicitly set

@@ -285,6 +285,101 @@ def test_digiseller_set_offer_price_retries_with_header_auth_after_401() -> None
     assert second["auth_header"] == "Bearer secret"
 
 
+def test_digiseller_set_offer_price_uses_apilogin_token_when_seller_id_is_configured() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/apilogin"):
+            payload = json.loads(request.content.decode("utf-8"))
+            captured["apilogin_payload"] = payload
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "retval": 0,
+                    "token": "token-from-apilogin",
+                    "seller_id": 123456,
+                    "valid_thru": "2099-01-01T00:00:00Z",
+                },
+            )
+        if request.url.path.endswith("/api/product/edit/prices"):
+            captured["price_query"] = dict(request.url.params)
+            captured["price_json"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(status_code=200, json={"status": "ok"})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = DigisellerClient(
+        base_url="https://api.digiseller.com",
+        api_key="seller-api-key",
+        seller_id="123456",
+    )
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    result = client.set_offer_price(
+        offer_id="10",
+        price=7.75,
+        currency="USD",
+        variants=[{"variant_id": 5001, "rate": 7.35, "type": 2}],
+    )
+    client.close()
+
+    assert result == {"status": "ok"}
+    assert captured["apilogin_payload"]["seller_id"] == 123456
+    assert isinstance(captured["apilogin_payload"]["timestamp"], int)
+    assert isinstance(captured["apilogin_payload"]["sign"], str)
+    assert captured["price_query"]["token"] == "token-from-apilogin"
+    assert captured["price_json"] == [
+        {
+            "product_id": 10,
+            "price": 7.75,
+            "variants": [{"variant_id": 5001, "rate": 7.35, "type": 2}],
+        }
+    ]
+
+
+def test_digiseller_set_offer_price_refreshes_apilogin_token_after_401() -> None:
+    state = {"apilogin_calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/apilogin"):
+            state["apilogin_calls"] += 1
+            token = "token-a" if state["apilogin_calls"] == 1 else "token-b"
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "retval": 0,
+                    "token": token,
+                    "seller_id": 123456,
+                    "valid_thru": "2099-01-01T00:00:00Z",
+                },
+            )
+        if request.url.path.endswith("/api/product/edit/prices"):
+            token = request.url.params.get("token")
+            if token == "token-a":
+                return httpx.Response(status_code=401, json={"error": "unauthorized"})
+            if token == "token-b":
+                return httpx.Response(status_code=200, json={"status": "ok"})
+            return httpx.Response(status_code=400, json={"error": "unexpected token"})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = DigisellerClient(
+        base_url="https://api.digiseller.com",
+        api_key="seller-api-key",
+        seller_id="123456",
+    )
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    result = client.set_offer_price(
+        offer_id="10",
+        price=7.75,
+        currency="USD",
+        variants=[{"variant_id": 5001, "rate": 7.35, "type": 2}],
+    )
+    client.close()
+
+    assert result == {"status": "ok"}
+    assert state["apilogin_calls"] == 2
+
+
 def test_digiseller_listing_create_and_base_update_are_disabled() -> None:
     client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
     with pytest.raises(NotImplementedError):
