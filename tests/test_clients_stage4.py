@@ -6,7 +6,7 @@ from typing import Any
 import httpx
 import pytest
 
-from app.clients import APIClientConfigError, DigisellerClient, GEngineClient, GGSELClient
+from app.clients import APIClientConfigError, APIRequestError, DigisellerClient, GEngineClient, GGSELClient
 
 
 def _attach_mock_transport(
@@ -252,6 +252,17 @@ def test_digiseller_set_offer_price_accepts_plain_text_task_id_response() -> Non
                 text="9a968c22-9bc2-439f-bbaf-0f5a368f59a5",
                 headers={"Content-Type": "text/plain"},
             )
+        if request.url.path.endswith("/api/product/edit/UpdateProductsTaskStatus"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "TaskId": "9a968c22-9bc2-439f-bbaf-0f5a368f59a5",
+                    "Status": 3,
+                    "SuccessCount": 1,
+                    "ErrorCount": 0,
+                    "TotalCount": 1,
+                },
+            )
         return httpx.Response(status_code=404, json={"error": "unexpected path"})
 
     client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
@@ -267,6 +278,45 @@ def test_digiseller_set_offer_price_accepts_plain_text_task_id_response() -> Non
 
     assert result["status"] == "ok"
     assert result["task_id"] == "9a968c22-9bc2-439f-bbaf-0f5a368f59a5"
+
+
+def test_digiseller_set_offer_price_raises_when_async_task_fails() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/product/edit/prices"):
+            return httpx.Response(
+                status_code=200,
+                json={"taskId": "c41ab768-2e96-4682-9d5b-c460c8c6c955"},
+            )
+        if request.url.path.endswith("/api/product/edit/UpdateProductsTaskStatus"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "TaskId": "c41ab768-2e96-4682-9d5b-c460c8c6c955",
+                    "Status": 2,
+                    "SuccessCount": 0,
+                    "ErrorCount": 1,
+                    "TotalCount": 1,
+                    "ErrorsDescriptions": [
+                        {
+                            "Key": "5850465",
+                            "Value": "Product not found or no permission to edit",
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    with pytest.raises(APIRequestError, match="no permission to edit"):
+        client.set_offer_price(
+            offer_id="5850465",
+            price=7.75,
+            currency="USD",
+            variants=[{"variant_id": 5001, "rate": 7.35, "type": 2}],
+        )
+    client.close()
 
 
 def test_digiseller_set_offer_price_retries_with_header_auth_after_401() -> None:

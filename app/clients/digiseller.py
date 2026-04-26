@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -24,6 +25,8 @@ class DigisellerClient(BaseAPIClient):
     """
 
     _TOKEN_REFRESH_MARGIN = timedelta(seconds=60)
+    _TASK_POLL_INTERVAL_SECONDS = 0.5
+    _TASK_POLL_TIMEOUT_SECONDS = 20.0
 
     def __init__(
         self,
@@ -406,6 +409,112 @@ class DigisellerClient(BaseAPIClient):
             return {"status": "ok", "items": parsed}
         return {"status": "ok", "response": parsed}
 
+    @staticmethod
+    def _extract_task_id(response: dict[str, Any]) -> str | None:
+        for key in ("taskId", "TaskId", "task_id", "task"):
+            value = response.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return None
+
+    @staticmethod
+    def _parse_task_status(value: object) -> int | None:
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str):
+            text = value.strip()
+            if text.isdigit():
+                return int(text)
+            normalized = text.lower()
+            if normalized == "done":
+                return 3
+            if normalized == "error":
+                return 2
+            if normalized == "inprogress":
+                return 1
+            if normalized == "inqueue":
+                return 0
+        return None
+
+    @staticmethod
+    def _task_error_descriptions(task_status: dict[str, Any]) -> str:
+        raw_errors = task_status.get("ErrorsDescriptions")
+        if raw_errors is None:
+            raw_errors = task_status.get("errorsDescriptions")
+        if raw_errors is None:
+            raw_errors = task_status.get("errors")
+
+        if isinstance(raw_errors, dict):
+            dict_parts = [
+                f"{str(key).strip()}: {str(value).strip()}"
+                for key, value in raw_errors.items()
+                if str(value).strip()
+            ]
+            return "; ".join(dict_parts)
+
+        if isinstance(raw_errors, list):
+            list_parts: list[str] = []
+            for item in raw_errors:
+                if isinstance(item, dict):
+                    key = str(item.get("Key") or item.get("key") or "").strip()
+                    value = str(item.get("Value") or item.get("value") or "").strip()
+                    if key and value:
+                        list_parts.append(f"{key}: {value}")
+                    elif value:
+                        list_parts.append(value)
+            return "; ".join(list_parts)
+
+        if raw_errors is None:
+            return ""
+        return str(raw_errors).strip()
+
+    def _fetch_price_update_task_status(self, *, task_id: str, token: str) -> dict[str, Any]:
+        response = self._request_json(
+            method="GET",
+            path="/api/product/edit/UpdateProductsTaskStatus",
+            params={"taskId": task_id, "token": token},
+            headers={"Accept": "application/json"},
+        )
+        if not isinstance(response, dict):
+            raise APIRequestError("Digiseller task status returned unexpected response format.")
+        return response
+
+    def _wait_for_price_update_task(self, *, task_id: str, token: str) -> dict[str, Any]:
+        deadline = time.monotonic() + self._TASK_POLL_TIMEOUT_SECONDS
+        last_status_payload: dict[str, Any] | None = None
+
+        while time.monotonic() <= deadline:
+            status_payload = self._fetch_price_update_task_status(task_id=task_id, token=token)
+            last_status_payload = status_payload
+            status_code = self._parse_task_status(
+                status_payload.get("Status", status_payload.get("status"))
+            )
+
+            if status_code == 3:
+                return status_payload
+            if status_code == 2:
+                error_text = self._task_error_descriptions(status_payload)
+                if not error_text:
+                    error_text = "unknown task failure"
+                raise APIRequestError(
+                    f"Digiseller price update task failed ({task_id}): {error_text}"
+                )
+
+            time.sleep(self._TASK_POLL_INTERVAL_SECONDS)
+
+        if last_status_payload is not None:
+            status_code = self._parse_task_status(
+                last_status_payload.get("Status", last_status_payload.get("status"))
+            )
+            raise APIRequestError(
+                "Digiseller price update task timed out "
+                f"({task_id}), last status={status_code}"
+            )
+        raise APIRequestError(f"Digiseller price update task timed out ({task_id}).")
+
     def set_offer_price(
         self,
         offer_id: str,
@@ -457,6 +566,9 @@ class DigisellerClient(BaseAPIClient):
                         continue
                     raise
 
+                task_id = self._extract_task_id(response)
+                if task_id:
+                    self._wait_for_price_update_task(task_id=task_id, token=token)
                 return response
 
         if last_auth_error is not None:
