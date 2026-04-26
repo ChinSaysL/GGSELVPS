@@ -408,5 +408,5 @@ def test_price_sync_updates_digiseller_variant_group_with_single_api_call(
     assert currency == "USD"
     assert variants is not None
     variant_ids = {item["variant_id"] for item in variants}
-    assert variant_ids == {1001, 1002}
+    assert variant_ids == {1002}
     assert base_price > 0

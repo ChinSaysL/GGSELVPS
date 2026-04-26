@@ -2090,7 +2090,7 @@ def action_manual_link() -> int:
         print(f"- buyer input label: {buyer_input_label}")
         print(f"- buyer input help: {buyer_input_help}")
 
-    if not _ask_bool("Create/update this local link?", default=False):
+    if not _ask_bool("Create/update this local link?", default=True):
         print("Cancelled.")
         return 0
 
@@ -2156,6 +2156,16 @@ def action_manual_link() -> int:
                 if skip_details:
                     print("Skipped reasons (first 10):")
                     for item in skip_details[:10]:
+                        print(
+                            f"- {item.get('marketplace')}:{item.get('marketplace_offer_id')} | "
+                            f"mapping={item.get('mapping_id')} | reason={item.get('reason')}"
+                        )
+                error_details = [
+                    item for item in details if isinstance(item, dict) and item.get("action") == "error"
+                ]
+                if error_details:
+                    print("Error reasons (first 10):")
+                    for item in error_details[:10]:
                         print(
                             f"- {item.get('marketplace')}:{item.get('marketplace_offer_id')} | "
                             f"mapping={item.get('mapping_id')} | reason={item.get('reason')}"

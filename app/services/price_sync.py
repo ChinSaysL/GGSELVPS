@@ -343,17 +343,15 @@ def _digiseller_variant_payload(
         if variant_id is None:
             continue
         delta = plan.recommended_price - base_price
-        if delta >= Decimal("0"):
-            variant_type = 2  # PricePlus
-            rate = delta
-        else:
-            variant_type = 3  # PriceMinus
-            rate = -delta
+        # Keep payload compatible with Digiseller UI model:
+        # base product price + only non-zero "PricePlus" modifiers per variant.
+        if delta <= Decimal("0"):
+            continue
         variants.append(
             {
                 "variant_id": int(variant_id),
-                "rate": float(rate),
-                "type": variant_type,
+                "rate": float(delta),
+                "type": 2,  # PricePlus
             }
         )
 
