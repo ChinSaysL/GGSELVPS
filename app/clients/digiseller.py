@@ -494,6 +494,18 @@ class DigisellerClient(BaseAPIClient):
             )
 
             if status_code == 3:
+                error_count_raw = status_payload.get("ErrorCount", status_payload.get("errorCount", 0))
+                try:
+                    error_count = int(str(error_count_raw))
+                except ValueError:
+                    error_count = 0
+                if error_count > 0:
+                    error_text = self._task_error_descriptions(status_payload)
+                    if not error_text:
+                        error_text = "unknown task failure"
+                    raise APIRequestError(
+                        f"Digiseller price update task completed with errors ({task_id}): {error_text}"
+                    )
                 return status_payload
             if status_code == 2:
                 error_text = self._task_error_descriptions(status_payload)

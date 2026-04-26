@@ -319,6 +319,45 @@ def test_digiseller_set_offer_price_raises_when_async_task_fails() -> None:
     client.close()
 
 
+def test_digiseller_set_offer_price_raises_when_task_done_has_errors() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/product/edit/prices"):
+            return httpx.Response(
+                status_code=200,
+                json={"taskId": "task-done-with-errors"},
+            )
+        if request.url.path.endswith("/api/product/edit/UpdateProductsTaskStatus"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "TaskId": "task-done-with-errors",
+                    "Status": 3,
+                    "SuccessCount": 0,
+                    "ErrorCount": 1,
+                    "TotalCount": 1,
+                    "ErrorsDescriptions": [
+                        {
+                            "Key": "19472020",
+                            "Value": "Variant not found",
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    with pytest.raises(APIRequestError, match="completed with errors"):
+        client.set_offer_price(
+            offer_id="5850465",
+            price=7.75,
+            currency="USD",
+            variants=[{"variant_id": 19472020, "rate": 7.35, "type": 2}],
+        )
+    client.close()
+
+
 def test_digiseller_set_offer_price_retries_with_header_auth_after_401() -> None:
     captured: dict[str, Any] = {"attempts": []}
 
