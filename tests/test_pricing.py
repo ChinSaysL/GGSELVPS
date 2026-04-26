@@ -61,6 +61,32 @@ def test_platform_fee_fx_and_risk_buffers_are_applied() -> None:
     assert with_buffers.profit_usd > Decimal("0")
 
 
+def test_cost_plus_markup_mode_uses_direct_cost_markup_formula() -> None:
+    calculation = calculate_final_price_usd(
+        Decimal("5.50"),
+        pricing_mode="cost_plus_markup",
+        platform_fee_percent=Decimal("0.50"),
+        fx_buffer_percent=Decimal("0.99"),
+        risk_buffer_percent=Decimal("0.99"),
+        markup_percent=Decimal("0.20"),
+    )
+
+    assert calculation.final_price_usd == Decimal("6.60")
+    assert calculation.profit_usd == Decimal("1.1000")
+
+
+def test_cost_plus_markup_mode_allows_optional_min_profit_floor() -> None:
+    calculation = calculate_final_price_usd(
+        Decimal("5.50"),
+        pricing_mode="cost_plus_markup",
+        markup_percent=Decimal("0.02"),
+        min_profit_usd=Decimal("1.00"),
+    )
+
+    assert calculation.final_price_usd == Decimal("6.50")
+    assert calculation.profit_usd == Decimal("1.0000")
+
+
 def test_min_profit_is_enforced() -> None:
     calculation = calculate_final_price_usd(
         Decimal("109.99"),

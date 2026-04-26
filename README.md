@@ -251,7 +251,8 @@ docker compose logs -f
 
 - No competitor pricing data is used.
 - No competitor scraping is implemented.
-- Price sync uses supplier cost, fee/buffer settings, markup tiers, and minimum profit only.
+- Price sync default (`PRICING_MODE=safe`) uses supplier cost, fee/buffer settings, markup tiers, and minimum profit only.
+- Set `PRICING_MODE=cost_plus_markup` to use direct `cost * (1 + markup)` pricing.
 - No browser automation is used.
 - No automatic marketplace listing creation is implemented.
 - Automatic listing creation is disabled in client code.

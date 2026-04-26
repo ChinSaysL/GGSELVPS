@@ -231,6 +231,7 @@ def _calculate_price_plan(
 ) -> _PricePlan:
     calculation = calculate_final_price_usd(
         supplier_product.cost_usd,
+        pricing_mode=settings.pricing_mode,
         platform_fee_percent=Decimal(str(settings.platform_fee_percent)),
         fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
         risk_buffer_percent=Decimal(str(settings.risk_buffer_percent)),

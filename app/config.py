@@ -45,6 +45,7 @@ class Settings(BaseSettings):
     fx_buffer_percent: float = 0.03
     risk_buffer_percent: float = 0.02
     safety_balance_percent: float = 0.15
+    pricing_mode: Literal["safe", "cost_plus_markup"] = "safe"
 
     min_profit_cheap_usd: float = 0.50
     min_profit_medium_usd: float = 1.00

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_UP
+from typing import Literal
 
 
 MONEY_QUANT = Decimal("0.01")
@@ -60,6 +61,7 @@ class PriceCalculation:
 def calculate_final_price_usd(
     supplier_cost_usd: Decimal | int | float | str,
     *,
+    pricing_mode: Literal["safe", "cost_plus_markup"] = "safe",
     platform_fee_percent: Decimal | int | float | str = Decimal("0.06"),
     fx_buffer_percent: Decimal | int | float | str = Decimal("0.03"),
     risk_buffer_percent: Decimal | int | float | str = Decimal("0.02"),
@@ -70,6 +72,41 @@ def calculate_final_price_usd(
     if cost <= 0:
         raise PricingConfigError("supplier_cost_usd must be greater than 0.")
 
+    effective_markup = (
+        get_markup_percent(cost) if markup_percent is None else _to_decimal(markup_percent)
+    )
+    if effective_markup < 0:
+        raise PricingConfigError("markup_percent must be >= 0.")
+
+    if pricing_mode == "cost_plus_markup":
+        effective_min_profit = (
+            Decimal("0") if min_profit_usd is None else _to_decimal(min_profit_usd)
+        )
+        if effective_min_profit < 0:
+            raise PricingConfigError("min_profit_usd must be >= 0.")
+
+        final_price = cost * (Decimal("1") + effective_markup)
+        final_price = _quantize_money(final_price)
+        net_received = final_price
+        profit = net_received - cost
+
+        if profit < effective_min_profit:
+            final_price = _quantize_money(cost + effective_min_profit)
+            net_received = final_price
+            profit = net_received - cost
+
+        return PriceCalculation(
+            supplier_cost_usd=_quantize_four_dec(cost),
+            final_price_usd=_quantize_money(final_price),
+            net_received_usd=_quantize_four_dec(net_received),
+            profit_usd=_quantize_four_dec(profit),
+            markup_percent=_quantize_four_dec(effective_markup),
+            min_profit_usd=_quantize_money(effective_min_profit),
+        )
+
+    if pricing_mode != "safe":
+        raise PricingConfigError(f"Unsupported pricing_mode: {pricing_mode}")
+
     platform_fee = _to_decimal(platform_fee_percent)
     fx_buffer = _to_decimal(fx_buffer_percent)
     risk_buffer = _to_decimal(risk_buffer_percent)
@@ -78,12 +115,6 @@ def calculate_final_price_usd(
         raise PricingConfigError("platform_fee_percent must be within [0, 1).")
     if fx_buffer < 0 or risk_buffer < 0:
         raise PricingConfigError("fx_buffer_percent and risk_buffer_percent must be >= 0.")
-
-    effective_markup = (
-        get_markup_percent(cost) if markup_percent is None else _to_decimal(markup_percent)
-    )
-    if effective_markup < 0:
-        raise PricingConfigError("markup_percent must be >= 0.")
 
     effective_min_profit = (
         get_min_profit_usd(cost) if min_profit_usd is None else _to_decimal(min_profit_usd)

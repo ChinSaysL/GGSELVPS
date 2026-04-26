@@ -116,6 +116,7 @@ def action_check_config() -> int:
     print(f"database_url: {settings.database_url}")
     print(f"scheduler_enabled: {settings.scheduler_enabled}")
     print(f"price_sync_interval_minutes: {settings.price_sync_interval_minutes}")
+    print(f"pricing_mode: {settings.pricing_mode}")
     print(
         "digiseller_task_poll_timeout_seconds: "
         f"{settings.digiseller_task_poll_timeout_seconds}"
@@ -761,6 +762,7 @@ def _suggest_price(
     settings = get_settings()
     calculation = calculate_final_price_usd(
         product.cost_usd,
+        pricing_mode=settings.pricing_mode,
         platform_fee_percent=Decimal(str(settings.platform_fee_percent)),
         fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
         risk_buffer_percent=Decimal(str(settings.risk_buffer_percent)),
