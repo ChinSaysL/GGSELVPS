@@ -50,7 +50,19 @@ class GGSELClient(BaseAPIClient):
 
     @staticmethod
     def _extract_offer_id(item: dict[str, Any]) -> str | None:
-        for key in ("id", "product_id", "productId", "goods_id", "good_id"):
+        for key in (
+            "id",
+            "product_id",
+            "productId",
+            "productID",
+            "goods_id",
+            "goodsId",
+            "good_id",
+            "goodId",
+            "id_goods",
+            "id_good",
+            "id_product",
+        ):
             value = item.get(key)
             if value is None:
                 continue
@@ -100,9 +112,6 @@ class GGSELClient(BaseAPIClient):
                     continue
                 merged.setdefault(offer_id, item)
 
-            if merged:
-                break
-
         return list(merged.values())
 
     @staticmethod
@@ -110,8 +119,15 @@ class GGSELClient(BaseAPIClient):
         candidates = (
             "id",
             "goods_id",
+            "goodsId",
             "good_id",
+            "goodId",
             "product_id",
+            "productId",
+            "productID",
+            "id_goods",
+            "id_good",
+            "id_product",
         )
         normalized_offer_id = offer_id.strip()
         for key in candidates:
@@ -127,26 +143,32 @@ class GGSELClient(BaseAPIClient):
         if not normalized:
             return None
 
-        try:
-            response = self._request_json(
-                method="GET",
-                path=self._build_path(f"/api/products/{normalized}/data"),
-                params=self._auth_query_params(),
-                headers={"Accept": "application/json"},
-            )
-        except APIRequestError:
-            response = None
+        direct_paths = (
+            f"/api/products/{normalized}/data",
+            f"/api/product/{normalized}/data",
+        )
+        for path in direct_paths:
+            try:
+                response = self._request_json(
+                    method="GET",
+                    path=self._build_path(path),
+                    params=self._auth_query_params(),
+                    headers={"Accept": "application/json"},
+                )
+            except APIRequestError:
+                response = None
 
-        if isinstance(response, dict):
-            product = response.get("product")
-            if isinstance(product, dict):
-                product.setdefault("product_id", product.get("id"))
-                return product
-            for item in self._collect_offer_dicts(response):
-                if self._matches_offer_id(item, normalized):
-                    return item
-            if self._matches_offer_id(response, normalized):
-                return response
+            if isinstance(response, dict):
+                product = response.get("product")
+                if isinstance(product, dict):
+                    product.setdefault("product_id", product.get("id"))
+                    product.setdefault("id_goods", product.get("id"))
+                    return product
+                for item in self._collect_offer_dicts(response):
+                    if self._matches_offer_id(item, normalized):
+                        return item
+                if self._matches_offer_id(response, normalized):
+                    return response
 
         for item in self.list_offers():
             if self._matches_offer_id(item, normalized):

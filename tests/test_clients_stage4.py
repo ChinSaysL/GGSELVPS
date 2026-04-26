@@ -691,6 +691,45 @@ def test_ggsel_get_offer_by_id_filters_from_seller_goods() -> None:
     assert offer["id"] == "5850465"
 
 
+def test_ggsel_get_offer_by_id_matches_id_goods_from_seller_goods() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api_sellers/api/products/102249445/data"):
+            return httpx.Response(status_code=404, json={"error": "not found"})
+        if request.url.path.endswith("/api_sellers/api/product/102249445/data"):
+            return httpx.Response(status_code=404, json={"error": "not found"})
+        if request.url.path.endswith("/api_sellers/api/products/list"):
+            return httpx.Response(
+                status_code=200,
+                json={"data": [{"id_goods": "111", "name_goods": "Other product"}]},
+            )
+        if request.url.path.endswith("/api_sellers/api/seller-goods"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "rows": [
+                        {
+                            "id_goods": 102249445,
+                            "name_goods": "Steam top up",
+                            "price": 7.0,
+                            "currency": "USD",
+                            "visible": 1,
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GGSELClient(base_url="https://seller.ggsel.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    offer = client.get_offer_by_id("102249445")
+    client.close()
+
+    assert offer is not None
+    assert offer["id_goods"] == 102249445
+    assert offer["name_goods"] == "Steam top up"
+
+
 def test_ggsel_get_offer_by_id_prefers_product_data_endpoint() -> None:
     captured_paths: list[str] = []
 

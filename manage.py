@@ -524,6 +524,42 @@ def _product_reference_ids(product: Any) -> set[str]:
     return {value for value in values if value}
 
 
+def _product_direct_supplier_id(product: Any) -> str:
+    value = getattr(product, "supplier_product_id", None)
+    return "" if value in {None, ""} else str(value).strip()
+
+
+def _product_payload_id(product: Any, key: str) -> str | None:
+    payload = _raw_payload_dict(product)
+    value = payload.get(key)
+    if value in {None, ""}:
+        return None
+    return str(value).strip()
+
+
+def _product_reference_parent_id(product: Any, reference: GEngineProductReference) -> str | None:
+    if reference.kind == "recharge":
+        return _product_payload_id(product, "recharge_product_id")
+    if reference.kind == "shop":
+        return (
+            _product_payload_id(product, "base_product_id")
+            or _product_payload_id(product, "shop_product_id")
+            or _product_payload_id(product, "product_id")
+        )
+    if reference.kind == "gifts":
+        return _product_payload_id(product, "gift_id")
+    return None
+
+
+def _is_specific_reference_product(product: Any, reference: GEngineProductReference) -> bool:
+    direct_supplier_id = _product_direct_supplier_id(product)
+    if not direct_supplier_id:
+        return False
+    if direct_supplier_id == reference.product_id:
+        return False
+    return _product_reference_parent_id(product, reference) == reference.product_id
+
+
 def _product_matches_reference(product: Any, reference: GEngineProductReference) -> bool:
     if reference.product_id in _product_reference_ids(product):
         return True
@@ -954,16 +990,21 @@ def _extract_marketplace_snapshot_fields(payload: dict[str, Any]) -> dict[str, A
         (
             "title",
             "name",
+            "name_goods",
             "product_name",
             "good_name",
             "goods_name",
+            "info_goods",
             "caption",
         ),
     )
     denomination = _payload_first_str(payload, ("denomination", "nominal", "variant", "option"))
     currency = _payload_first_str(payload, ("currency", "currency_code", "valute", "curr"))
     price = _payload_first_decimal(payload, ("price", "cost", "amount", "sum"))
-    is_enabled = _payload_first_bool(payload, ("enabled", "is_enabled", "active", "is_active"))
+    is_enabled = _payload_first_bool(
+        payload,
+        ("enabled", "is_enabled", "active", "is_active", "visible", "in_stock"),
+    )
     requires_buyer_input = _payload_first_bool(
         payload,
         ("requires_buyer_input", "need_user_data", "require_input"),
@@ -1057,7 +1098,19 @@ def _extract_marketplace_snapshot_fields(payload: dict[str, Any]) -> dict[str, A
 def _extract_marketplace_offer_id(payload: dict[str, Any]) -> str | None:
     return _payload_first_str(
         payload,
-        ("id", "product_id", "productId", "goods_id", "good_id"),
+        (
+            "id",
+            "product_id",
+            "productId",
+            "productID",
+            "goods_id",
+            "goodsId",
+            "good_id",
+            "goodId",
+            "id_goods",
+            "id_good",
+            "id_product",
+        ),
     )
 
 
@@ -1389,6 +1442,128 @@ def _snapshot_denomination_signature(snapshot: dict[str, Any]) -> str | None:
     )
 
 
+_SINGLE_OFFER_GENERIC_TOKENS = {
+    "account",
+    "accounts",
+    "activation",
+    "card",
+    "cards",
+    "code",
+    "codes",
+    "digital",
+    "direct",
+    "gift",
+    "key",
+    "keys",
+    "online",
+    "playstation",
+    "product",
+    "ps",
+    "psn",
+    "recharge",
+    "store",
+    "steam",
+    "test",
+    "testing",
+    "top",
+    "topup",
+    "up",
+    "wallet",
+}
+
+
+def _meaningful_match_tokens(value: object) -> set[str]:
+    return {
+        token
+        for token in _normalize_search_text(value).split()
+        if token and token not in _SINGLE_OFFER_GENERIC_TOKENS
+    }
+
+
+def _products_matching_snapshot_single_offer(
+    products: list[Any],
+    snapshot: dict[str, Any],
+) -> list[Any]:
+    candidate_products = products
+    snapshot_signature = _snapshot_denomination_signature(snapshot)
+    if snapshot_signature:
+        signature_matches = _products_matching_variant_exact(products, snapshot_signature)
+        if len(signature_matches) == 1:
+            return signature_matches
+        if signature_matches:
+            candidate_products = signature_matches
+
+    snapshot_text = _normalize_search_text(
+        " ".join(
+            [
+                str(snapshot.get("title") or ""),
+                str(snapshot.get("denomination") or ""),
+            ]
+        )
+    )
+    snapshot_tokens = _meaningful_match_tokens(snapshot_text)
+    matches: list[Any] = []
+    for product in candidate_products:
+        product_texts = [
+            str(getattr(product, "title", "") or ""),
+            str(getattr(product, "denomination", "") or ""),
+        ]
+        normalized_product_texts = [
+            _normalize_search_text(text)
+            for text in product_texts
+            if _normalize_search_text(text)
+        ]
+        if any(
+            product_text
+            and len(product_text) >= 4
+            and product_text in snapshot_text
+            for product_text in normalized_product_texts
+        ):
+            matches.append(product)
+            continue
+
+        product_tokens: set[str] = set()
+        for product_text in product_texts:
+            product_tokens.update(_meaningful_match_tokens(product_text))
+        if product_tokens and product_tokens.issubset(snapshot_tokens):
+            matches.append(product)
+
+    return sorted(matches, key=lambda item: int(item.id))
+
+
+def _auto_select_single_offer_product(
+    reference: GEngineProductReference,
+    products: list[Any],
+    snapshot: dict[str, Any] | None,
+) -> tuple[Any | None, str | None]:
+    if len(products) == 1:
+        return products[0], "only imported row matched the G-Engine reference"
+
+    if snapshot is not None:
+        snapshot_matches = _products_matching_snapshot_single_offer(products, snapshot)
+        if len(snapshot_matches) == 1:
+            return snapshot_matches[0], "marketplace title/denomination matched one local row"
+
+    direct_id_matches = [
+        product
+        for product in products
+        if _product_direct_supplier_id(product) == reference.product_id
+    ]
+    if len(direct_id_matches) == 1:
+        return direct_id_matches[0], "G-Engine product ID matched one supplier row"
+
+    specific_products = [
+        product
+        for product in products
+        if _is_specific_reference_product(product, reference)
+        and _product_denomination_signature(product) is None
+    ]
+    if len(specific_products) == 1:
+        return specific_products[0], "parent G-Engine product matched one non-denomination row"
+
+    return None, None
+
+
 def _reference_query_hint(reference: GEngineProductReference, products: list[Any]) -> str:
     if reference.slug:
         return _normalize_search_text(reference.slug)
@@ -1417,6 +1592,7 @@ def _choose_reference_products_interactively() -> tuple[GEngineProductReference,
         raw_reference = input(
             "\nPaste G-Engine product link or product ID "
             "(examples: https://b2b.g-engine.net/en/shop/5/playstation-store-wallet-turkey, "
+            "https://b2b.g-engine.net/en/recharge/1/steam, "
             "https://b2b.g-engine.net/en/gifts/4451080/vituber-melody): "
         ).strip()
         reference = _parse_gengine_reference(raw_reference)
@@ -2081,23 +2257,30 @@ def action_manual_link() -> int:
             )
             return 1
 
-        single_default_product_id: int | None = None
-        if snapshot and snapshot.get("denomination"):
-            snapshot_denom = str(snapshot.get("denomination"))
-            suggested = _products_matching_variant(reference_products, snapshot_denom)
-            if len(suggested) == 1:
-                single_default_product_id = int(suggested[0].id)
-        print("\nNo option-value list found on marketplace item. Select one local row to link:")
-        _print_reference_products(reference_products, limit=25)
-        selected_product = _choose_product_from_reference_rows(
+        selected_product, selection_reason = _auto_select_single_offer_product(
+            reference,
             reference_products,
-            prompt="Local row id",
-            default_product_id=single_default_product_id,
-            allow_skip=False,
+            snapshot,
         )
-        if selected_product is None:
-            print("Cancelled.")
-            return 1
+        if selected_product is not None:
+            print("\nNo option-value list found on marketplace item.")
+            print(
+                "Auto-selected single-offer local row "
+                f"{selected_product.id}: {selection_reason}."
+            )
+            print(_product_label(selected_product))
+        else:
+            print("\nNo option-value list found on marketplace item. Select one local row to link:")
+            _print_reference_products(reference_products, limit=25)
+            selected_product = _choose_product_from_reference_rows(
+                reference_products,
+                prompt="Local row id",
+                default_product_id=None,
+                allow_skip=False,
+            )
+            if selected_product is None:
+                print("Cancelled.")
+                return 1
         _add_link_target(
             targets_by_product_id,
             product=selected_product,
@@ -2334,6 +2517,7 @@ def action_manual_link() -> int:
                 f"- prices_updated: {sync_result.get('prices_updated')} | "
                 f"skipped: {sync_result.get('skipped')} | errors: {sync_result.get('errors')}"
             )
+            print("Note: price sync does not change option visibility or default selections.")
             details = sync_result.get("details")
             if isinstance(details, list):
                 skip_details = [
@@ -2358,18 +2542,25 @@ def action_manual_link() -> int:
                         )
         except Exception as exc:  # noqa: BLE001 - keep manual link successful even if sync fails.
             print(f"Price sync failed after linking: {exc}")
-    if successful > 0 and sys.stdin.isatty() and _ask_bool(
-        "Run live stock sync now to enforce balance-based availability?",
-        default=True,
-    ):
-        try:
-            from app.services.stock_sync import run_stock_sync
+    if successful > 0 and sys.stdin.isatty():
+        should_sync_stock = _ask_bool(
+            "Run live stock sync now to enforce balance-based option visibility?",
+            default=True,
+        )
+        if should_sync_stock:
+            try:
+                from app.services.stock_sync import run_stock_sync
 
-            stock_result = run_stock_sync()
-            print("Stock sync result:")
-            _print_stock_sync_result(stock_result)
-        except Exception as exc:  # noqa: BLE001 - keep manual link successful even if sync fails.
-            print(f"Stock sync failed after linking: {exc}")
+                stock_result = run_stock_sync()
+                print("Stock sync result:")
+                _print_stock_sync_result(stock_result)
+            except Exception as exc:  # noqa: BLE001 - keep manual link successful even if sync fails.
+                print(f"Stock sync failed after linking: {exc}")
+        else:
+            print(
+                "Stock sync skipped. Digiseller option visibility/default state was not changed; "
+                "crossed-eye variants remain hidden until stock sync runs successfully."
+            )
     return 0 if successful > 0 and failed == 0 else (0 if successful > 0 else 1)
 
 

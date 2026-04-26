@@ -226,6 +226,23 @@ def test_extract_marketplace_snapshot_fields_reads_option_variants() -> None:
     assert snapshot["option_variants"] == ["250 TL", "500 TL"]
 
 
+def test_extract_marketplace_snapshot_fields_reads_ggsel_seller_goods_names() -> None:
+    snapshot = manage._extract_marketplace_snapshot_fields(
+        {
+            "id_goods": 102249445,
+            "name_goods": "Steam top up",
+            "price": 7.0,
+            "currency": "USD",
+            "visible": 1,
+        }
+    )
+
+    assert snapshot["title"] == "Steam top up"
+    assert snapshot["price"] == 7.0
+    assert snapshot["currency"] == "USD"
+    assert snapshot["is_enabled"] is True
+
+
 def test_extract_marketplace_snapshot_fields_detects_required_text_input() -> None:
     snapshot = manage._extract_marketplace_snapshot_fields(
         {
@@ -354,6 +371,150 @@ def test_products_matching_variant_exact_ignores_fuzzy_results() -> None:
     matches = manage._products_matching_variant_exact(products, "Playstation")
 
     assert matches == []
+
+
+def test_auto_select_single_offer_uses_snapshot_title() -> None:
+    reference = manage.GEngineProductReference(
+        kind="recharge",
+        product_id="1",
+        slug="steam",
+        source="https://b2b.g-engine.net/en/recharge/1/steam",
+    )
+    products = [
+        SimpleNamespace(
+            id=1,
+            title="Steam RU+CIS",
+            category="Games, Steam",
+            denomination="Steam Key RU+CIS",
+            supplier_product_id="718",
+            raw_payload_json='{"recharge_product_id":"1"}',
+        ),
+        SimpleNamespace(
+            id=2,
+            title="Steam Worldwide",
+            category="Games, Steam",
+            denomination="Worldwide",
+            supplier_product_id="719",
+            raw_payload_json='{"recharge_product_id":"1"}',
+        ),
+    ]
+
+    product, reason = manage._auto_select_single_offer_product(
+        reference,
+        products,
+        {"title": "Steam RU+CIS direct top up", "denomination": None},
+    )
+
+    assert product is not None
+    assert product.id == 1
+    assert reason == "marketplace title/denomination matched one local row"
+
+
+def test_auto_select_single_offer_uses_snapshot_denomination_signature() -> None:
+    reference = manage.GEngineProductReference(
+        kind="shop",
+        product_id="5",
+        slug="playstation-store-wallet-turkey",
+        source="link",
+    )
+    products = [
+        SimpleNamespace(
+            id=142,
+            title="Playstation Store Wallet Turkey",
+            category="Gift Card, PlayStation",
+            denomination="250 TRY",
+            supplier_product_id="5",
+            raw_payload_json='{"base_product_id":"5"}',
+        ),
+        SimpleNamespace(
+            id=143,
+            title="Playstation Store Wallet Turkey",
+            category="Gift Card, PlayStation",
+            denomination="500 TRY",
+            supplier_product_id="6",
+            raw_payload_json='{"base_product_id":"5"}',
+        ),
+    ]
+
+    product, reason = manage._auto_select_single_offer_product(
+        reference,
+        products,
+        {"title": "Playstation 500 TL", "denomination": None},
+    )
+
+    assert product is not None
+    assert product.id == 143
+    assert reason == "marketplace title/denomination matched one local row"
+
+
+def test_auto_select_single_offer_narrows_duplicate_amount_by_title() -> None:
+    reference = manage.GEngineProductReference(
+        kind="shop",
+        product_id="5",
+        slug="wallet-turkey",
+        source="link",
+    )
+    products = [
+        SimpleNamespace(
+            id=142,
+            title="Playstation Store Wallet Turkey",
+            category="Gift Card, PlayStation",
+            denomination="500 TRY",
+            supplier_product_id="5",
+            raw_payload_json='{"base_product_id":"5"}',
+        ),
+        SimpleNamespace(
+            id=143,
+            title="Xbox Store Wallet Turkey",
+            category="Gift Card, Xbox",
+            denomination="500 TRY",
+            supplier_product_id="6",
+            raw_payload_json='{"base_product_id":"5"}',
+        ),
+    ]
+
+    product, reason = manage._auto_select_single_offer_product(
+        reference,
+        products,
+        {"title": "Xbox Store Wallet Turkey 500 TL", "denomination": None},
+    )
+
+    assert product is not None
+    assert product.id == 143
+    assert reason == "marketplace title/denomination matched one local row"
+
+
+def test_auto_select_single_offer_uses_direct_supplier_id() -> None:
+    reference = manage.GEngineProductReference(
+        kind="unknown",
+        product_id="718",
+        slug=None,
+        source="718",
+    )
+    products = [
+        SimpleNamespace(
+            id=1,
+            title="Steam RU+CIS",
+            category="Games, Steam",
+            denomination="Steam Key RU+CIS",
+            supplier_product_id="718",
+            raw_payload_json="{}",
+        ),
+        SimpleNamespace(
+            id=2,
+            title="Steam Worldwide",
+            category="Games, Steam",
+            denomination="Worldwide",
+            supplier_product_id="719",
+            raw_payload_json="{}",
+        ),
+    ]
+
+    product, reason = manage._auto_select_single_offer_product(reference, products, None)
+
+    assert product is not None
+    assert product.id == 1
+    assert reason == "G-Engine product ID matched one supplier row"
 
 
 def test_auto_match_option_entries_to_products_matches_exact_signatures() -> None:
