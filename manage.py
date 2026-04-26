@@ -642,6 +642,9 @@ def _ask_optional_percent_as_ratio(prompt: str, *, default_percent: Decimal | No
         if percent_value < 0:
             print("Percent must be >= 0.")
             continue
+        if percent_value < Decimal("1"):
+            print(f"Interpreting {percent_value} as a ratio, i.e. {(percent_value * Decimal('100'))}%")
+            return percent_value
         return percent_value / Decimal("100")
 
 
@@ -758,7 +761,7 @@ def _parse_int_token(value: object) -> int | None:
 
 def _extract_option_variant_items(option: dict[str, Any]) -> list[dict[str, Any]]:
     variant_containers = ("variants", "values", "items", "options")
-    variant_value_keys = ("text", "label", "name", "value", "title")
+    variant_value_keys = ("text", "label", "name", "title")
     items: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
 
@@ -772,6 +775,10 @@ def _extract_option_variant_items(option: dict[str, Any]) -> list[dict[str, Any]
             is_default: bool = False
             if isinstance(item, dict):
                 text = _payload_first_str(item, variant_value_keys)
+                if not text:
+                    fallback_text = _payload_first_str(item, ("value",))
+                    if fallback_text and _parse_int_token(fallback_text) is None:
+                        text = fallback_text
                 raw_variant_id = _payload_first_str(
                     item,
                     (
@@ -781,6 +788,7 @@ def _extract_option_variant_items(option: dict[str, Any]) -> list[dict[str, Any]
                         "id_var",
                         "var_id",
                         "value_id",
+                        "value",
                         "id_option_value",
                         "option_value_id",
                         "id",

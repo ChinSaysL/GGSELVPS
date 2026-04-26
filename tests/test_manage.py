@@ -292,6 +292,28 @@ def test_extract_marketplace_snapshot_fields_keeps_variant_ids() -> None:
     ]
 
 
+def test_extract_marketplace_snapshot_fields_reads_variant_id_from_value_key() -> None:
+    snapshot = manage._extract_marketplace_snapshot_fields(
+        {
+            "name": "Playstation testing",
+            "options": [
+                {
+                    "label": "Gift Card Amount",
+                    "variants": [
+                        {"text": "250 TRY", "value": "173359"},
+                        {"text": "500 TRY", "value": "173360"},
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert snapshot["option_variant_entries"] == [
+        {"option_label": "Gift Card Amount", "variant_value": "250 TRY", "variant_id": 173359},
+        {"option_label": "Gift Card Amount", "variant_value": "500 TRY", "variant_id": 173360},
+    ]
+
+
 def test_products_matching_variant_uses_denomination_signature() -> None:
     products = [
         SimpleNamespace(
