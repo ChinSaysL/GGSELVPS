@@ -25,6 +25,10 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("GGSEL_API_KEY", "GGSELToken"),
     )
+    ggsel_seller_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("GGSEL_SELLER_ID", "GGSELSellerId"),
+    )
     ggsel_base_url: str = "https://seller.ggsel.com"
 
     digiseller_api_key: str | None = Field(
@@ -78,7 +82,7 @@ class Settings(BaseSettings):
             return None
         return value
 
-    @field_validator("digiseller_seller_id", mode="before")
+    @field_validator("digiseller_seller_id", "ggsel_seller_id", mode="before")
     @classmethod
     def empty_seller_id_to_none(cls, value: object) -> object:
         if value == "":

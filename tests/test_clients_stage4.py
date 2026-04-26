@@ -895,6 +895,110 @@ def test_ggsel_set_offer_price_supports_variants_payload() -> None:
     ]
 
 
+def test_ggsel_set_offer_price_uses_apilogin_token_when_seller_id_is_configured() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api_sellers/api/apilogin"):
+            payload = json.loads(request.content.decode("utf-8"))
+            captured["apilogin_payload"] = payload
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "retval": 0,
+                    "token": "ggsel-token-from-apilogin",
+                    "seller_id": 123456,
+                    "valid_thru": "2099-01-01T00:00:00Z",
+                },
+            )
+        if request.url.path.endswith("/api_sellers/api/product/edit/prices"):
+            captured["price_query"] = dict(request.url.params)
+            captured["price_json"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(status_code=200, json={"status": "ok"})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GGSELClient(
+        base_url="https://seller.ggsel.com",
+        api_key="seller-api-key",
+        seller_id="123456",
+    )
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    result = client.set_offer_price(
+        offer_id="102249445",
+        price=610.55,
+        currency="RUB",
+        variants=[{"variant_id": 18944509, "rate": 0.0, "type": 2}],
+    )
+    client.close()
+
+    assert result == {"status": "ok"}
+    assert captured["apilogin_payload"]["seller_id"] == 123456
+    assert isinstance(captured["apilogin_payload"]["timestamp"], int)
+    assert isinstance(captured["apilogin_payload"]["sign"], str)
+    assert captured["price_query"]["token"] == "ggsel-token-from-apilogin"
+    assert captured["price_json"] == [
+        {
+            "product_id": 102249445,
+            "price": 610.55,
+            "variants": [{"variant_id": 18944509, "rate": 0.0, "type": 2}],
+        }
+    ]
+
+
+def test_ggsel_set_offer_price_refreshes_apilogin_token_after_401() -> None:
+    state = {"apilogin_calls": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api_sellers/api/apilogin"):
+            state["apilogin_calls"] += 1
+            token = "ggsel-token-a" if state["apilogin_calls"] == 1 else "ggsel-token-b"
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "retval": 0,
+                    "token": token,
+                    "seller_id": 123456,
+                    "valid_thru": "2099-01-01T00:00:00Z",
+                },
+            )
+        if request.url.path.endswith("/api_sellers/api/product/edit/prices"):
+            token = request.url.params.get("token")
+            if token == "ggsel-token-a":
+                return httpx.Response(status_code=401, json={"error": "unauthorized"})
+            if token == "ggsel-token-b":
+                return httpx.Response(status_code=200, json={"status": "ok"})
+            return httpx.Response(status_code=400, json={"error": "unexpected token"})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GGSELClient(
+        base_url="https://seller.ggsel.com",
+        api_key="seller-api-key",
+        seller_id="123456",
+    )
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    result = client.set_offer_price(offer_id="102249445", price=610.55, currency="RUB")
+    client.close()
+
+    assert result == {"status": "ok"}
+    assert state["apilogin_calls"] == 2
+
+
+def test_ggsel_set_offer_price_auth_error_explains_seller_id_requirement() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api_sellers/api/product/edit/prices"):
+            return httpx.Response(status_code=401, text="Unauthorized")
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GGSELClient(base_url="https://seller.ggsel.com", api_key="browser-jwt")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    with pytest.raises(APIRequestError, match="GGSEL_SELLER_ID"):
+        client.set_offer_price(offer_id="102249445", price=610.55, currency="RUB")
+    client.close()
+
+
 def test_digiseller_get_offer_by_id_uses_products_list_when_available() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/api/products/list"):

@@ -549,7 +549,14 @@ def sync_offer_stock(
             for mapping, supplier, _in_stock, reason, required_balance in decisions:
                 detail = _base_detail(mapping=mapping, offer=offer, supplier=supplier)
                 detail["required_balance_usd"] = str(required_balance)
-                _skip_detail(stats, detail, reason=f"{str(exc)}:{reason}")
+                if target_enabled:
+                    _skip_detail(stats, detail, reason=f"{str(exc)}:{reason}")
+                else:
+                    _error_detail(
+                        stats,
+                        detail,
+                        reason=f"marketplace_disable_not_supported:{str(exc)}:{reason}",
+                    )
             continue
         except Exception as exc:  # noqa: BLE001
             error_reason = str(exc)
@@ -614,7 +621,11 @@ def _build_marketplace_clients(settings: Settings) -> dict[str, MarketplaceStock
             task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
         )
     if settings.ggsel_api_key:
-        clients["ggsel"] = GGSELClient(settings.ggsel_base_url, settings.ggsel_api_key)
+        clients["ggsel"] = GGSELClient(
+            settings.ggsel_base_url,
+            settings.ggsel_api_key,
+            seller_id=settings.ggsel_seller_id,
+        )
     return clients
 
 

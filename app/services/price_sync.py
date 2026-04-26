@@ -851,7 +851,11 @@ def _build_marketplace_clients(settings: Settings) -> dict[str, MarketplacePrice
             task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
         )
     if settings.ggsel_api_key:
-        clients["ggsel"] = GGSELClient(settings.ggsel_base_url, settings.ggsel_api_key)
+        clients["ggsel"] = GGSELClient(
+            settings.ggsel_base_url,
+            settings.ggsel_api_key,
+            seller_id=settings.ggsel_seller_id,
+        )
     return clients
 
 

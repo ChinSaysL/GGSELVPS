@@ -121,12 +121,14 @@ After `python manage.py manual-link`, run the offered live stock sync prompt if 
 - Digiseller: standard mapped-price sync with optional variant price modifiers.
 - GGSEL: listed price is increased by commission absorption so net received after commissions still matches the target markup/profit. Multi-denomination GGSEL offers with linked variant IDs are updated in one bulk price call using variant modifiers.
 
+For GGSEL live writes, set `GGSEL_API_KEY` to the seller API key/token accepted by GGSEL write endpoints. If you have the long-lived seller API key plus seller ID, also set `GGSEL_SELLER_ID` so the app can call `/api_sellers/api/apilogin` and refresh the short-lived token automatically. A browser/session JWT may work for public item lookup but can still return `401` for price updates.
+
 `POST /sync/stock` now:
 - fetches G-Engine balance and writes a `balance_snapshots` row
 - evaluates each linked mapping with stock rules (supplier availability, supplier stock, usable balance)
 - for Digiseller mappings with `marketplace_variant_id`, toggles each variant visibility individually, moves the default selection to the first fulfillable denomination, and disables the parent product when no linked denomination can be fulfilled
 - enforces whole-offer enable/disable on every stock sync instead of trusting the local cached `is_enabled` flag
-- GGSEL stock enable/disable remains disabled until GGSEL exposes or confirms a stock/status endpoint; price sync support does not imply stock sync support
+- GGSEL stock enable/disable remains disabled until GGSEL exposes or confirms a stock/status endpoint; if balance rules require disabling a GGSEL listing, stock sync reports a partial/error state rather than claiming success
 
 Supported G-Engine link shapes include:
 - `https://b2b.g-engine.net/en/shop/5/playstation-store-wallet-turkey`

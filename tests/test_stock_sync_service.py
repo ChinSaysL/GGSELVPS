@@ -495,6 +495,66 @@ def test_stock_sync_enforces_single_offer_status_even_when_local_state_matches(
     assert client.offer_calls == [("718", False)]
 
 
+def test_stock_sync_reports_error_when_marketplace_disable_is_unsupported(
+    db_session: Session,
+) -> None:
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="5",
+        title="Playstation Store Wallet Turkey",
+        category="Gift Card, PlayStation",
+        denomination="250 TRY",
+        region=None,
+        cost_usd=Decimal("5.50"),
+        supplier_stock="10",
+        is_available=True,
+        raw_payload_json="{}",
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="ggsel",
+        marketplace_offer_id="102249445",
+        supplier_product_id=supplier.id,
+        title="Psn turkey",
+        price=Decimal("610.55"),
+        currency="RUB",
+        is_enabled=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+
+    mapping = ProductMapping(
+        supplier_product_id=supplier.id,
+        marketplace_offer_id=offer.id,
+        enabled=True,
+        marketplace_variant_id=18944509,
+        marketplace_variant_name="250 TRY",
+    )
+    db_session.add(mapping)
+    db_session.commit()
+
+    client = FakeDigisellerStockClient(
+        offer_error=NotImplementedError("GGSEL status updates are not supported")
+    )
+    stats = sync_offer_stock(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_balance_client=FakeSupplierBalanceClient({"balance": "0.00"}),
+        marketplace_clients={"ggsel": client},
+    )
+
+    assert stats["status"] == "partial"
+    assert stats["errors"] == 1
+    assert stats["skipped"] == 0
+    assert stats["offers_disabled"] == 0
+    assert client.offer_calls == [("102249445", False)]
+    assert stats["details"][0]["action"] == "error"
+    assert stats["details"][0]["reason"].startswith("marketplace_disable_not_supported:")
+    assert "insufficient_usable_balance" in stats["details"][0]["reason"]
+
+
 def test_stock_sync_disables_digiseller_parent_when_variant_control_fails(
     db_session: Session,
 ) -> None:

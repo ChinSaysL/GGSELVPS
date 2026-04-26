@@ -137,6 +137,7 @@ def action_check_config() -> int:
     print(f"manual_usd_rub_rate configured: {_safe_yes_no(settings.manual_usd_rub_rate is not None)}")
     print(f"gengine_api_key: {mask_secret(settings.gengine_api_key)}")
     print(f"ggsel_api_key: {mask_secret(settings.ggsel_api_key)}")
+    print(f"ggsel_seller_id configured: {_safe_yes_no(bool(settings.ggsel_seller_id))}")
     print(f"digiseller_api_key: {mask_secret(settings.digiseller_api_key)}")
     print(f"digiseller_seller_id configured: {_safe_yes_no(bool(settings.digiseller_seller_id))}")
 
@@ -152,6 +153,12 @@ def action_check_config() -> int:
         warnings.append(
             "DIGISELLER_SELLER_ID is not set. Digiseller live price updates may return 401 "
             "after token expiry; set seller ID to enable automatic token refresh."
+        )
+    if settings.ggsel_api_key and not settings.ggsel_seller_id:
+        warnings.append(
+            "GGSEL_SELLER_ID is not set. GGSEL public offer lookup can still work, but live "
+            "price/status writes may return 401 unless GGSEL_API_KEY is already a short-lived "
+            "seller API token."
         )
     if settings.default_currency == "RUB":
         if settings.manual_usd_rub_rate is None and not settings.auto_usd_rub_rate:
@@ -1146,7 +1153,11 @@ def _fetch_marketplace_offer_snapshot(
                 task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
             )
         elif marketplace == "ggsel" and settings.ggsel_api_key:
-            client = GGSELClient(settings.ggsel_base_url, settings.ggsel_api_key)
+            client = GGSELClient(
+                settings.ggsel_base_url,
+                settings.ggsel_api_key,
+                seller_id=settings.ggsel_seller_id,
+            )
         else:
             return None, "marketplace API key is not configured"
 
@@ -1755,7 +1766,11 @@ def _list_marketplace_offer_snapshots(
                 task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
             )
         elif marketplace == "ggsel" and settings.ggsel_api_key:
-            client = GGSELClient(settings.ggsel_base_url, settings.ggsel_api_key)
+            client = GGSELClient(
+                settings.ggsel_base_url,
+                settings.ggsel_api_key,
+                seller_id=settings.ggsel_seller_id,
+            )
         else:
             return []
 

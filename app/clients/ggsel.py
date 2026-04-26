@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import time
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from app.clients.base import APIRequestError, BaseAPIClient
+from app.clients.base import APIClientConfigError, APIRequestError, BaseAPIClient
 
 
 class GGSELClient(BaseAPIClient):
@@ -20,11 +22,13 @@ class GGSELClient(BaseAPIClient):
 
     API_PREFIX = "/api_sellers"
     MAX_LIST_PAGES = 50
+    _TOKEN_REFRESH_MARGIN = timedelta(minutes=5)
 
     def __init__(
         self,
         base_url: str,
         api_key: str | None,
+        seller_id: str | None = None,
         timeout: float = 20.0,
         task_poll_timeout_seconds: int = 120,
         task_poll_interval_seconds: float = 1.0,
@@ -35,8 +39,13 @@ class GGSELClient(BaseAPIClient):
             api_key=api_key,
             timeout=timeout,
         )
+        self.seller_id = seller_id
         self._task_poll_timeout_seconds = task_poll_timeout_seconds
         self._task_poll_interval_seconds = task_poll_interval_seconds
+        self._access_token: str | None = None
+        self._access_token_valid_thru: datetime | None = None
+        self._last_apilogin_timestamp: int | None = None
+        self._last_apilogin_error: str | None = None
 
     def _build_path(self, endpoint: str) -> str:
         if not endpoint.startswith("/"):
@@ -46,8 +55,99 @@ class GGSELClient(BaseAPIClient):
         return f"{self.API_PREFIX}{endpoint}"
 
     def _auth_query_params(self) -> dict[str, str]:
+        token = self._get_access_token()
+        return {"token": token}
+
+    @staticmethod
+    def _parse_valid_thru(value: object) -> datetime | None:
+        if not isinstance(value, str):
+            return None
+        text = value.strip()
+        if not text:
+            return None
+        if text.endswith("Z"):
+            text = f"{text[:-1]}+00:00"
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            return parsed.replace(tzinfo=timezone.utc)
+        return parsed
+
+    def _cached_token_is_usable(self) -> bool:
+        if not self._access_token:
+            return False
+        if self._access_token_valid_thru is None:
+            return True
+        return self._access_token_valid_thru > datetime.now(timezone.utc) + self._TOKEN_REFRESH_MARGIN
+
+    def _next_apilogin_timestamp(self) -> int:
+        timestamp = int(datetime.now(timezone.utc).timestamp())
+        if self._last_apilogin_timestamp is not None and timestamp <= self._last_apilogin_timestamp:
+            timestamp = self._last_apilogin_timestamp + 1
+        self._last_apilogin_timestamp = timestamp
+        return timestamp
+
+    def _fetch_access_token_via_apilogin(self) -> tuple[str, datetime | None]:
+        if not self.seller_id:
+            raise APIClientConfigError(
+                "GGSEL_SELLER_ID is required to auto-refresh GGSEL seller API tokens."
+            )
+        try:
+            seller_id = int(self.seller_id)
+        except ValueError as exc:
+            raise APIClientConfigError("GGSEL_SELLER_ID must be an integer.") from exc
+
         api_key = self._require_api_key()
-        return {"token": api_key}
+        timestamp = self._next_apilogin_timestamp()
+        sign = hashlib.sha256(f"{api_key}{timestamp}".encode("utf-8")).hexdigest()
+        response = self._request_json(
+            method="POST",
+            path=self._build_path("/api/apilogin"),
+            json_body={
+                "seller_id": seller_id,
+                "timestamp": timestamp,
+                "sign": sign,
+            },
+            headers={"Accept": "application/json"},
+        )
+        if not isinstance(response, dict):
+            raise APIRequestError("GGSEL /api/apilogin returned unexpected response format.")
+
+        retval = response.get("retval")
+        token_raw = response.get("token")
+        token = token_raw.strip() if isinstance(token_raw, str) else ""
+        if retval not in (0, "0") or not token:
+            desc = str(response.get("desc") or response.get("retdesc") or "").strip()
+            if not desc:
+                desc = "unknown error"
+            raise APIRequestError(f"GGSEL /api/apilogin failed: {desc}")
+
+        return token, self._parse_valid_thru(response.get("valid_thru"))
+
+    def _get_access_token(self, *, force_refresh: bool = False) -> str:
+        api_key = self._require_api_key()
+        if not self.seller_id:
+            return api_key
+
+        if force_refresh:
+            self._access_token = None
+            self._access_token_valid_thru = None
+
+        if self._cached_token_is_usable():
+            return self._access_token or api_key
+
+        try:
+            token, valid_thru = self._fetch_access_token_via_apilogin()
+        except Exception as exc:
+            self._last_apilogin_error = str(exc)
+            return api_key
+
+        self._access_token = token
+        self._access_token_valid_thru = valid_thru
+        self._last_apilogin_error = None
+        return token
 
     @staticmethod
     def _extract_offer_id(item: dict[str, Any]) -> str | None:
@@ -320,8 +420,25 @@ class GGSELClient(BaseAPIClient):
             return ""
         return str(raw_errors).strip()
 
-    def _request_price_update(self, *, request_payload: list[dict[str, Any]]) -> dict[str, Any]:
-        token = self._require_api_key()
+    def _auth_error_hint(self) -> str:
+        if self.seller_id:
+            if self._last_apilogin_error:
+                return (
+                    "GGSEL seller API token was rejected; /api/apilogin fallback also failed: "
+                    f"{self._last_apilogin_error}"
+                )
+            return "GGSEL seller API token was rejected even after /api/apilogin refresh."
+        return (
+            "GGSEL seller API token was rejected. Set GGSEL_SELLER_ID with a seller API key "
+            "in GGSEL_API_KEY, or provide a valid short-lived GGSEL seller API token."
+        )
+
+    def _request_price_update(
+        self,
+        *,
+        request_payload: list[dict[str, Any]],
+        token: str,
+    ) -> dict[str, Any]:
         try:
             response = self.http.request(
                 method="POST",
@@ -335,6 +452,8 @@ class GGSELClient(BaseAPIClient):
         if response.is_error:
             detail = self._response_error_excerpt(response)
             suffix = f": {detail}" if detail else ""
+            if response.status_code in {401, 403}:
+                suffix = f"{suffix} ({self._auth_error_hint()})"
             raise APIRequestError(
                 "GGSEL returned HTTP "
                 f"{response.status_code} for POST /api_sellers/api/product/edit/prices{suffix}"
@@ -363,8 +482,7 @@ class GGSELClient(BaseAPIClient):
             return {"status": "ok", "items": parsed}
         return {"status": "ok", "response": parsed}
 
-    def _fetch_price_update_task_status(self, *, task_id: str) -> dict[str, Any]:
-        token = self._require_api_key()
+    def _fetch_price_update_task_status(self, *, task_id: str, token: str) -> dict[str, Any]:
         response = self._request_json(
             method="GET",
             path=self._build_path("/api/product/edit/UpdateProductsTaskStatus"),
@@ -375,12 +493,12 @@ class GGSELClient(BaseAPIClient):
             raise APIRequestError("GGSEL task status returned unexpected response format.")
         return response
 
-    def _wait_for_price_update_task(self, *, task_id: str) -> dict[str, Any]:
+    def _wait_for_price_update_task(self, *, task_id: str, token: str) -> dict[str, Any]:
         deadline = time.monotonic() + self._task_poll_timeout_seconds
         last_status_payload: dict[str, Any] | None = None
 
         while time.monotonic() <= deadline:
-            status_payload = self._fetch_price_update_task_status(task_id=task_id)
+            status_payload = self._fetch_price_update_task_status(task_id=task_id, token=token)
             last_status_payload = status_payload
             status_code = self._parse_task_status(
                 status_payload.get("Status", status_payload.get("status"))
@@ -440,10 +558,40 @@ class GGSELClient(BaseAPIClient):
         if variants:
             request_item["variants"] = variants
         request_payload: list[dict[str, Any]] = [request_item]
-        response = self._request_price_update(request_payload=request_payload)
+        last_auth_error: APIRequestError | None = None
+        refresh_rounds = (False, True) if self.seller_id else (False,)
+        for force_refresh in refresh_rounds:
+            token = self._get_access_token(force_refresh=force_refresh)
+            try:
+                response = self._request_price_update(
+                    request_payload=request_payload,
+                    token=token,
+                )
+            except APIRequestError as exc:
+                if "HTTP 401" in str(exc) or "HTTP 403" in str(exc):
+                    last_auth_error = exc
+                    continue
+                raise
+
+            task_id = self._extract_task_id(response)
+            if task_id:
+                task_status = self._wait_for_price_update_task(task_id=task_id, token=token)
+                task_status.setdefault("task_id", task_id)
+                return task_status
+            return response
+
+        if last_auth_error is not None:
+            raise last_auth_error
+        response = self._request_price_update(
+            request_payload=request_payload,
+            token=self._get_access_token(),
+        )
         task_id = self._extract_task_id(response)
         if task_id:
-            task_status = self._wait_for_price_update_task(task_id=task_id)
+            task_status = self._wait_for_price_update_task(
+                task_id=task_id,
+                token=self._get_access_token(),
+            )
             task_status.setdefault("task_id", task_id)
             return task_status
         return response
