@@ -48,20 +48,62 @@ class GGSELClient(BaseAPIClient):
         api_key = self._require_api_key()
         return {"token": api_key}
 
+    @staticmethod
+    def _extract_offer_id(item: dict[str, Any]) -> str | None:
+        for key in ("id", "product_id", "productId", "goods_id", "good_id"):
+            value = item.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return None
+
+    @staticmethod
+    def _collect_offer_dicts(value: object) -> list[dict[str, Any]]:
+        collected: list[dict[str, Any]] = []
+        if isinstance(value, list):
+            for item in value:
+                collected.extend(GGSELClient._collect_offer_dicts(item))
+            return collected
+        if not isinstance(value, dict):
+            return collected
+
+        if GGSELClient._extract_offer_id(value) is not None:
+            collected.append(value)
+
+        for nested in value.values():
+            collected.extend(GGSELClient._collect_offer_dicts(nested))
+        return collected
+
     def list_offers(self) -> list[dict[str, Any]]:
-        response = self._request_json(
-            method="POST",
-            path=self._build_path("/api/seller-goods"),
-            params=self._auth_query_params(),
-            json_body={},
+        attempts: tuple[tuple[str, str, dict[str, Any] | None], ...] = (
+            ("GET", "/api/products/list", None),
+            ("POST", "/api/seller-goods", {}),
         )
-        if isinstance(response, list):
-            return [item for item in response if isinstance(item, dict)]
-        if isinstance(response, dict):
-            data = response.get("data")
-            if isinstance(data, list):
-                return [item for item in data if isinstance(item, dict)]
-        return []
+        merged: dict[str, dict[str, Any]] = {}
+
+        for method, endpoint, body in attempts:
+            try:
+                response = self._request_json(
+                    method=method,
+                    path=self._build_path(endpoint),
+                    params=self._auth_query_params(),
+                    json_body=body,
+                )
+            except APIRequestError:
+                continue
+
+            for item in self._collect_offer_dicts(response):
+                offer_id = self._extract_offer_id(item)
+                if offer_id is None:
+                    continue
+                merged.setdefault(offer_id, item)
+
+            if merged:
+                break
+
+        return list(merged.values())
 
     @staticmethod
     def _matches_offer_id(item: dict[str, Any], offer_id: str) -> bool:
@@ -84,6 +126,27 @@ class GGSELClient(BaseAPIClient):
         normalized = offer_id.strip()
         if not normalized:
             return None
+
+        try:
+            response = self._request_json(
+                method="GET",
+                path=self._build_path(f"/api/products/{normalized}/data"),
+                params=self._auth_query_params(),
+                headers={"Accept": "application/json"},
+            )
+        except APIRequestError:
+            response = None
+
+        if isinstance(response, dict):
+            product = response.get("product")
+            if isinstance(product, dict):
+                product.setdefault("product_id", product.get("id"))
+                return product
+            for item in self._collect_offer_dicts(response):
+                if self._matches_offer_id(item, normalized):
+                    return item
+            if self._matches_offer_id(response, normalized):
+                return response
 
         for item in self.list_offers():
             if self._matches_offer_id(item, normalized):
@@ -180,8 +243,11 @@ class GGSELClient(BaseAPIClient):
             raise APIRequestError("GGSEL request failed: POST /api_sellers/api/product/edit/prices") from exc
 
         if response.is_error:
+            detail = self._response_error_excerpt(response)
+            suffix = f": {detail}" if detail else ""
             raise APIRequestError(
-                f"GGSEL returned HTTP {response.status_code} for POST /api_sellers/api/product/edit/prices"
+                "GGSEL returned HTTP "
+                f"{response.status_code} for POST /api_sellers/api/product/edit/prices{suffix}"
             )
 
         try:
@@ -268,14 +334,22 @@ class GGSELClient(BaseAPIClient):
             )
         raise APIRequestError(f"GGSEL price update task timed out ({task_id}).")
 
-    def set_offer_price(self, offer_id: str, price: float, currency: str) -> dict[str, Any]:
+    def set_offer_price(
+        self,
+        offer_id: str,
+        price: float,
+        currency: str,
+        *,
+        variants: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         _ = currency
-        request_payload: list[dict[str, Any]] = [
-            {
-                "product_id": int(offer_id),
-                "price": float(price),
-            }
-        ]
+        request_item: dict[str, Any] = {
+            "product_id": int(offer_id),
+            "price": float(price),
+        }
+        if variants:
+            request_item["variants"] = variants
+        request_payload: list[dict[str, Any]] = [request_item]
         response = self._request_price_update(request_payload=request_payload)
         task_id = self._extract_task_id(response)
         if task_id:

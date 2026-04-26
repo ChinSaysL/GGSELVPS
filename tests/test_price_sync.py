@@ -563,3 +563,87 @@ def test_price_sync_updates_digiseller_variant_group_with_single_api_call(
     assert variant_rates[1001] == Decimal("0.0")
     assert variant_rates[1002] > Decimal("0")
     assert base_price > 0
+
+
+def test_price_sync_updates_ggsel_variant_group_with_single_api_call(
+    db_session: Session,
+) -> None:
+    supplier_250 = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="5",
+        title="Playstation Store Wallet Turkey",
+        category="Gift Card, PlayStation",
+        denomination="250 TRY",
+        region=None,
+        cost_usd=Decimal("5.50"),
+        supplier_stock="300+",
+        is_available=True,
+        raw_payload_json='{"id":"5","product_id":"5","base_product_id":"5"}',
+    )
+    supplier_500 = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="6",
+        title="Playstation Store Wallet Turkey",
+        category="Gift Card, PlayStation",
+        denomination="500 TRY",
+        region=None,
+        cost_usd=Decimal("11.00"),
+        supplier_stock="300+",
+        is_available=True,
+        raw_payload_json='{"id":"6","product_id":"5","base_product_id":"5"}',
+    )
+    db_session.add_all([supplier_250, supplier_500])
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="ggsel",
+        marketplace_offer_id="5850465",
+        supplier_product_id=supplier_250.id,
+        title="Playstation testing",
+        price=Decimal("7.00"),
+        currency="USD",
+        is_enabled=False,
+    )
+    db_session.add(offer)
+    db_session.flush()
+
+    db_session.add_all(
+        [
+            ProductMapping(
+                supplier_product_id=supplier_250.id,
+                marketplace_offer_id=offer.id,
+                enabled=True,
+                marketplace_variant_id=19472011,
+                marketplace_variant_name="250 TRY",
+            ),
+            ProductMapping(
+                supplier_product_id=supplier_500.id,
+                marketplace_offer_id=offer.id,
+                enabled=True,
+                marketplace_variant_id=19472020,
+                marketplace_variant_name="500 TRY",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    client = FakeMarketplacePriceClient()
+    result = sync_offer_prices(
+        db=db_session,
+        settings=_settings_for_tests(default_currency="USD"),
+        marketplace_clients={"ggsel": client},
+        dry_run=False,
+        refresh_supplier_prices=False,
+    )
+
+    assert result["prices_updated"] == 2
+    assert len(client.calls) == 1
+    offer_id, base_price, currency, variants = client.calls[0]
+    assert offer_id == "5850465"
+    assert currency == "USD"
+    assert variants is not None
+    assert {item["variant_id"] for item in variants} == {19472011, 19472020}
+    assert base_price > 0
+    variant_rates = {int(item["variant_id"]): Decimal(str(item["rate"])) for item in variants}
+    assert variant_rates[19472011] == Decimal("0.0")
+    assert variant_rates[19472020] > Decimal("0")

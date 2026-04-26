@@ -615,6 +615,49 @@ def test_digiseller_set_offer_variant_visible_edits_target_variant() -> None:
     assert calls["variant_payload"]["visible"] is False
 
 
+def test_digiseller_variant_update_error_includes_response_body() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/products/options/list/5850465"):
+            return httpx.Response(
+                status_code=200,
+                json={"retval": 0, "content": [{"id": 777}]},
+            )
+        if request.url.path.endswith("/api/products/options/777"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "retval": 0,
+                    "content": {
+                        "id": 777,
+                        "variants": [
+                            {
+                                "variant_id": 19472011,
+                                "name": [{"locale": "en-US", "value": "250 TRY"}],
+                                "type": "priceplus",
+                                "rate": 0,
+                                "is_default": True,
+                                "visible": True,
+                                "order": 1,
+                            }
+                        ],
+                    },
+                },
+            )
+        if request.url.path.endswith("/api/products/options/777/variants/19472011"):
+            return httpx.Response(
+                status_code=400,
+                json={"message": "default variant cannot be hidden"},
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    with pytest.raises(APIRequestError, match="default variant cannot be hidden"):
+        client.set_offer_variant_visible("5850465", 19472011, False)
+    client.close()
+
+
 def test_digiseller_listing_create_and_base_update_are_disabled() -> None:
     client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
     with pytest.raises(NotImplementedError):
@@ -646,6 +689,46 @@ def test_ggsel_get_offer_by_id_filters_from_seller_goods() -> None:
 
     assert offer is not None
     assert offer["id"] == "5850465"
+
+
+def test_ggsel_get_offer_by_id_prefers_product_data_endpoint() -> None:
+    captured_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_paths.append(request.url.path)
+        if request.url.path.endswith("/api_sellers/api/products/5850465/data"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "product": {
+                        "id": 5850465,
+                        "name": "Playstation testing",
+                        "price": "7.15",
+                        "currency": "USD",
+                        "options": [
+                            {
+                                "label": "Gift Card Amount",
+                                "variants": [
+                                    {"variant_id": 19472011, "text": "250 TRY"},
+                                    {"variant_id": 19472020, "text": "500 TRY"},
+                                ],
+                            }
+                        ],
+                    }
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GGSELClient(base_url="https://seller.ggsel.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    offer = client.get_offer_by_id("5850465")
+    client.close()
+
+    assert offer is not None
+    assert offer["product_id"] == 5850465
+    assert offer["options"][0]["variants"][1]["text"] == "500 TRY"
+    assert captured_paths == ["/api_sellers/api/products/5850465/data"]
 
 
 def test_ggsel_set_offer_price_uses_bulk_endpoint_and_waits_for_task() -> None:
@@ -681,6 +764,36 @@ def test_ggsel_set_offer_price_uses_bulk_endpoint_and_waits_for_task() -> None:
     assert captured["price_query"]["token"] == "secret"
     assert captured["price_json"] == [{"product_id": 5850465, "price": 12.34}]
     assert captured["status_query"]["taskId"] == "ggsel-task-123"
+
+
+def test_ggsel_set_offer_price_supports_variants_payload() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api_sellers/api/product/edit/prices"):
+            captured["price_json"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(status_code=200, json={"status": "ok"})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GGSELClient(base_url="https://seller.ggsel.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    result = client.set_offer_price(
+        offer_id="5850465",
+        price=7.15,
+        currency="USD",
+        variants=[{"variant_id": 19472020, "rate": 6.60, "type": 2}],
+    )
+    client.close()
+
+    assert result == {"status": "ok"}
+    assert captured["price_json"] == [
+        {
+            "product_id": 5850465,
+            "price": 7.15,
+            "variants": [{"variant_id": 19472020, "rate": 6.60, "type": 2}],
+        }
+    ]
 
 
 def test_digiseller_get_offer_by_id_uses_products_list_when_available() -> None:

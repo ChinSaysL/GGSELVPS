@@ -352,6 +352,11 @@ def action_sync_stock() -> int:
         print(f"Stock sync failed: {exc}")
         return 1
 
+    _print_stock_sync_result(result)
+    return 0 if result.get("errors", 0) == 0 else 1
+
+
+def _print_stock_sync_result(result: dict[str, Any]) -> None:
     for key in (
         "status",
         "balance_usd",
@@ -383,8 +388,6 @@ def action_sync_stock() -> int:
                     f"- {item.get('marketplace')}:{item.get('marketplace_offer_id')} | "
                     f"mapping={item.get('mapping_id')} | reason={item.get('reason')}"
                 )
-
-    return 0 if result.get("errors", 0) == 0 else 1
 
 
 def _format_money(value: object) -> str:
@@ -2355,6 +2358,18 @@ def action_manual_link() -> int:
                         )
         except Exception as exc:  # noqa: BLE001 - keep manual link successful even if sync fails.
             print(f"Price sync failed after linking: {exc}")
+    if successful > 0 and sys.stdin.isatty() and _ask_bool(
+        "Run live stock sync now to enforce balance-based availability?",
+        default=True,
+    ):
+        try:
+            from app.services.stock_sync import run_stock_sync
+
+            stock_result = run_stock_sync()
+            print("Stock sync result:")
+            _print_stock_sync_result(stock_result)
+        except Exception as exc:  # noqa: BLE001 - keep manual link successful even if sync fails.
+            print(f"Stock sync failed after linking: {exc}")
     return 0 if successful > 0 and failed == 0 else (0 if successful > 0 else 1)
 
 

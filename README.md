@@ -115,15 +115,18 @@ python manage.py manual-link-example
 
 For marketplace pages with option values like `250 TRY` and `500 TRY`, keep those option texts aligned with G-Engine denominations and `manual-link` can map the whole page in one run.
 
+After `python manage.py manual-link`, run the offered live stock sync prompt if the listing is already public. Price sync only updates prices; stock sync is what hides/disables denominations when G-Engine balance is too low.
+
 `python manage.py price-preview` refreshes linked G-Engine costs when possible and shows the recommended cost-based price. `python manage.py sync-prices` applies those prices to linked marketplaces.
 - Digiseller: standard mapped-price sync with optional variant price modifiers.
-- GGSEL: listed price is increased by commission absorption so net received after commissions still matches the target markup/profit.
+- GGSEL: listed price is increased by commission absorption so net received after commissions still matches the target markup/profit. Multi-denomination GGSEL offers with linked variant IDs are updated in one bulk price call using variant modifiers.
 
 `POST /sync/stock` now:
 - fetches G-Engine balance and writes a `balance_snapshots` row
 - evaluates each linked mapping with stock rules (supplier availability, supplier stock, usable balance)
-- for Digiseller mappings with `marketplace_variant_id`, toggles each variant visibility individually (so one denomination can be out of stock while others remain available)
-- falls back to whole-offer enable/disable only when variant-level control is unavailable or not applicable
+- for Digiseller mappings with `marketplace_variant_id`, toggles each variant visibility individually, moves the default selection to the first fulfillable denomination, and disables the parent product when no linked denomination can be fulfilled
+- enforces whole-offer enable/disable on every stock sync instead of trusting the local cached `is_enabled` flag
+- GGSEL stock enable/disable remains disabled until GGSEL exposes or confirms a stock/status endpoint; price sync support does not imply stock sync support
 
 Supported G-Engine link shapes include:
 - `https://b2b.g-engine.net/en/shop/5/playstation-store-wallet-turkey`

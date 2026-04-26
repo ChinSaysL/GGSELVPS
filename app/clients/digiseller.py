@@ -412,8 +412,11 @@ class DigisellerClient(BaseAPIClient):
             raise APIRequestError("Digiseller request failed: POST /api/product/edit/prices") from exc
 
         if response.is_error:
+            detail = self._response_error_excerpt(response)
+            suffix = f": {detail}" if detail else ""
             raise APIRequestError(
-                f"Digiseller returned HTTP {response.status_code} for POST /api/product/edit/prices"
+                "Digiseller returned HTTP "
+                f"{response.status_code} for POST /api/product/edit/prices{suffix}"
             )
 
         try:
@@ -641,6 +644,23 @@ class DigisellerClient(BaseAPIClient):
                 continue
         return None
 
+    @staticmethod
+    def _extract_bool(payload: dict[str, Any], keys: tuple[str, ...]) -> bool | None:
+        for key in keys:
+            raw = payload.get(key)
+            if raw is None:
+                continue
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, int):
+                return raw != 0
+            text = str(raw).strip().lower()
+            if text in {"1", "true", "yes", "on"}:
+                return True
+            if text in {"0", "false", "no", "off"}:
+                return False
+        return None
+
     def _list_product_option_ids(self, product_id: str, *, token: str) -> list[int]:
         response = self._request_json(
             method="GET",
@@ -699,11 +719,13 @@ class DigisellerClient(BaseAPIClient):
             f"Digiseller variant {variant_id} was not found on product {product_id}."
         )
 
-    def set_offer_variant_visible(
+    def set_offer_variant_state(
         self,
         offer_id: str,
         variant_id: int,
+        *,
         visible: bool,
+        is_default: bool | None = None,
     ) -> dict[str, Any]:
         token = self._get_access_token()
         option_id, variant = self._find_variant_payload(
@@ -712,15 +734,19 @@ class DigisellerClient(BaseAPIClient):
             token=token,
         )
 
-        current_visible = bool(variant.get("visible"))
-        if current_visible == bool(visible):
+        current_visible = self._extract_bool(variant, ("visible", "is_visible"))
+        current_default = self._extract_bool(variant, ("is_default", "default"))
+        target_default = bool(current_default) if is_default is None else bool(is_default)
+        visible_matches = current_visible is not None and current_visible == bool(visible)
+        default_matches = is_default is None or current_default == bool(is_default)
+        if visible_matches and default_matches:
             return {"status": "ok", "unchanged": True}
 
         payload: dict[str, Any] = {
             "name": variant.get("name"),
             "type": variant.get("type", "priceplus"),
             "rate": variant.get("rate", 0),
-            "default": bool(variant.get("is_default", variant.get("default", False))),
+            "default": target_default,
             "visible": bool(visible),
             "order": int(variant.get("order", 1)),
         }
@@ -739,7 +765,21 @@ class DigisellerClient(BaseAPIClient):
             "option_id": option_id,
             "variant_id": variant_id,
             "visible": bool(visible),
+            "is_default": target_default,
         }
+
+    def set_offer_variant_visible(
+        self,
+        offer_id: str,
+        variant_id: int,
+        visible: bool,
+    ) -> dict[str, Any]:
+        return self.set_offer_variant_state(
+            offer_id,
+            variant_id,
+            visible=visible,
+            is_default=None,
+        )
 
     def set_offer_price(
         self,

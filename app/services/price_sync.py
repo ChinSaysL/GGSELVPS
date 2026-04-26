@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation, ROUND_UP
-from typing import Any, Protocol, cast
+from typing import Any, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -22,7 +22,14 @@ logger = get_logger(__name__)
 
 
 class MarketplacePriceClientProtocol(Protocol):
-    def set_offer_price(self, offer_id: str, price: float, currency: str) -> dict[str, Any]: ...
+    def set_offer_price(
+        self,
+        offer_id: str,
+        price: float,
+        currency: str,
+        *,
+        variants: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]: ...
 
     def close(self) -> None: ...
 
@@ -368,10 +375,10 @@ def _group_mappings_by_offer(mappings: list[ProductMapping]) -> dict[int, list[P
     return grouped
 
 
-def _digiseller_variant_payload(
+def _marketplace_variant_payload(
     plans: list[tuple[ProductMapping, MarketplaceOffer, _PricePlan]],
 ) -> tuple[Decimal, list[dict[str, Any]]]:
-    # Digiseller uses fixed base product price + per-variant modifiers.
+    # Digiseller/GGSEL use fixed base product price + per-variant modifiers.
     # Keep base anchored at the minimum recommended absolute price so every
     # modifier can be represented as a non-negative PricePlus value.
     base_price = min(plan.recommended_price for _mapping, _offer, plan in plans)
@@ -457,9 +464,9 @@ def sync_offer_prices(
 
         group = mappings_by_offer.get(int(offer.id), [mapping])
         marketplace = offer.marketplace.lower()
-        is_digiseller_variant_group = marketplace == "digiseller" and len(group) > 1
+        supports_variant_price_group = marketplace in {"digiseller", "ggsel"} and len(group) > 1
 
-        if is_digiseller_variant_group:
+        if supports_variant_price_group:
             processed_offer_ids.add(int(offer.id))
             if not any(item.marketplace_variant_id is not None for item in group):
                 for grouped_mapping in group:
@@ -533,9 +540,9 @@ def sync_offer_prices(
                     )
                 continue
 
-            base_price, variant_payload = _digiseller_variant_payload(plans)
+            base_price, variant_payload = _marketplace_variant_payload(plans)
             plan_currency = plans[0][2].currency
-            client = marketplace_clients.get("digiseller")
+            client = marketplace_clients.get(marketplace)
             if client is None:
                 for grouped_mapping, grouped_offer, grouped_plan in plans:
                     grouped_detail = _base_detail(
@@ -591,8 +598,7 @@ def sync_offer_prices(
                 continue
 
             try:
-                digiseller_client = cast(Any, client)
-                update_response = digiseller_client.set_offer_price(
+                update_response = client.set_offer_price(
                     offer.marketplace_offer_id,
                     float(base_price),
                     plan_currency,

@@ -51,6 +51,17 @@ class BaseAPIClient:
             )
         return self.api_key
 
+    def _response_error_excerpt(self, response: httpx.Response, *, limit: int = 500) -> str:
+        text = response.text.strip()
+        if not text:
+            return ""
+        if self.api_key:
+            text = text.replace(self.api_key, mask_secret(self.api_key))
+        text = " ".join(text.split())
+        if len(text) > limit:
+            text = f"{text[:limit]}..."
+        return text
+
     def _request_json(
         self,
         method: str,
@@ -74,9 +85,11 @@ class BaseAPIClient:
             ) from exc
 
         if response.is_error:
+            detail = self._response_error_excerpt(response)
+            suffix = f": {detail}" if detail else ""
             raise APIRequestError(
                 f"{self.service_name} returned HTTP {response.status_code} for "
-                f"{method.upper()} {path}"
+                f"{method.upper()} {path}{suffix}"
             )
 
         try:

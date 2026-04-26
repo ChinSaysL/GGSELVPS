@@ -39,6 +39,17 @@ class MarketplaceVariantStockClientProtocol(MarketplaceStockClientProtocol, Prot
     ) -> dict[str, Any]: ...
 
 
+class MarketplaceVariantStateClientProtocol(MarketplaceVariantStockClientProtocol, Protocol):
+    def set_offer_variant_state(
+        self,
+        offer_id: str,
+        variant_id: int,
+        *,
+        visible: bool,
+        is_default: bool | None = None,
+    ) -> dict[str, Any]: ...
+
+
 def _to_decimal(value: object) -> Decimal | None:
     if value is None:
         return None
@@ -160,6 +171,22 @@ def _updated_detail(stats: dict[str, Any], detail: dict[str, Any], *, enabled: b
         stats["offers_disabled"] += 1
 
 
+def _status_detail(
+    stats: dict[str, Any],
+    detail: dict[str, Any],
+    *,
+    action: str,
+    enabled: bool | None = None,
+    reason: str | None = None,
+) -> None:
+    detail["action"] = action
+    if enabled is not None:
+        detail["enabled"] = enabled
+    if reason is not None:
+        detail["reason"] = reason
+    stats["details"].append(detail)
+
+
 def _is_pending_response(response: dict[str, Any] | None) -> tuple[bool, str | None]:
     if not isinstance(response, dict):
         return False, None
@@ -171,6 +198,30 @@ def _is_pending_response(response: dict[str, Any] | None) -> tuple[bool, str | N
         return True, None
     task_id = str(task_id_raw).strip()
     return True, task_id or None
+
+
+def _set_offer_variant_stock_state(
+    *,
+    client: MarketplaceVariantStockClientProtocol,
+    offer_id: str,
+    variant_id: int,
+    visible: bool,
+    is_default: bool | None,
+) -> dict[str, Any]:
+    if hasattr(client, "set_offer_variant_state"):
+        state_client = cast(MarketplaceVariantStateClientProtocol, client)
+        return state_client.set_offer_variant_state(
+            offer_id,
+            variant_id,
+            visible=visible,
+            is_default=is_default,
+        )
+
+    return client.set_offer_variant_visible(
+        offer_id,
+        variant_id,
+        visible,
+    )
 
 
 def sync_offer_stock(
@@ -261,42 +312,166 @@ def sync_offer_stock(
         if marketplace == "digiseller" and has_variant_bindings:
             variant_client = cast(MarketplaceVariantStockClientProtocol, client)
             any_in_stock = False
-            for mapping, supplier, in_stock, reason, required_balance in decisions:
-                detail = _base_detail(mapping=mapping, offer=offer, supplier=supplier)
-                detail["required_balance_usd"] = str(required_balance)
-                detail["stock_reason"] = reason
+            default_variant_id: int | None = None
+            for mapping, _supplier, in_stock, _reason, _required_balance in decisions:
+                if in_stock and mapping.marketplace_variant_id is not None and default_variant_id is None:
+                    default_variant_id = int(mapping.marketplace_variant_id)
                 if in_stock:
                     any_in_stock = True
 
+            if not any_in_stock:
+                no_stock_parent_detail: dict[str, Any] = {
+                    "offer_id": offer.id,
+                    "marketplace": offer.marketplace,
+                    "marketplace_offer_id": offer.marketplace_offer_id,
+                    "target_enabled": False,
+                    "variant_group": True,
+                    "stock_reason": "all_variants_unfulfillable",
+                }
+                try:
+                    parent_response = client.set_offer_enabled(offer.marketplace_offer_id, False)
+                except NotImplementedError as exc:
+                    _skip_detail(
+                        stats,
+                        no_stock_parent_detail,
+                        reason=f"parent_offer_status_not_updated:{str(exc)}",
+                    )
+                except Exception as exc:  # noqa: BLE001
+                    _error_detail(
+                        stats,
+                        no_stock_parent_detail,
+                        reason=f"parent_offer_status_update_failed:{str(exc)}",
+                    )
+                else:
+                    parent_pending, parent_task_id = _is_pending_response(
+                        parent_response if isinstance(parent_response, dict) else None
+                    )
+                    if parent_pending:
+                        parent_reason = "parent_offer_status_async_task_pending"
+                        if parent_task_id:
+                            parent_reason = f"{parent_reason}:{parent_task_id}"
+                        _skip_detail(stats, no_stock_parent_detail, reason=parent_reason)
+                    else:
+                        _updated_detail(stats, no_stock_parent_detail, enabled=False)
+
+                offer.is_enabled = False
+                offer.last_synced_at = now
+                db.add(offer)
+
+                for mapping, supplier, _in_stock, reason, required_balance in decisions:
+                    detail = _base_detail(mapping=mapping, offer=offer, supplier=supplier)
+                    detail["required_balance_usd"] = str(required_balance)
+                    detail["stock_reason"] = reason
+                    _skip_detail(
+                        stats,
+                        detail,
+                        reason="variant_visibility_skipped_all_variants_unfulfillable",
+                    )
+                continue
+
+            confirmed_visible_variant = False
+            variant_control_failed = False
+            ordered_decisions = sorted(
+                decisions,
+                key=lambda item: (
+                    0
+                    if default_variant_id is not None
+                    and item[0].marketplace_variant_id == default_variant_id
+                    else 1
+                ),
+            )
+            for mapping, supplier, in_stock, reason, required_balance in ordered_decisions:
+                detail = _base_detail(mapping=mapping, offer=offer, supplier=supplier)
+                detail["required_balance_usd"] = str(required_balance)
+                detail["stock_reason"] = reason
                 variant_id = mapping.marketplace_variant_id
                 if variant_id is None:
+                    variant_control_failed = True
                     _skip_detail(stats, detail, reason="variant_id_missing_for_variant_offer")
                     continue
 
+                desired_default: bool | None = None
+                if default_variant_id is not None:
+                    desired_default = int(variant_id) == default_variant_id
+
                 try:
-                    response = variant_client.set_offer_variant_visible(
-                        offer.marketplace_offer_id,
-                        int(variant_id),
-                        in_stock,
+                    response = _set_offer_variant_stock_state(
+                        client=variant_client,
+                        offer_id=offer.marketplace_offer_id,
+                        variant_id=int(variant_id),
+                        visible=in_stock,
+                        is_default=desired_default,
                     )
                 except NotImplementedError as exc:
+                    variant_control_failed = True
                     _skip_detail(stats, detail, reason=str(exc))
                     continue
                 except Exception as exc:  # noqa: BLE001
+                    variant_control_failed = True
                     _error_detail(stats, detail, reason=str(exc))
                     continue
 
                 is_pending, task_id = _is_pending_response(response if isinstance(response, dict) else None)
                 if is_pending:
+                    variant_control_failed = True
                     pending_reason = "marketplace_async_task_pending"
                     if task_id:
                         pending_reason = f"{pending_reason}:{task_id}"
                     _skip_detail(stats, detail, reason=pending_reason)
                     continue
 
+                if in_stock:
+                    confirmed_visible_variant = True
                 _updated_detail(stats, detail, enabled=in_stock)
 
-            offer.is_enabled = any_in_stock
+            parent_enabled = confirmed_visible_variant and not variant_control_failed
+            parent_detail: dict[str, Any] = {
+                "offer_id": offer.id,
+                "marketplace": offer.marketplace,
+                "marketplace_offer_id": offer.marketplace_offer_id,
+                "target_enabled": parent_enabled,
+                "raw_any_in_stock": any_in_stock,
+                "variant_control_failed": variant_control_failed,
+                "variant_group": True,
+            }
+            try:
+                parent_response = client.set_offer_enabled(offer.marketplace_offer_id, parent_enabled)
+            except NotImplementedError as exc:
+                _status_detail(
+                    stats,
+                    parent_detail,
+                    action="skipped",
+                    reason=f"parent_offer_status_not_updated:{str(exc)}",
+                )
+            except Exception as exc:  # noqa: BLE001
+                _error_detail(
+                    stats,
+                    parent_detail,
+                    reason=f"parent_offer_status_update_failed:{str(exc)}",
+                )
+            else:
+                parent_pending, parent_task_id = _is_pending_response(
+                    parent_response if isinstance(parent_response, dict) else None
+                )
+                if parent_pending:
+                    parent_reason = "parent_offer_status_async_task_pending"
+                    if parent_task_id:
+                        parent_reason = f"{parent_reason}:{parent_task_id}"
+                    _status_detail(
+                        stats,
+                        parent_detail,
+                        action="skipped",
+                        reason=parent_reason,
+                    )
+                else:
+                    _status_detail(
+                        stats,
+                        parent_detail,
+                        action="parent_status_updated",
+                        enabled=parent_enabled,
+                    )
+
+            offer.is_enabled = parent_enabled
             offer.last_synced_at = now
             db.add(offer)
             continue
@@ -310,13 +485,6 @@ def sync_offer_stock(
             continue
 
         target_enabled = decisions[0][2]
-        if offer.is_enabled == target_enabled:
-            for mapping, supplier, _in_stock, reason, required_balance in decisions:
-                detail = _base_detail(mapping=mapping, offer=offer, supplier=supplier)
-                detail["required_balance_usd"] = str(required_balance)
-                _skip_detail(stats, detail, reason=f"offer_status_unchanged:{reason}")
-            continue
-
         try:
             response = client.set_offer_enabled(offer.marketplace_offer_id, target_enabled)
         except NotImplementedError as exc:
