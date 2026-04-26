@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from app.clients.base import BaseAPIClient
+from app.clients.base import APIRequestError, BaseAPIClient
 
 
 class DigisellerClient(BaseAPIClient):
@@ -265,15 +265,36 @@ class DigisellerClient(BaseAPIClient):
         if variants:
             request_item["variants"] = variants
         request_payload: list[dict[str, Any]] = [request_item]
-        response = self._request_json(
-            method="POST",
-            path="/api/product/edit/prices",
-            params=self._auth_query_params(),
-            json_body=request_payload,
+        attempts: tuple[tuple[dict[str, Any] | None, dict[str, str] | None], ...] = (
+            (self._auth_query_params(), None),
+            (None, self._auth_headers()),
+            (self._auth_query_params(), self._auth_headers()),
         )
-        if not isinstance(response, dict):
-            raise TypeError("Unexpected Digiseller price update response format.")
-        return response
+        last_auth_error: APIRequestError | None = None
+
+        for params, headers in attempts:
+            try:
+                response = self._request_json(
+                    method="POST",
+                    path="/api/product/edit/prices",
+                    params=params,
+                    json_body=request_payload,
+                    headers=headers,
+                )
+            except APIRequestError as exc:
+                # Some Digiseller accounts reject query-token auth on this endpoint.
+                if "HTTP 401" in str(exc):
+                    last_auth_error = exc
+                    continue
+                raise
+
+            if not isinstance(response, dict):
+                raise TypeError("Unexpected Digiseller price update response format.")
+            return response
+
+        if last_auth_error is not None:
+            raise last_auth_error
+        raise APIRequestError("Digiseller price update failed before receiving a response.")
 
     def get_latest_sales(self) -> list[dict[str, Any]]:
         response = self._request_json(

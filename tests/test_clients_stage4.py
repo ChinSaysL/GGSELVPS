@@ -244,6 +244,47 @@ def test_digiseller_set_offer_price_supports_variants_payload() -> None:
     ]
 
 
+def test_digiseller_set_offer_price_retries_with_header_auth_after_401() -> None:
+    captured: dict[str, Any] = {"attempts": []}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/product/edit/prices"):
+            captured["attempts"].append(
+                {
+                    "query": dict(request.url.params),
+                    "auth_header": request.headers.get("Authorization"),
+                    "token_header": request.headers.get("token"),
+                }
+            )
+            if len(captured["attempts"]) == 1:
+                return httpx.Response(status_code=401, json={"error": "unauthorized"})
+            return httpx.Response(status_code=200, json={"status": "ok"})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    result = client.set_offer_price(
+        offer_id="10",
+        price=7.75,
+        currency="USD",
+        variants=[{"variant_id": 5001, "rate": 7.35, "type": 2}],
+    )
+    client.close()
+
+    assert result == {"status": "ok"}
+    assert len(captured["attempts"]) == 2
+
+    first = captured["attempts"][0]
+    assert first["query"]["token"] == "secret"
+    assert first["auth_header"] is None
+
+    second = captured["attempts"][1]
+    assert second["query"] == {}
+    assert second["token_header"] == "secret"
+    assert second["auth_header"] == "Bearer secret"
+
+
 def test_digiseller_listing_create_and_base_update_are_disabled() -> None:
     client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
     with pytest.raises(NotImplementedError):
