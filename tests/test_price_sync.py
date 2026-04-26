@@ -20,6 +20,7 @@ from app.services.price_sync import sync_offer_prices
 class FakeMarketplacePriceClient:
     calls: list[tuple[str, float, str, list[dict[str, Any]] | None]] = field(default_factory=list)
     response: dict[str, Any] | None = None
+    error: Exception | None = None
 
     def set_offer_price(
         self,
@@ -30,6 +31,8 @@ class FakeMarketplacePriceClient:
         variants: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         self.calls.append((offer_id, price, currency, variants))
+        if self.error is not None:
+            raise self.error
         if self.response is not None:
             return self.response
         return {"status": "ok"}
@@ -228,6 +231,37 @@ def test_price_sync_skips_when_marketplace_async_task_is_pending(
     assert offer.price == Decimal("7.00")
     assert result["details"][0]["action"] == "skipped"
     assert str(result["details"][0]["reason"]).startswith("marketplace_async_task_pending")
+
+
+def test_price_sync_disables_inaccessible_digiseller_mapping(
+    db_session: Session,
+) -> None:
+    _supplier, offer, mapping = _linked_offer(
+        db_session,
+        offer_price=Decimal("7.00"),
+        offer_currency="USD",
+    )
+    client = FakeMarketplacePriceClient(
+        error=RuntimeError(
+            "Digiseller price update task failed (task-1): "
+            "142: Product not found or you do not have edit access"
+        )
+    )
+
+    result = sync_offer_prices(
+        db=db_session,
+        settings=_settings_for_tests(default_currency="USD"),
+        marketplace_clients={"digiseller": client},
+        dry_run=False,
+        refresh_supplier_prices=False,
+    )
+
+    assert result["errors"] == 0
+    assert result["prices_updated"] == 0
+    assert result["skipped"] == 1
+    assert result["details"][0]["reason"] == "marketplace_offer_not_accessible_mapping_disabled"
+    assert mapping.enabled is False
+    assert offer.price == Decimal("7.00")
 
 
 def test_price_sync_skips_rub_without_manual_or_auto_rate(db_session: Session) -> None:

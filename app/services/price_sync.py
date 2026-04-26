@@ -315,6 +315,15 @@ def _error_detail(
     stats["details"].append(detail)
 
 
+def _is_digiseller_offer_access_error(reason: str) -> bool:
+    text = reason.strip().lower()
+    if not text:
+        return False
+    if "product not found or you do not have edit access" in text:
+        return True
+    return "product not found" in text and "edit access" in text
+
+
 def _group_mappings_by_offer(mappings: list[ProductMapping]) -> dict[int, list[ProductMapping]]:
     grouped: dict[int, list[ProductMapping]] = {}
     for mapping in mappings:
@@ -557,6 +566,9 @@ def sync_offer_prices(
                     _skip_detail(stats, grouped_detail, reason=str(exc))
                 continue
             except Exception as exc:  # noqa: BLE001 - keep other offers running.
+                is_access_error = marketplace == "digiseller" and _is_digiseller_offer_access_error(
+                    str(exc)
+                )
                 for grouped_mapping, grouped_offer, grouped_plan in plans:
                     grouped_detail = _base_detail(
                         mapping=grouped_mapping,
@@ -569,7 +581,16 @@ def sync_offer_prices(
                             "currency": grouped_plan.currency,
                         }
                     )
-                    _error_detail(stats, grouped_detail, reason=str(exc))
+                    if is_access_error:
+                        grouped_mapping.enabled = False
+                        db.add(grouped_mapping)
+                        _skip_detail(
+                            stats,
+                            grouped_detail,
+                            reason="marketplace_offer_not_accessible_mapping_disabled",
+                        )
+                    else:
+                        _error_detail(stats, grouped_detail, reason=str(exc))
                 continue
 
             response_status = ""
@@ -688,6 +709,15 @@ def sync_offer_prices(
             _skip_detail(stats, detail, reason=str(exc))
             continue
         except Exception as exc:  # noqa: BLE001 - one failed offer should not stop the batch.
+            if marketplace == "digiseller" and _is_digiseller_offer_access_error(str(exc)):
+                mapping.enabled = False
+                db.add(mapping)
+                _skip_detail(
+                    stats,
+                    detail,
+                    reason="marketplace_offer_not_accessible_mapping_disabled",
+                )
+                continue
             _error_detail(stats, detail, reason=str(exc))
             continue
 
