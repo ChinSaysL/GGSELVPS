@@ -244,6 +244,31 @@ def test_digiseller_set_offer_price_supports_variants_payload() -> None:
     ]
 
 
+def test_digiseller_set_offer_price_accepts_plain_text_task_id_response() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/product/edit/prices"):
+            return httpx.Response(
+                status_code=200,
+                text="9a968c22-9bc2-439f-bbaf-0f5a368f59a5",
+                headers={"Content-Type": "text/plain"},
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    result = client.set_offer_price(
+        offer_id="10",
+        price=7.75,
+        currency="USD",
+        variants=[{"variant_id": 5001, "rate": 7.35, "type": 2}],
+    )
+    client.close()
+
+    assert result["status"] == "ok"
+    assert result["task_id"] == "9a968c22-9bc2-439f-bbaf-0f5a368f59a5"
+
+
 def test_digiseller_set_offer_price_retries_with_header_auth_after_401() -> None:
     captured: dict[str, Any] = {"attempts": []}
 

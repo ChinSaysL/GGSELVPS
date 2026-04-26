@@ -4,6 +4,8 @@ import hashlib
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import httpx
+
 from app.clients.base import APIClientConfigError, APIRequestError, BaseAPIClient
 
 
@@ -357,6 +359,53 @@ class DigisellerClient(BaseAPIClient):
             "Please provide the exact payload field for enable/disable."
         )
 
+    def _request_price_update(
+        self,
+        *,
+        params: dict[str, Any] | None,
+        headers: dict[str, str] | None,
+        request_payload: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        try:
+            response = self.http.request(
+                method="POST",
+                url="/api/product/edit/prices",
+                params=params,
+                json=request_payload,
+                headers=headers,
+            )
+        except httpx.RequestError as exc:
+            raise APIRequestError("Digiseller request failed: POST /api/product/edit/prices") from exc
+
+        if response.is_error:
+            raise APIRequestError(
+                f"Digiseller returned HTTP {response.status_code} for POST /api/product/edit/prices"
+            )
+
+        try:
+            parsed = response.json()
+        except ValueError:
+            # Digiseller can return a plain-text async task id for this endpoint.
+            task_id = response.text.strip()
+            if not task_id:
+                return {"status": "ok"}
+            if task_id.startswith("<") and "html" in task_id.lower():
+                raise APIRequestError(
+                    "Digiseller returned unexpected HTML for POST /api/product/edit/prices"
+                )
+            return {"status": "ok", "task_id": task_id}
+
+        if isinstance(parsed, dict):
+            return parsed
+        if isinstance(parsed, str):
+            token = parsed.strip()
+            if token:
+                return {"status": "ok", "task_id": token}
+            return {"status": "ok"}
+        if isinstance(parsed, list):
+            return {"status": "ok", "items": parsed}
+        return {"status": "ok", "response": parsed}
+
     def set_offer_price(
         self,
         offer_id: str,
@@ -389,12 +438,10 @@ class DigisellerClient(BaseAPIClient):
 
             for params, headers in attempts:
                 try:
-                    response = self._request_json(
-                        method="POST",
-                        path="/api/product/edit/prices",
+                    response = self._request_price_update(
                         params=params,
-                        json_body=request_payload,
                         headers=headers,
+                        request_payload=request_payload,
                     )
                 except APIRequestError as exc:
                     # Some Digiseller accounts reject one auth style for this endpoint.
@@ -410,8 +457,6 @@ class DigisellerClient(BaseAPIClient):
                         continue
                     raise
 
-                if not isinstance(response, dict):
-                    raise TypeError("Unexpected Digiseller price update response format.")
                 return response
 
         if last_auth_error is not None:
