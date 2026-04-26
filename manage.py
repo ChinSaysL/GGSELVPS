@@ -568,6 +568,16 @@ def _product_matches_reference(product: Any, reference: GEngineProductReference)
     return _normalize_search_text(reference.slug) in _product_search_blob(product)
 
 
+def _product_matches_reference_id(product: Any, reference: GEngineProductReference) -> bool:
+    return reference.product_id in _product_reference_ids(product)
+
+
+def _product_matches_reference_slug(product: Any, reference: GEngineProductReference) -> bool:
+    if reference.slug is None:
+        return False
+    return _normalize_search_text(reference.slug) in _product_search_blob(product)
+
+
 def _sort_products_for_reference(
     products: list[Any],
     reference: GEngineProductReference,
@@ -1573,7 +1583,19 @@ def _reference_query_hint(reference: GEngineProductReference, products: list[Any
 
 
 def _products_for_reference(reference: GEngineProductReference, products: list[Any]) -> list[Any]:
-    matches = [product for product in products if _product_matches_reference(product, reference)]
+    id_matches = [
+        product
+        for product in products
+        if _product_matches_reference_id(product, reference)
+    ]
+    if id_matches:
+        return _sort_products_for_reference(id_matches, reference)
+
+    matches = [
+        product
+        for product in products
+        if _product_matches_reference_slug(product, reference)
+    ]
     return _sort_products_for_reference(matches, reference)
 
 

@@ -141,6 +141,37 @@ def test_product_reference_does_not_match_local_database_id() -> None:
     assert not manage._product_matches_reference(product, reference)
 
 
+def test_products_for_reference_prefers_id_matches_over_slug_fallback() -> None:
+    reference = manage.GEngineProductReference(
+        kind="recharge",
+        product_id="1",
+        slug="steam",
+        source="https://b2b.g-engine.net/en/recharge/1/steam",
+    )
+    products = [
+        SimpleNamespace(
+            id=1,
+            title="Steam RU+CIS",
+            category="Games, Steam",
+            denomination="Steam Key RU+CIS",
+            supplier_product_id="718",
+            raw_payload_json='{"recharge_product_id":"1"}',
+        ),
+        SimpleNamespace(
+            id=136,
+            title="100 PHP",
+            category="Gift Card, Steam",
+            denomination="100 PHP",
+            supplier_product_id="547",
+            raw_payload_json='{"product_id":"999"}',
+        ),
+    ]
+
+    matches = manage._products_for_reference(reference, products)
+
+    assert [product.id for product in matches] == [1]
+
+
 def test_default_offer_title_includes_distinct_denomination() -> None:
     product = SimpleNamespace(title="Turkey Gift Card", denomination="500 TL")
     assert manage._default_offer_title(product) == "Turkey Gift Card - 500 TL"

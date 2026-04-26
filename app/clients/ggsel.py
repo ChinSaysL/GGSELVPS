@@ -19,6 +19,7 @@ class GGSELClient(BaseAPIClient):
     """
 
     API_PREFIX = "/api_sellers"
+    MAX_LIST_PAGES = 50
 
     def __init__(
         self,
@@ -88,29 +89,92 @@ class GGSELClient(BaseAPIClient):
             collected.extend(GGSELClient._collect_offer_dicts(nested))
         return collected
 
+    @staticmethod
+    def _is_lookup_miss(exc: APIRequestError) -> bool:
+        message = str(exc)
+        return "HTTP 400" in message or "HTTP 404" in message
+
+    @staticmethod
+    def _payload_int(payload: dict[str, Any], keys: tuple[str, ...]) -> int | None:
+        for key in keys:
+            value = payload.get(key)
+            if value is None:
+                continue
+            try:
+                return int(str(value))
+            except ValueError:
+                continue
+        return None
+
+    @classmethod
+    def _has_next_offer_page(cls, response: dict[str, Any] | list[Any], requested_page: int) -> bool:
+        if not isinstance(response, dict):
+            return False
+        has_next = response.get("has_next_page")
+        if isinstance(has_next, bool):
+            return has_next
+        current_page = cls._payload_int(response, ("page",)) or requested_page
+        total_pages = cls._payload_int(response, ("total_pages", "pages"))
+        return total_pages is not None and current_page < total_pages
+
+    def _request_offer_list_page(
+        self,
+        *,
+        method: str,
+        endpoint: str,
+        page: int,
+        body_template: dict[str, Any] | None,
+    ) -> dict[str, Any] | list[Any]:
+        params = self._auth_query_params()
+        body = dict(body_template) if body_template is not None else None
+        if page > 1:
+            if method.upper() == "GET":
+                params = {**params, "page": str(page)}
+            else:
+                body = {} if body is None else body
+                body.setdefault("page", page)
+        return self._request_json(
+            method=method,
+            path=self._build_path(endpoint),
+            params=params,
+            json_body=body,
+        )
+
     def list_offers(self) -> list[dict[str, Any]]:
         attempts: tuple[tuple[str, str, dict[str, Any] | None], ...] = (
             ("GET", "/api/products/list", None),
             ("POST", "/api/seller-goods", {}),
         )
         merged: dict[str, dict[str, Any]] = {}
+        first_unexpected_error: APIRequestError | None = None
 
         for method, endpoint, body in attempts:
-            try:
-                response = self._request_json(
-                    method=method,
-                    path=self._build_path(endpoint),
-                    params=self._auth_query_params(),
-                    json_body=body,
-                )
-            except APIRequestError:
-                continue
+            page = 1
+            while page <= self.MAX_LIST_PAGES:
+                try:
+                    response = self._request_offer_list_page(
+                        method=method,
+                        endpoint=endpoint,
+                        page=page,
+                        body_template=body,
+                    )
+                except APIRequestError as exc:
+                    if not self._is_lookup_miss(exc) and first_unexpected_error is None:
+                        first_unexpected_error = exc
+                    break
 
-            for item in self._collect_offer_dicts(response):
-                offer_id = self._extract_offer_id(item)
-                if offer_id is None:
-                    continue
-                merged.setdefault(offer_id, item)
+                for item in self._collect_offer_dicts(response):
+                    offer_id = self._extract_offer_id(item)
+                    if offer_id is None:
+                        continue
+                    merged.setdefault(offer_id, item)
+
+                if not self._has_next_offer_page(response, page):
+                    break
+                page += 1
+
+        if not merged and first_unexpected_error is not None:
+            raise first_unexpected_error
 
         return list(merged.values())
 
@@ -147,6 +211,7 @@ class GGSELClient(BaseAPIClient):
             f"/api/products/{normalized}/data",
             f"/api/product/{normalized}/data",
         )
+        first_unexpected_error: APIRequestError | None = None
         for path in direct_paths:
             try:
                 response = self._request_json(
@@ -155,7 +220,9 @@ class GGSELClient(BaseAPIClient):
                     params=self._auth_query_params(),
                     headers={"Accept": "application/json"},
                 )
-            except APIRequestError:
+            except APIRequestError as exc:
+                if not self._is_lookup_miss(exc) and first_unexpected_error is None:
+                    first_unexpected_error = exc
                 response = None
 
             if isinstance(response, dict):
@@ -173,6 +240,8 @@ class GGSELClient(BaseAPIClient):
         for item in self.list_offers():
             if self._matches_offer_id(item, normalized):
                 return item
+        if first_unexpected_error is not None:
+            raise first_unexpected_error
         return None
 
     def create_offer(self, payload: dict[str, Any]) -> dict[str, Any]:
