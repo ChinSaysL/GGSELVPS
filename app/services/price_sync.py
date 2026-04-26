@@ -540,7 +540,7 @@ def sync_offer_prices(
 
             try:
                 digiseller_client = cast(Any, client)
-                digiseller_client.set_offer_price(
+                update_response = digiseller_client.set_offer_price(
                     offer.marketplace_offer_id,
                     float(base_price),
                     plan_currency,
@@ -575,6 +575,38 @@ def sync_offer_prices(
                         }
                     )
                     _error_detail(stats, grouped_detail, reason=str(exc))
+                continue
+
+            response_status = ""
+            group_task_id: str | None = None
+            if isinstance(update_response, dict):
+                response_status = str(update_response.get("status") or "").strip().lower()
+                task_id_value = update_response.get("task_id")
+                if task_id_value is not None:
+                    task_text = str(task_id_value).strip()
+                    group_task_id = task_text or None
+            if response_status == "pending":
+                pending_reason = "marketplace_async_task_pending"
+                if group_task_id:
+                    pending_reason = f"{pending_reason}:{group_task_id}"
+                for grouped_mapping, grouped_offer, grouped_plan in plans:
+                    grouped_detail = _base_detail(
+                        mapping=grouped_mapping,
+                        offer=grouped_offer,
+                        supplier_product=grouped_mapping.supplier_product,
+                    )
+                    grouped_detail.update(
+                        {
+                            "recommended_price": _decimal_to_str(grouped_plan.recommended_price),
+                            "currency": grouped_plan.currency,
+                            "group_base_price": _decimal_to_str(base_price),
+                            "variant_id": grouped_mapping.marketplace_variant_id,
+                            "variant_name": grouped_mapping.marketplace_variant_name,
+                            "variant_mode": True,
+                            "task_id": group_task_id,
+                        }
+                    )
+                    _skip_detail(stats, grouped_detail, reason=pending_reason)
                 continue
 
             offer.price = base_price
@@ -652,7 +684,7 @@ def sync_offer_prices(
             continue
 
         try:
-            client.set_offer_price(
+            update_response = client.set_offer_price(
                 offer.marketplace_offer_id,
                 float(plan.recommended_price),
                 plan.currency,
@@ -662,6 +694,22 @@ def sync_offer_prices(
             continue
         except Exception as exc:  # noqa: BLE001 - one failed offer should not stop the batch.
             _error_detail(stats, detail, reason=str(exc))
+            continue
+
+        response_status = ""
+        item_task_id: str | None = None
+        if isinstance(update_response, dict):
+            response_status = str(update_response.get("status") or "").strip().lower()
+            task_id_value = update_response.get("task_id")
+            if task_id_value is not None:
+                task_text = str(task_id_value).strip()
+                item_task_id = task_text or None
+        if response_status == "pending":
+            detail["task_id"] = item_task_id
+            pending_reason = "marketplace_async_task_pending"
+            if item_task_id:
+                pending_reason = f"{pending_reason}:{item_task_id}"
+            _skip_detail(stats, detail, reason=pending_reason)
             continue
 
         offer.price = plan.recommended_price

@@ -506,7 +506,10 @@ class DigisellerClient(BaseAPIClient):
                     raise APIRequestError(
                         f"Digiseller price update task completed with errors ({task_id}): {error_text}"
                     )
-                return status_payload
+                success_payload = dict(status_payload)
+                success_payload.setdefault("status", "ok")
+                success_payload.setdefault("task_id", task_id)
+                return success_payload
             if status_code == 2:
                 error_text = self._task_error_descriptions(status_payload)
                 if not error_text:
@@ -521,6 +524,12 @@ class DigisellerClient(BaseAPIClient):
             status_code = self._parse_task_status(
                 last_status_payload.get("Status", last_status_payload.get("status"))
             )
+            if status_code in (0, 1):
+                pending_payload = dict(last_status_payload)
+                pending_payload["status"] = "pending"
+                pending_payload["task_id"] = task_id
+                pending_payload["last_status"] = status_code
+                return pending_payload
             raise APIRequestError(
                 "Digiseller price update task timed out "
                 f"({task_id}), last status={status_code}"
@@ -580,7 +589,9 @@ class DigisellerClient(BaseAPIClient):
 
                 task_id = self._extract_task_id(response)
                 if task_id:
-                    self._wait_for_price_update_task(task_id=task_id, token=token)
+                    task_status = self._wait_for_price_update_task(task_id=task_id, token=token)
+                    task_status.setdefault("task_id", task_id)
+                    return task_status
                 return response
 
         if last_auth_error is not None:

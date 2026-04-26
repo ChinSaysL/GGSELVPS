@@ -19,6 +19,7 @@ from app.services.price_sync import sync_offer_prices
 @dataclass
 class FakeMarketplacePriceClient:
     calls: list[tuple[str, float, str, list[dict[str, Any]] | None]] = field(default_factory=list)
+    response: dict[str, Any] | None = None
 
     def set_offer_price(
         self,
@@ -29,6 +30,8 @@ class FakeMarketplacePriceClient:
         variants: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         self.calls.append((offer_id, price, currency, variants))
+        if self.response is not None:
+            return self.response
         return {"status": "ok"}
 
     def close(self) -> None:
@@ -200,6 +203,31 @@ def test_price_sync_updates_digiseller_rub_price_for_linked_offer(
     assert offer.price == expected_rub
     assert client.calls == [("5850465", float(expected_rub), "RUB", None)]
     assert result["details"][0]["action"] == "updated"
+
+
+def test_price_sync_skips_when_marketplace_async_task_is_pending(
+    db_session: Session,
+) -> None:
+    _supplier, offer, _mapping = _linked_offer(
+        db_session,
+        offer_price=Decimal("7.00"),
+        offer_currency="USD",
+    )
+    client = FakeMarketplacePriceClient(response={"status": "pending", "task_id": "task-123"})
+
+    result = sync_offer_prices(
+        db=db_session,
+        settings=_settings_for_tests(default_currency="USD"),
+        marketplace_clients={"digiseller": client},
+        dry_run=False,
+        refresh_supplier_prices=False,
+    )
+
+    assert result["prices_updated"] == 0
+    assert result["skipped"] == 1
+    assert offer.price == Decimal("7.00")
+    assert result["details"][0]["action"] == "skipped"
+    assert str(result["details"][0]["reason"]).startswith("marketplace_async_task_pending")
 
 
 def test_price_sync_skips_rub_without_manual_or_auto_rate(db_session: Session) -> None:

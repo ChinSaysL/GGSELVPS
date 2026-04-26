@@ -358,6 +358,47 @@ def test_digiseller_set_offer_price_raises_when_task_done_has_errors() -> None:
     client.close()
 
 
+def test_digiseller_set_offer_price_returns_pending_when_task_timeout_in_queue() -> None:
+    calls = {"status": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/product/edit/prices"):
+            return httpx.Response(
+                status_code=200,
+                json={"taskId": "pending-task-id"},
+            )
+        if request.url.path.endswith("/api/product/edit/UpdateProductsTaskStatus"):
+            calls["status"] += 1
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "TaskId": "pending-task-id",
+                    "Status": 0,
+                    "SuccessCount": 0,
+                    "ErrorCount": 0,
+                    "TotalCount": 1,
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
+    client._TASK_POLL_TIMEOUT_SECONDS = 0.01  # type: ignore[attr-defined]
+    client._TASK_POLL_INTERVAL_SECONDS = 0.01  # type: ignore[attr-defined]
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    result = client.set_offer_price(
+        offer_id="5850465",
+        price=7.75,
+        currency="USD",
+        variants=[{"variant_id": 19472020, "rate": 7.35, "type": 2}],
+    )
+    client.close()
+
+    assert result.get("status") == "pending"
+    assert result.get("task_id") == "pending-task-id"
+    assert calls["status"] >= 1
+
+
 def test_digiseller_set_offer_price_retries_with_header_auth_after_401() -> None:
     captured: dict[str, Any] = {"attempts": []}
 
