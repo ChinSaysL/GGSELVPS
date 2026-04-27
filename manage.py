@@ -52,8 +52,9 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
         "sync-stock",
         "Apply stock/availability updates from supplier stock and usable balance.",
     ),
-    MenuAction("16", "Manual link help", "manual-link-example", "Print an example link request."),
-    MenuAction("17", "Docker build", "docker-build", "Run docker compose build."),
+    MenuAction("16", "Sync orders (live)", "sync-orders", "Process paid orders and delivery."),
+    MenuAction("17", "Manual link help", "manual-link-example", "Print an example link request."),
+    MenuAction("18", "Docker build", "docker-build", "Run docker compose build."),
 )
 
 VALID_MARKETPLACES = ("digiseller", "ggsel")
@@ -361,6 +362,59 @@ def action_sync_stock() -> int:
 
     _print_stock_sync_result(result)
     return 0 if result.get("errors", 0) == 0 else 1
+
+
+def action_sync_orders() -> int:
+    _print_header("Order Sync (Manual Trigger)")
+    print("This checks paid marketplace orders, buys linked G-Engine items, and delivers them.")
+    if sys.stdin.isatty() and not _ask_bool("Process paid orders now (live mode)?", default=True):
+        print("Cancelled.")
+        return 0
+
+    try:
+        from app.services.order_sync import run_order_sync
+    except ImportError as exc:
+        print(f"Could not import app dependencies: {exc}")
+        print("Run: python -m pip install -r requirements.txt")
+        return 1
+
+    try:
+        result = run_order_sync()
+    except Exception as exc:  # noqa: BLE001 - CLI should show a readable failure.
+        print(f"Order sync failed: {exc}")
+        return 1
+
+    _print_order_sync_result(result)
+    return 0 if result.get("errors", 0) == 0 else 1
+
+
+def _print_order_sync_result(result: dict[str, Any]) -> None:
+    for key in (
+        "status",
+        "orders_detected",
+        "orders_processed",
+        "supplier_orders_created",
+        "orders_delivered",
+        "skipped",
+        "errors",
+    ):
+        if key in result:
+            print(f"{key}: {result[key]}")
+
+    details = result.get("details")
+    if isinstance(details, list):
+        notable = [
+            item
+            for item in details
+            if isinstance(item, dict) and item.get("action") in {"skipped", "error"}
+        ]
+        if notable:
+            print("Notable details (first 10):")
+            for item in notable[:10]:
+                print(
+                    f"- order={item.get('marketplace_order_id') or item.get('order_id')} | "
+                    f"reason={item.get('reason')}"
+                )
 
 
 def _print_stock_sync_result(result: dict[str, Any]) -> None:
@@ -2714,6 +2768,7 @@ COMMANDS: dict[str, Callable[[], int]] = {
     "price-preview": action_price_preview,
     "sync-prices": action_sync_prices,
     "sync-stock": action_sync_stock,
+    "sync-orders": action_sync_orders,
     "list-products": action_list_products,
     "list-offers": action_list_offers,
     "manual-link": action_manual_link,

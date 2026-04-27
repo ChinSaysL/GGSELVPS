@@ -5,14 +5,16 @@ from decimal import Decimal
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
+from app.clients import DigisellerClient, GEngineClient
 from app.config import get_settings
 from app.db import get_db, init_db
 from app.models import BalanceSnapshot, MarketplaceOffer, Order, ProductMapping, SupplierProduct
-from app.services.order_sync import retry_order, run_order_sync
+from app.services.order_sync import process_digiseller_unique_code, retry_order, run_order_sync
 from app.services.price_sync import run_price_sync
 from app.services.product_sync import run_product_sync
 from app.services.stock_sync import run_stock_sync
@@ -318,8 +320,60 @@ def disable_mapping(mapping_id: int, db: Session = Depends(get_db)) -> dict[str,
 
 
 @app.post("/sync/orders")
-def sync_orders() -> dict[str, int | str]:
+def sync_orders() -> dict[str, Any]:
     return run_order_sync()
+
+
+def _digiseller_delivery_response(stats: dict[str, Any]) -> HTMLResponse:
+    status = str(stats.get("status") or "")
+    if status in {"ok", "success"} and int(stats.get("orders_delivered") or 0) > 0:
+        return HTMLResponse(
+            "<html><body><h1>Order delivered</h1>"
+            "<p>Your order has been delivered. You can close this page.</p></body></html>"
+        )
+    if status == "pending":
+        return HTMLResponse(
+            "<html><body><h1>Order is being prepared</h1>"
+            "<p>Your payment was verified, but supplier delivery is not ready yet. "
+            "Please refresh this page in a few minutes.</p></body></html>",
+            status_code=202,
+        )
+    return HTMLResponse(
+        "<html><body><h1>Delivery needs support</h1>"
+        "<p>We could not complete automatic delivery. Please contact the seller in chat.</p>"
+        "</body></html>",
+        status_code=500,
+    )
+
+
+@app.get("/delivery/digiseller")
+def digiseller_unique_code_delivery(
+    unique_code: str = Query(..., alias="uniquecode"),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    if not settings.gengine_api_key or not settings.digiseller_api_key:
+        raise HTTPException(status_code=503, detail="Delivery API keys are not configured.")
+
+    supplier_client = GEngineClient(settings.gengine_base_url, settings.gengine_api_key)
+    marketplace_client = DigisellerClient(
+        settings.digiseller_base_url,
+        settings.digiseller_api_key,
+        seller_id=settings.digiseller_seller_id,
+        task_poll_timeout_seconds=settings.digiseller_task_poll_timeout_seconds,
+        task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
+    )
+    try:
+        stats = process_digiseller_unique_code(
+            unique_code=unique_code,
+            db=db,
+            settings=settings,
+            supplier_client=supplier_client,
+            marketplace_client=marketplace_client,
+        )
+        return _digiseller_delivery_response(stats)
+    finally:
+        marketplace_client.close()
+        supplier_client.close()
 
 
 @app.post("/offers/manual-link")

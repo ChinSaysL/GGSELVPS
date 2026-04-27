@@ -495,10 +495,10 @@ def test_stock_sync_enforces_single_offer_status_even_when_local_state_matches(
     assert client.offer_calls == [("718", False)]
 
 
-def test_stock_sync_reports_error_when_marketplace_disable_is_unsupported(
+def test_stock_sync_controls_ggsel_variants_instead_of_disabling_whole_offer(
     db_session: Session,
 ) -> None:
-    supplier = SupplierProduct(
+    supplier_250 = SupplierProduct(
         supplier="gengine",
         supplier_product_id="5",
         title="Playstation Store Wallet Turkey",
@@ -510,13 +510,25 @@ def test_stock_sync_reports_error_when_marketplace_disable_is_unsupported(
         is_available=True,
         raw_payload_json="{}",
     )
-    db_session.add(supplier)
+    supplier_500 = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="6",
+        title="Playstation Store Wallet Turkey",
+        category="Gift Card, PlayStation",
+        denomination="500 TRY",
+        region=None,
+        cost_usd=Decimal("60.00"),
+        supplier_stock="10",
+        is_available=True,
+        raw_payload_json="{}",
+    )
+    db_session.add_all([supplier_250, supplier_500])
     db_session.flush()
 
     offer = MarketplaceOffer(
         marketplace="ggsel",
         marketplace_offer_id="102249445",
-        supplier_product_id=supplier.id,
+        supplier_product_id=supplier_250.id,
         title="Psn turkey",
         price=Decimal("610.55"),
         currency="RUB",
@@ -525,14 +537,24 @@ def test_stock_sync_reports_error_when_marketplace_disable_is_unsupported(
     db_session.add(offer)
     db_session.flush()
 
-    mapping = ProductMapping(
-        supplier_product_id=supplier.id,
-        marketplace_offer_id=offer.id,
-        enabled=True,
-        marketplace_variant_id=18944509,
-        marketplace_variant_name="250 TRY",
+    db_session.add_all(
+        [
+            ProductMapping(
+                supplier_product_id=supplier_250.id,
+                marketplace_offer_id=offer.id,
+                enabled=True,
+                marketplace_variant_id=18944509,
+                marketplace_variant_name="250 TRY",
+            ),
+            ProductMapping(
+                supplier_product_id=supplier_500.id,
+                marketplace_offer_id=offer.id,
+                enabled=True,
+                marketplace_variant_id=18944510,
+                marketplace_variant_name="500 TRY",
+            ),
+        ]
     )
-    db_session.add(mapping)
     db_session.commit()
 
     client = FakeDigisellerStockClient(
@@ -541,18 +563,24 @@ def test_stock_sync_reports_error_when_marketplace_disable_is_unsupported(
     stats = sync_offer_stock(
         db=db_session,
         settings=_settings_for_tests(),
-        supplier_balance_client=FakeSupplierBalanceClient({"balance": "0.00"}),
+        supplier_balance_client=FakeSupplierBalanceClient({"balance": "50.00"}),
         marketplace_clients={"ggsel": client},
     )
 
-    assert stats["status"] == "partial"
-    assert stats["errors"] == 1
-    assert stats["skipped"] == 0
-    assert stats["offers_disabled"] == 0
-    assert client.offer_calls == [("102249445", False)]
-    assert stats["details"][0]["action"] == "error"
-    assert stats["details"][0]["reason"].startswith("marketplace_disable_not_supported:")
-    assert "insufficient_usable_balance" in stats["details"][0]["reason"]
+    assert stats["errors"] == 0
+    assert stats["offers_enabled"] == 1
+    assert stats["offers_disabled"] == 1
+    assert offer.is_enabled is True
+    assert client.variant_state_calls == [
+        ("102249445", 18944509, True, True),
+        ("102249445", 18944510, False, False),
+    ]
+    assert client.offer_calls == [("102249445", True)]
+    assert any(
+        item.get("reason", "").startswith("parent_offer_status_not_updated:")
+        for item in stats["details"]
+        if isinstance(item, dict)
+    )
 
 
 def test_stock_sync_disables_digiseller_parent_when_variant_control_fails(

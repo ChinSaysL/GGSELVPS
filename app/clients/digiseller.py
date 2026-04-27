@@ -883,11 +883,71 @@ class DigisellerClient(BaseAPIClient):
             raise TypeError("Unexpected Digiseller order response format.")
         return response
 
-    def send_buyer_message(self, order_id: str, buyer_id: str, message: str) -> dict[str, Any]:
-        _ = (order_id, buyer_id, message)
-        # TODO: /api/debates/v2 requires correspondence ID (id_i). Mapping from
-        # marketplace order to correspondence ID is not defined yet.
-        raise NotImplementedError(
-            "Digiseller send_buyer_message is not implemented. "
-            "Please provide how to resolve correspondence ID from order data."
+    def verify_unique_code(self, unique_code: str) -> dict[str, Any]:
+        normalized_code = unique_code.strip()
+        if not normalized_code:
+            raise APIRequestError("Digiseller unique code is empty.")
+        response = self._request_json(
+            method="GET",
+            path=f"/api/purchases/unique-code/{normalized_code}",
+            params=self._auth_query_params(),
+            headers={"Accept": "application/json"},
         )
+        if not isinstance(response, dict):
+            raise TypeError("Unexpected Digiseller unique-code response format.")
+        self._ensure_success_response(response, context="Digiseller unique-code verification failed")
+        return response
+
+    def mark_unique_code_delivered(self, unique_code: str) -> dict[str, Any]:
+        normalized_code = unique_code.strip()
+        if not normalized_code:
+            raise APIRequestError("Digiseller unique code is empty.")
+        response = self._request_json(
+            method="PUT",
+            path=f"/api/purchases/unique-code/{normalized_code}/deliver",
+            params=self._auth_query_params(),
+            headers={"Accept": "application/json"},
+        )
+        if not isinstance(response, dict):
+            raise TypeError("Unexpected Digiseller unique-code delivery response format.")
+        retval = response.get("retval")
+        if retval in (0, "0", 4, "4"):
+            return response
+        self._ensure_success_response(
+            response,
+            context="Digiseller unique-code delivery confirmation failed",
+        )
+        return response
+
+    def send_buyer_message(self, order_id: str, buyer_id: str, message: str) -> dict[str, Any]:
+        _ = buyer_id
+        token = self._get_access_token()
+        try:
+            response = self.http.request(
+                method="POST",
+                url="/api/debates/v2",
+                params={"token": token, "id_i": order_id},
+                json={"message": message, "files": []},
+                headers={"Accept": "application/json"},
+            )
+        except httpx.RequestError as exc:
+            raise APIRequestError("Digiseller request failed: POST /api/debates/v2") from exc
+
+        if response.is_error:
+            detail = self._response_error_excerpt(response)
+            suffix = f": {detail}" if detail else ""
+            raise APIRequestError(
+                f"Digiseller returned HTTP {response.status_code} for POST /api/debates/v2{suffix}"
+            )
+
+        if not response.content:
+            return {"status": "ok"}
+        try:
+            parsed = response.json()
+        except ValueError:
+            return {"status": "ok", "response": response.text.strip()}
+        if isinstance(parsed, dict):
+            self._ensure_success_response(parsed, context="Digiseller buyer message failed")
+            parsed.setdefault("status", "ok")
+            return parsed
+        return {"status": "ok", "response": parsed}

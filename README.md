@@ -13,13 +13,15 @@ This repository currently includes Stage 1-5 foundations:
 - Product sync service that imports/upserts G-Engine supplier products only
 - Manual marketplace offer linking via `/offers/manual-link` and `/mappings/import`
 - Cost-based price preview/sync for already-linked offers
-- Stock sync with balance-aware decisions; Digiseller variant-level visibility updates for linked option mappings
-- Tests for pricing, stock rules, product import, client behavior, and idempotency decisions
+- Stock sync with balance-aware decisions; Digiseller and GGSEL variant-level visibility updates for linked option mappings
+- Paid-order sync that buys once from G-Engine and delivers through Digiseller/GGSEL order chat
+- Digiseller unique-code verification endpoint for delayed buyer-confirmed delivery
+- Tests for pricing, stock rules, product import, client behavior, order delivery, and idempotency decisions
 - Docker + docker-compose deployment baseline
 
 Important: this app does not auto-create marketplace listings. Create GGSEL/Digiseller offers manually in the marketplace, then link them to imported supplier products inside this app.
 
-API integrations are partially implemented and continue to evolve as endpoint mappings are confirmed from official docs (notably GGSEL stock/price toggles and order delivery flows).
+API integrations continue to evolve as endpoint mappings are confirmed from official docs. Listing creation stays disabled; fulfillment works only for manually linked offers.
 
 ## Tech
 
@@ -90,6 +92,7 @@ python manage.py auto-link
 python manage.py price-preview
 python manage.py sync-prices
 python manage.py sync-stock
+python manage.py sync-orders
 python manage.py list-products
 python manage.py manual-link
 python manage.py manual-link-example
@@ -127,13 +130,32 @@ For GGSEL live writes, set `GGSEL_API_KEY` to the seller API key/token accepted 
 - fetches G-Engine balance and writes a `balance_snapshots` row
 - evaluates each linked mapping with stock rules (supplier availability, supplier stock, usable balance)
 - for Digiseller mappings with `marketplace_variant_id`, toggles each variant visibility individually, moves the default selection to the first fulfillable denomination, and disables the parent product when no linked denomination can be fulfilled
+- for GGSEL mappings with `marketplace_variant_id`, uses the same option-variant visibility flow so one unavailable denomination does not disable the whole product
 - enforces whole-offer enable/disable on every stock sync instead of trusting the local cached `is_enabled` flag
-- GGSEL stock enable/disable remains disabled until GGSEL exposes or confirms a stock/status endpoint; if balance rules require disabling a GGSEL listing, stock sync reports a partial/error state rather than claiming success
+- whole-product GGSEL enable/disable remains disabled until GGSEL exposes or confirms a stock/status endpoint; stock sync skips that parent toggle after variant updates
 
 Supported G-Engine link shapes include:
 - `https://b2b.g-engine.net/en/shop/5/playstation-store-wallet-turkey`
 - `https://b2b.g-engine.net/ru/recharge/1/steam`
 - `https://b2b.g-engine.net/en/gifts/4451080/vituber-melody`
+
+## Delivery flow
+
+`POST /sync/orders` polls configured marketplaces for paid sales. For each linked paid order it:
+- matches the marketplace product and option/variant to a local `ProductMapping`
+- creates one G-Engine order for the mapped supplier row, including buyer input fields when the marketplace order provides them
+- stores the supplier order ID before delivery so retries do not buy the same marketplace order twice
+- delivers returned codes through the marketplace order correspondence and stores only masked codes locally
+
+Digiseller unique-code products require a second buyer-side step. Configure the Digiseller product's automatic code verification URL to:
+
+```text
+https://YOUR_PUBLIC_HOST/delivery/digiseller
+```
+
+Digiseller appends the `uniquecode` query parameter. The endpoint verifies that code with Digiseller, reuses the existing local order if the poller already bought it, delivers the G-Engine result to the buyer chat, then marks the unique code as delivered.
+
+GGSEL delivery happens during `POST /sync/orders` as soon as a paid sale is detected. There is no unique-code gate for GGSEL.
 
 ## Local setup (test PC)
 
@@ -224,7 +246,7 @@ docker compose logs -f
 
 10. Add VPS public IP to G-Engine production whitelist.
 11. Run `python manage.py price-preview` before any real price update.
-12. Trigger manual sync endpoints after API clients are implemented.
+12. Trigger manual sync endpoints after API keys and linked offers are configured.
 
 ## Safe first-run procedure
 

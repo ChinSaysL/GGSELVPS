@@ -47,6 +47,38 @@ def test_gengine_create_order_uses_confirmed_endpoint_and_payload() -> None:
     assert captured["body"] == {"items": [{"id": 123, "quantity": 2}]}
 
 
+def test_gengine_create_order_includes_buyer_inputs_for_direct_fulfillment() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(status_code=200, json={"order_id": "ge-1"})
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    response = client.create_order(
+        product_id="718",
+        quantity=1,
+        buyer_inputs={"steam_friend_code": "123456789"},
+        external_order_id="ggsel:9001",
+    )
+    client.close()
+
+    assert response == {"order_id": "ge-1"}
+    assert captured["body"] == {
+        "items": [
+            {
+                "id": 718,
+                "quantity": 1,
+                "fields": {"steam_friend_code": "123456789"},
+                "account": "123456789",
+            }
+        ],
+        "external_id": "ggsel:9001",
+    }
+
+
 def test_gengine_does_not_duplicate_v21_prefix_if_present_in_base_url() -> None:
     captured: dict[str, Any] = {}
 
@@ -207,8 +239,6 @@ def test_ggsel_unresolved_methods_remain_explicitly_not_implemented() -> None:
     client = GGSELClient(base_url="https://seller.ggsel.com", api_key="secret")
     with pytest.raises(NotImplementedError):
         client.create_offer({"title": "x"})
-    with pytest.raises(NotImplementedError):
-        client.send_buyer_message(order_id="1", buyer_id="2", message="hello")
     client.close()
 
 
@@ -615,6 +645,58 @@ def test_digiseller_set_offer_variant_visible_edits_target_variant() -> None:
     assert calls["variant_payload"]["visible"] is False
 
 
+def test_digiseller_unique_code_delivery_uses_confirmed_endpoints() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/purchases/unique-code/ABC1234567890000"):
+            captured["verify_query"] = dict(request.url.params)
+            return httpx.Response(
+                status_code=200,
+                json={"retval": 0, "inv": 9001, "id_goods": 5850465},
+            )
+        if request.url.path.endswith("/api/purchases/unique-code/ABC1234567890000/deliver"):
+            captured["deliver_query"] = dict(request.url.params)
+            return httpx.Response(
+                status_code=200,
+                json={"retval": 0, "inv": 9001, "id_goods": 5850465},
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    verify_result = client.verify_unique_code("ABC1234567890000")
+    deliver_result = client.mark_unique_code_delivered("ABC1234567890000")
+    client.close()
+
+    assert verify_result["inv"] == 9001
+    assert deliver_result["retval"] == 0
+    assert captured["verify_query"]["token"] == "secret"
+    assert captured["deliver_query"]["token"] == "secret"
+
+
+def test_digiseller_send_buyer_message_uses_order_as_dialog_id() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/debates/v2"):
+            captured["query"] = dict(request.url.params)
+            captured["json"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(status_code=200, content=b"")
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    result = client.send_buyer_message(order_id="9001", buyer_id="", message="hello")
+    client.close()
+
+    assert result == {"status": "ok"}
+    assert captured["query"] == {"token": "secret", "id_i": "9001"}
+    assert captured["json"] == {"message": "hello", "files": []}
+
+
 def test_digiseller_variant_update_error_includes_response_body() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path.endswith("/api/products/options/list/5850465"):
@@ -665,6 +747,72 @@ def test_digiseller_listing_create_and_base_update_are_disabled() -> None:
     with pytest.raises(NotImplementedError):
         client.update_offer(offer_id="10", payload={"title": "x"})
     client.close()
+
+
+def test_ggsel_set_offer_variant_visible_edits_target_variant() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api_sellers/api/products/options/list/5850465"):
+            return httpx.Response(status_code=200, json={"retval": 0, "content": [{"id": 777}]})
+        if request.url.path.endswith("/api_sellers/api/products/options/777"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "retval": 0,
+                    "content": {
+                        "id": 777,
+                        "variants": [
+                            {
+                                "variant_id": 19472020,
+                                "name": [{"locale": "en-US", "value": "500 TRY"}],
+                                "type": "priceplus",
+                                "rate": 5.0,
+                                "is_default": False,
+                                "visible": True,
+                                "order": 2,
+                            }
+                        ],
+                    },
+                },
+            )
+        if request.url.path.endswith("/api_sellers/api/products/options/777/variants/19472020"):
+            captured["query"] = dict(request.url.params)
+            captured["json"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(status_code=200, json={"retval": 0})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GGSELClient(base_url="https://seller.ggsel.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    result = client.set_offer_variant_visible("5850465", 19472020, False)
+    client.close()
+
+    assert result["status"] == "ok"
+    assert result["variant_id"] == 19472020
+    assert captured["query"]["token"] == "secret"
+    assert captured["json"]["visible"] is False
+
+
+def test_ggsel_send_buyer_message_uses_prefixed_debates_endpoint() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api_sellers/api/debates/v2"):
+            captured["query"] = dict(request.url.params)
+            captured["json"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(status_code=200, content=b"")
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GGSELClient(base_url="https://seller.ggsel.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    result = client.send_buyer_message(order_id="9001", buyer_id="", message="hello")
+    client.close()
+
+    assert result == {"status": "ok"}
+    assert captured["query"] == {"token": "secret", "id_i": "9001"}
+    assert captured["json"] == {"message": "hello", "files": []}
 
 
 def test_ggsel_get_offer_by_id_filters_from_seller_goods() -> None:

@@ -197,15 +197,51 @@ class GEngineClient(BaseAPIClient):
             raise TypeError("Unexpected G-Engine product response format.")
         return response
 
-    def create_order(self, product_id: str, quantity: int) -> dict[str, Any]:
-        order_payload = {
+    @staticmethod
+    def _coerce_item_id(product_id: str) -> int | str:
+        try:
+            return int(product_id)
+        except ValueError:
+            return product_id
+
+    @staticmethod
+    def _clean_buyer_inputs(buyer_inputs: dict[str, str] | None) -> dict[str, str]:
+        if not buyer_inputs:
+            return {}
+        cleaned: dict[str, str] = {}
+        for key, value in buyer_inputs.items():
+            normalized_key = str(key).strip()
+            normalized_value = str(value).strip()
+            if normalized_key and normalized_value:
+                cleaned[normalized_key] = normalized_value
+        return cleaned
+
+    def create_order(
+        self,
+        product_id: str,
+        quantity: int = 1,
+        *,
+        buyer_inputs: dict[str, str] | None = None,
+        external_order_id: str | None = None,
+    ) -> dict[str, Any]:
+        item: dict[str, Any] = {
+            "id": self._coerce_item_id(product_id),
+            "quantity": quantity,
+        }
+        cleaned_inputs = self._clean_buyer_inputs(buyer_inputs)
+        if cleaned_inputs:
+            item["fields"] = cleaned_inputs
+            first_value = next(iter(cleaned_inputs.values()))
+            item["account"] = first_value
+
+        order_payload: dict[str, Any] = {
             "items": [
-                {
-                    "id": int(product_id),
-                    "quantity": quantity,
-                }
+                item
             ]
         }
+        if external_order_id:
+            order_payload["external_id"] = external_order_id
+
         response = self._request_json(
             method="POST",
             path=self._build_path("/shop/orders"),

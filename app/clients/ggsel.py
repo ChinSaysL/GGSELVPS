@@ -5,6 +5,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+import httpx
+
 from app.clients.base import APIClientConfigError, APIRequestError, BaseAPIClient
 
 
@@ -368,6 +370,214 @@ class GGSELClient(BaseAPIClient):
         )
 
     @staticmethod
+    def _response_is_success(response: dict[str, Any]) -> bool:
+        retval = response.get("retval")
+        if retval is None:
+            return True
+        return retval in (0, "0")
+
+    @staticmethod
+    def _response_error_message(response: dict[str, Any]) -> str:
+        errors = response.get("errors")
+        if isinstance(errors, list):
+            parts: list[str] = []
+            for item in errors:
+                if isinstance(item, dict):
+                    code = str(item.get("code") or "").strip()
+                    message = str(item.get("message") or "").strip()
+                    if code and message:
+                        parts.append(f"{code}: {message}")
+                    elif message:
+                        parts.append(message)
+            if parts:
+                return "; ".join(parts)
+        if isinstance(errors, dict):
+            parts = [
+                f"{str(key).strip()}: {str(value).strip()}"
+                for key, value in errors.items()
+                if str(value).strip()
+            ]
+            if parts:
+                return "; ".join(parts)
+
+        for key in ("retdesc", "desc", "message"):
+            value = response.get(key)
+            if value is None:
+                continue
+            text = str(value).strip()
+            if text:
+                return text
+        return "unknown api error"
+
+    def _ensure_success_response(self, response: dict[str, Any], *, context: str) -> None:
+        if self._response_is_success(response):
+            return
+        reason = self._response_error_message(response)
+        raise APIRequestError(f"{context}: {reason}")
+
+    @staticmethod
+    def _extract_option_id(payload: object) -> int | None:
+        if not isinstance(payload, dict):
+            return None
+        for key in ("id", "option_id", "optionId"):
+            raw = payload.get(key)
+            if raw is None:
+                continue
+            try:
+                return int(str(raw).strip())
+            except ValueError:
+                continue
+        return None
+
+    @staticmethod
+    def _extract_variant_id(payload: object) -> int | None:
+        if not isinstance(payload, dict):
+            return None
+        for key in ("variant_id", "variantId", "id"):
+            raw = payload.get(key)
+            if raw is None:
+                continue
+            try:
+                return int(str(raw).strip())
+            except ValueError:
+                continue
+        return None
+
+    @staticmethod
+    def _extract_bool(payload: dict[str, Any], keys: tuple[str, ...]) -> bool | None:
+        for key in keys:
+            raw = payload.get(key)
+            if raw is None:
+                continue
+            if isinstance(raw, bool):
+                return raw
+            if isinstance(raw, int):
+                return raw != 0
+            text = str(raw).strip().lower()
+            if text in {"1", "true", "yes", "on"}:
+                return True
+            if text in {"0", "false", "no", "off"}:
+                return False
+        return None
+
+    def _list_product_option_ids(self, product_id: str, *, token: str) -> list[int]:
+        response = self._request_json(
+            method="GET",
+            path=self._build_path(f"/api/products/options/list/{product_id}"),
+            params={"token": token},
+        )
+        if not isinstance(response, dict):
+            raise APIRequestError("GGSEL options list returned unexpected response format.")
+        self._ensure_success_response(response, context="GGSEL options/list failed")
+
+        content = response.get("content")
+        if not isinstance(content, list):
+            return []
+        option_ids: list[int] = []
+        for item in content:
+            option_id = self._extract_option_id(item)
+            if option_id is not None:
+                option_ids.append(option_id)
+        return option_ids
+
+    def _get_product_option(self, option_id: int, *, token: str) -> dict[str, Any]:
+        response = self._request_json(
+            method="GET",
+            path=self._build_path(f"/api/products/options/{option_id}"),
+            params={"token": token},
+        )
+        if not isinstance(response, dict):
+            raise APIRequestError("GGSEL option details returned unexpected response format.")
+        self._ensure_success_response(response, context="GGSEL options/details failed")
+
+        content = response.get("content")
+        if not isinstance(content, dict):
+            raise APIRequestError("GGSEL option details missing content object.")
+        return content
+
+    def _find_variant_payload(
+        self,
+        *,
+        product_id: str,
+        variant_id: int,
+        token: str,
+    ) -> tuple[int, dict[str, Any]]:
+        option_ids = self._list_product_option_ids(product_id, token=token)
+        for option_id in option_ids:
+            option = self._get_product_option(option_id, token=token)
+            variants = option.get("variants")
+            if not isinstance(variants, list):
+                continue
+            for variant in variants:
+                if not isinstance(variant, dict):
+                    continue
+                if self._extract_variant_id(variant) == variant_id:
+                    return option_id, variant
+        raise APIRequestError(f"GGSEL variant {variant_id} was not found on product {product_id}.")
+
+    def set_offer_variant_state(
+        self,
+        offer_id: str,
+        variant_id: int,
+        *,
+        visible: bool,
+        is_default: bool | None = None,
+    ) -> dict[str, Any]:
+        token = self._get_access_token()
+        option_id, variant = self._find_variant_payload(
+            product_id=offer_id,
+            variant_id=variant_id,
+            token=token,
+        )
+
+        current_visible = self._extract_bool(variant, ("visible", "is_visible"))
+        current_default = self._extract_bool(variant, ("is_default", "default"))
+        target_default = bool(current_default) if is_default is None else bool(is_default)
+        visible_matches = current_visible is not None and current_visible == bool(visible)
+        default_matches = is_default is None or current_default == bool(is_default)
+        if visible_matches and default_matches:
+            return {"status": "ok", "unchanged": True}
+
+        payload: dict[str, Any] = {
+            "name": variant.get("name"),
+            "type": variant.get("type", "priceplus"),
+            "rate": variant.get("rate", 0),
+            "default": target_default,
+            "visible": bool(visible),
+            "order": int(variant.get("order", 1)),
+        }
+        response = self._request_json(
+            method="POST",
+            path=self._build_path(f"/api/products/options/{option_id}/variants/{variant_id}"),
+            params={"token": token},
+            json_body=payload,
+        )
+        if not isinstance(response, dict):
+            raise APIRequestError("GGSEL variant update returned unexpected response format.")
+        self._ensure_success_response(response, context="GGSEL variant visibility update failed")
+        return {
+            "status": "ok",
+            "offer_id": offer_id,
+            "option_id": option_id,
+            "variant_id": variant_id,
+            "visible": bool(visible),
+            "is_default": target_default,
+        }
+
+    def set_offer_variant_visible(
+        self,
+        offer_id: str,
+        variant_id: int,
+        visible: bool,
+    ) -> dict[str, Any]:
+        return self.set_offer_variant_state(
+            offer_id,
+            variant_id,
+            visible=visible,
+            is_default=None,
+        )
+
+    @staticmethod
     def _extract_task_id(response: dict[str, Any]) -> str | None:
         for key in ("taskId", "TaskId", "task_id", "task"):
             value = response.get(key)
@@ -621,10 +831,35 @@ class GGSELClient(BaseAPIClient):
         return response
 
     def send_buyer_message(self, order_id: str, buyer_id: str, message: str) -> dict[str, Any]:
-        _ = (order_id, buyer_id, message)
-        # TODO: Endpoint is known, but docs indicate chat/correspondence identifiers are
-        # required; mapping from marketplace order to chat ID is not yet specified.
-        raise NotImplementedError(
-            "GGSEL send_buyer_message is not implemented. "
-            "Please provide how to resolve correspondence ID from order data."
-        )
+        _ = buyer_id
+        token = self._get_access_token()
+        path = self._build_path("/api/debates/v2")
+        try:
+            response = self.http.request(
+                method="POST",
+                url=path,
+                params={"token": token, "id_i": order_id},
+                json={"message": message, "files": []},
+                headers={"Accept": "application/json"},
+            )
+        except httpx.RequestError as exc:
+            raise APIRequestError("GGSEL request failed: POST /api/debates/v2") from exc
+
+        if response.is_error:
+            detail = self._response_error_excerpt(response)
+            suffix = f": {detail}" if detail else ""
+            raise APIRequestError(
+                f"GGSEL returned HTTP {response.status_code} for POST {path}{suffix}"
+            )
+
+        if not response.content:
+            return {"status": "ok"}
+        try:
+            parsed = response.json()
+        except ValueError:
+            return {"status": "ok", "response": response.text.strip()}
+        if isinstance(parsed, dict):
+            self._ensure_success_response(parsed, context="GGSEL buyer message failed")
+            parsed.setdefault("status", "ok")
+            return parsed
+        return {"status": "ok", "response": parsed}

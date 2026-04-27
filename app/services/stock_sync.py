@@ -344,7 +344,8 @@ def sync_offer_stock(
             continue
 
         has_variant_bindings = any(item[0].marketplace_variant_id is not None for item in decisions)
-        if marketplace == "digiseller" and has_variant_bindings:
+        has_variant_stock_api = hasattr(client, "set_offer_variant_visible")
+        if has_variant_bindings and has_variant_stock_api:
             variant_client = cast(MarketplaceVariantStockClientProtocol, client)
             any_in_stock = False
             default_variant_id: int | None = None
@@ -354,7 +355,7 @@ def sync_offer_stock(
                 if in_stock:
                     any_in_stock = True
 
-            if not any_in_stock:
+            if not any_in_stock and marketplace == "digiseller":
                 no_stock_parent_detail: dict[str, Any] = {
                     "offer_id": offer.id,
                     "marketplace": offer.marketplace,
