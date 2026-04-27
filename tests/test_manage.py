@@ -172,6 +172,37 @@ def test_products_for_reference_prefers_id_matches_over_slug_fallback() -> None:
     assert [product.id for product in matches] == [1]
 
 
+def test_products_for_reference_recharge_requires_exact_id_metadata() -> None:
+    reference = manage.GEngineProductReference(
+        kind="recharge",
+        product_id="1",
+        slug="steam",
+        source="https://b2b.g-engine.net/en/recharge/1/steam",
+    )
+    products = [
+        SimpleNamespace(
+            id=1,
+            title="Steam Worldwide",
+            category="Games, Steam",
+            denomination="Wordwide",
+            supplier_product_id="719",
+            raw_payload_json="{}",
+        ),
+        SimpleNamespace(
+            id=2,
+            title="Steam Key RU+CIS",
+            category="Games, Steam",
+            denomination="Steam Key RU+CIS",
+            supplier_product_id="718",
+            raw_payload_json="{}",
+        ),
+    ]
+
+    matches = manage._products_for_reference(reference, products)
+
+    assert matches == []
+
+
 def test_default_offer_title_includes_distinct_denomination() -> None:
     product = SimpleNamespace(title="Turkey Gift Card", denomination="500 TL")
     assert manage._default_offer_title(product) == "Turkey Gift Card - 500 TL"

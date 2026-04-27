@@ -1786,6 +1786,9 @@ def _products_for_reference(reference: GEngineProductReference, products: list[A
     if id_matches:
         return _sort_products_for_reference(id_matches, reference)
 
+    if reference.kind in {"recharge", "gifts"}:
+        return []
+
     matches = [
         product
         for product in products
@@ -1825,6 +1828,11 @@ def _choose_reference_products_interactively() -> tuple[GEngineProductReference,
             f"No imported rows matched G-Engine {reference.kind} product ID "
             f"{reference.product_id}."
         )
+        if reference.kind in {"recharge", "gifts"}:
+            print(
+                "Slug-only fallback is disabled for recharge/gift links because it can pull in "
+                "unrelated imported rows that merely share the same brand name."
+            )
         if reference.kind in {"shop", "unknown"} and _ask_bool(
             "Try importing this G-Engine product ID now?",
             default=True,
