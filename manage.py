@@ -1146,7 +1146,12 @@ def _extract_marketplace_snapshot_fields(payload: dict[str, Any]) -> dict[str, A
                 first_value = str(variants[0].get("variant_value") or "")
                 if first_value:
                     denomination = first_value
-            if denomination is None and option_label:
+            if (
+                denomination is None
+                and option_label
+                and normalized_type not in {"text", "textarea"}
+                and _extract_denomination_signature(option_label)
+            ):
                 denomination = option_label
 
     return {
@@ -1556,6 +1561,18 @@ _CURRENCY_REGION_TOKENS = {
 }
 
 
+_DIRECT_SERVICE_EXCLUDED_TOKENS = {
+    "card",
+    "cards",
+    "code",
+    "codes",
+    "gift",
+    "gifts",
+    "key",
+    "keys",
+}
+
+
 def _meaningful_match_tokens(value: object) -> set[str]:
     return {
         token
@@ -1594,7 +1611,19 @@ def _is_direct_service_product(product: Any) -> bool:
     if _product_denomination_signature(product) is not None:
         return False
     category = _normalize_search_text(getattr(product, "category", None) or "")
-    return "gift card" not in category
+    if "gift card" in category:
+        return False
+    direct_text = _normalize_search_text(
+        " ".join(
+            [
+                str(getattr(product, "title", "") or ""),
+                str(getattr(product, "category", "") or ""),
+                str(getattr(product, "denomination", "") or ""),
+            ]
+        )
+    )
+    direct_tokens = set(direct_text.split())
+    return not bool(direct_tokens & _DIRECT_SERVICE_EXCLUDED_TOKENS)
 
 
 def _direct_service_products(products: list[Any]) -> list[Any]:
@@ -1684,33 +1713,47 @@ def _auto_select_single_offer_product(
     snapshot: dict[str, Any] | None,
 ) -> tuple[Any | None, str | None]:
     if len(products) == 1:
-        return products[0], "only imported row matched the G-Engine reference"
+        if reference.kind != "recharge" or _is_direct_service_product(products[0]):
+            return products[0], "only imported row matched the G-Engine reference"
+        return None, None
+
+    candidate_products = products
+    if reference.kind == "recharge":
+        direct_products = _direct_service_products(products)
+        candidate_products = direct_products
 
     if snapshot is not None:
-        snapshot_matches = _products_matching_snapshot_single_offer(products, snapshot)
+        if reference.kind == "recharge":
+            currency_matches = _products_matching_input_currency_hint(candidate_products, snapshot)
+            if len(currency_matches) == 1:
+                return currency_matches[0], "marketplace buyer-input currency matched one direct row"
+
+        snapshot_matches = _products_matching_snapshot_single_offer(candidate_products, snapshot)
         if len(snapshot_matches) == 1:
             return snapshot_matches[0], "marketplace title/denomination matched one local row"
 
-        currency_matches = _products_matching_input_currency_hint(products, snapshot)
-        if len(currency_matches) == 1:
-            return currency_matches[0], "marketplace buyer-input currency matched one direct row"
+        if reference.kind != "recharge":
+            currency_matches = _products_matching_input_currency_hint(candidate_products, snapshot)
+            if len(currency_matches) == 1:
+                return currency_matches[0], "marketplace buyer-input currency matched one direct row"
 
     direct_id_matches = [
         product
-        for product in products
+        for product in candidate_products
         if _product_direct_supplier_id(product) == reference.product_id
     ]
     if len(direct_id_matches) == 1:
         return direct_id_matches[0], "G-Engine product ID matched one supplier row"
 
-    specific_products = [
-        product
-        for product in products
-        if _is_specific_reference_product(product, reference)
-        and _product_denomination_signature(product) is None
-    ]
-    if len(specific_products) == 1:
-        return specific_products[0], "parent G-Engine product matched one non-denomination row"
+    if reference.kind != "recharge":
+        specific_products = [
+            product
+            for product in candidate_products
+            if _is_specific_reference_product(product, reference)
+            and _product_denomination_signature(product) is None
+        ]
+        if len(specific_products) == 1:
+            return specific_products[0], "parent G-Engine product matched one non-denomination row"
 
     return None, None
 

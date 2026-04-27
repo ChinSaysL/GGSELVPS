@@ -284,6 +284,7 @@ def test_extract_marketplace_snapshot_fields_detects_required_text_input() -> No
         }
     )
 
+    assert snapshot["denomination"] is None
     assert snapshot["detected_requires_buyer_input"] is True
     assert snapshot["detected_buyer_input_label"] == "Steam friend code"
 
@@ -422,9 +423,9 @@ def test_auto_select_single_offer_uses_snapshot_title() -> None:
         ),
         SimpleNamespace(
             id=2,
-            title="Steam Worldwide",
+            title="Steam RU+CIS top up",
             category="Games, Steam",
-            denomination="Worldwide",
+            denomination=None,
             supplier_product_id="719",
             raw_payload_json='{"recharge_product_id":"1"}',
         ),
@@ -437,7 +438,7 @@ def test_auto_select_single_offer_uses_snapshot_title() -> None:
     )
 
     assert product is not None
-    assert product.id == 1
+    assert product.id == 2
     assert reason == "marketplace title/denomination matched one local row"
 
 
@@ -459,6 +460,14 @@ def test_auto_select_single_offer_uses_buyer_input_currency_hint() -> None:
         ),
         SimpleNamespace(
             id=2,
+            title="Steam RUB top up",
+            category="Games, Steam",
+            denomination=None,
+            supplier_product_id="720",
+            raw_payload_json='{"recharge_product_id":"1"}',
+        ),
+        SimpleNamespace(
+            id=3,
             title="Steam Worldwide",
             category="Games, Steam",
             denomination="Worldwide",
@@ -486,7 +495,7 @@ def test_auto_select_single_offer_uses_buyer_input_currency_hint() -> None:
     )
 
     assert product is not None
-    assert product.id == 1
+    assert product.id == 2
     assert reason == "marketplace buyer-input currency matched one direct row"
 
 
@@ -506,6 +515,12 @@ def test_single_offer_manual_candidates_hide_gift_card_rows_for_recharge() -> No
         ),
         SimpleNamespace(
             id=2,
+            title="Steam RUB top up",
+            category="Games, Steam",
+            denomination=None,
+        ),
+        SimpleNamespace(
+            id=3,
             title="Steam Worldwide",
             category="Games, Steam",
             denomination="Worldwide",
@@ -520,7 +535,35 @@ def test_single_offer_manual_candidates_hide_gift_card_rows_for_recharge() -> No
 
     candidates = manage._single_offer_manual_candidates(reference, products)
 
-    assert [product.id for product in candidates] == [1, 2]
+    assert [product.id for product in candidates] == [2, 3]
+
+
+def test_auto_select_single_offer_recharge_does_not_auto_select_key_like_row() -> None:
+    reference = manage.GEngineProductReference(
+        kind="recharge",
+        product_id="1",
+        slug="steam",
+        source="https://b2b.g-engine.net/en/recharge/1/steam",
+    )
+    products = [
+        SimpleNamespace(
+            id=1,
+            title="Steam RU+CIS",
+            category="Games, Steam",
+            denomination="Steam Key RU+CIS",
+            supplier_product_id="718",
+            raw_payload_json='{"recharge_product_id":"1"}',
+        )
+    ]
+
+    product, reason = manage._auto_select_single_offer_product(
+        reference,
+        products,
+        {"title": "STEAM RUB", "denomination": None},
+    )
+
+    assert product is None
+    assert reason is None
 
 
 def test_auto_select_single_offer_uses_snapshot_denomination_signature() -> None:
