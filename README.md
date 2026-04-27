@@ -139,6 +139,15 @@ Supported G-Engine link shapes include:
 - `https://b2b.g-engine.net/ru/recharge/1/steam`
 - `https://b2b.g-engine.net/en/gifts/4451080/vituber-melody`
 
+Recharge links are imported from the G-Engine `/recharge/services` catalogue. Fixed recharge
+denominations are imported as separate local rows. Variable/unfixed recharge services, such as
+Steam Wallet top-ups, can also be linked: during `manual-link`, enter the fixed G-Engine
+`Quantity` your marketplace listing sells and your supplier cost in USD for that Quantity. The app
+stores that cost for safe cost-based pricing and sends the fixed `Quantity` plus the buyer's
+account input to G-Engine at order time. Recharge orders use `/recharge/orders/{service_id}`, pay
+verified orders through `/recharge/orders/{order_id}/pay`, and treat `shipped` as fulfilled without
+a gift-card code.
+
 ## Delivery flow
 
 `POST /sync/orders` polls configured marketplaces for paid sales. For each linked paid order it:

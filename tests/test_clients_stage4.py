@@ -6,7 +6,14 @@ from typing import Any
 import httpx
 import pytest
 
-from app.clients import APIClientConfigError, APIRequestError, DigisellerClient, GEngineClient, GGSELClient
+from app.clients import (
+    APIClientConfigError,
+    APIClientError,
+    APIRequestError,
+    DigisellerClient,
+    GEngineClient,
+    GGSELClient,
+)
 
 
 def _attach_mock_transport(
@@ -77,6 +84,119 @@ def test_gengine_create_order_includes_buyer_inputs_for_direct_fulfillment() -> 
         ],
         "external_id": "ggsel:9001",
     }
+
+
+def test_gengine_create_recharge_order_posts_params_and_pays_when_verified() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8") or "{}") if request.content else None
+        captured.append({"method": request.method, "path": request.url.path, "body": body})
+        if request.url.path.endswith("/recharge/orders/1"):
+            return httpx.Response(status_code=200, json={"id": 7001, "status": "verified"})
+        if request.url.path.endswith("/recharge/orders/7001/pay"):
+            return httpx.Response(status_code=200, json={"id": 7001, "status": "paid"})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    response = client.create_order(
+        "recharge:1",
+        buyer_inputs={"steam_friend_code": "123456789"},
+        external_order_id="ggsel:9001",
+        product_payload={
+            "source_type": "recharge",
+            "recharge_product_id": "1",
+            "recharge_param_keys": ["Account", "Quantity"],
+            "recharge_default_params": {"Quantity": "1000"},
+        },
+    )
+    client.close()
+
+    assert response == {"id": 7001, "status": "paid", "supplier_order_id": "recharge:7001"}
+    assert captured[0]["method"] == "POST"
+    assert captured[0]["path"] == "/v2.1/recharge/orders/1"
+    assert captured[0]["body"]["params"] == [
+        {"param_key": "Account", "param_value": "123456789"},
+        {"param_key": "Quantity", "param_value": "1000"},
+    ]
+    assert len(str(captured[0]["body"]["uuid"])) == 32
+    assert captured[1] == {
+        "method": "POST",
+        "path": "/v2.1/recharge/orders/7001/pay",
+        "body": None,
+    }
+
+
+def test_gengine_create_fixed_recharge_order_includes_denomination_id() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(status_code=200, json={"id": 7002, "status": "processing"})
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    response = client.create_order(
+        "recharge:2:10",
+        buyer_inputs={"account": "player-1"},
+        product_payload={
+            "source_type": "recharge",
+            "recharge_product_id": "2",
+            "recharge_denomination_id": "10",
+            "recharge_param_keys": ["Account"],
+        },
+    )
+    client.close()
+
+    assert response == {"id": 7002, "status": "processing", "supplier_order_id": "recharge:7002"}
+    assert captured["path"] == "/v2.1/recharge/orders/2"
+    assert captured["body"]["denomination_id"] == 10
+    assert captured["body"]["params"] == [{"param_key": "Account", "param_value": "player-1"}]
+
+
+def test_gengine_recharge_status_pays_when_order_becomes_verified() -> None:
+    captured_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_paths.append(request.url.path)
+        if request.url.path.endswith("/recharge/orders/7001"):
+            return httpx.Response(status_code=200, json={"id": 7001, "status": "verified"})
+        if request.url.path.endswith("/recharge/orders/7001/pay"):
+            return httpx.Response(status_code=200, json={"id": 7001, "status": "paid"})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    response = client.get_order_status("recharge:7001")
+    client.close()
+
+    assert response == {"id": 7001, "status": "paid", "supplier_order_id": "recharge:7001"}
+    assert captured_paths == [
+        "/v2.1/recharge/orders/7001",
+        "/v2.1/recharge/orders/7001/pay",
+    ]
+
+
+def test_gengine_recharge_order_requires_quantity_for_unfixed_service() -> None:
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+
+    with pytest.raises(APIClientError, match="Quantity"):
+        client.create_order(
+            "recharge:1",
+            buyer_inputs={"steam_friend_code": "123456789"},
+            product_payload={
+                "source_type": "recharge",
+                "recharge_product_id": "1",
+                "recharge_param_keys": ["Account", "Quantity"],
+            },
+        )
+
+    client.close()
 
 
 def test_gengine_does_not_duplicate_v21_prefix_if_present_in_base_url() -> None:
@@ -209,6 +329,126 @@ def test_gengine_list_product_denominations_fetches_direct_product_id() -> None:
             "denomination": "500 TRY",
             "stock": "300+",
         },
+    ]
+
+
+def test_gengine_list_products_includes_fixed_recharge_denominations() -> None:
+    captured_paths: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured_paths.append(request.url.path)
+        if request.url.path.endswith("/shop/products"):
+            return httpx.Response(status_code=200, json={"data": {"items": []}})
+        if request.url.path.endswith("/recharge/services"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "total": 1,
+                    "items": [
+                        {
+                            "id": 2,
+                            "name": "Genshin Impact",
+                            "description": "Genesis Crystals",
+                            "type": "fixed",
+                            "params": [{"param_key": "Account"}],
+                            "denominations": [
+                                {
+                                    "id": 10,
+                                    "service_id": 2,
+                                    "name": "60 Genesis Crystals",
+                                    "value": "60",
+                                    "currency": "USD",
+                                    "price": 0.99,
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    products = client.list_products()
+    client.close()
+
+    assert any(path.endswith("/recharge/services") for path in captured_paths)
+    assert len(products) == 1
+    assert products[0]["id"] == "recharge:2:10"
+    assert products[0]["source_type"] == "recharge"
+    assert products[0]["recharge_product_id"] == "2"
+    assert products[0]["recharge_denomination_id"] == "10"
+    assert products[0]["title"] == "Genshin Impact"
+    assert products[0]["denomination"] == "60 Genesis Crystals"
+    assert products[0]["cost_usd"] == "0.99"
+    assert products[0]["stock"] == "unlimited"
+    assert products[0]["is_available"] is True
+
+
+def test_gengine_list_recharge_service_products_imports_unpriced_placeholder() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/recharge/services"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "total": 1,
+                    "items": [
+                        {
+                            "id": 1,
+                            "name": "Steam Wallet RUB",
+                            "description": "Steam top up",
+                            "type": "unfixed",
+                            "params": [
+                                {"param_key": "Account", "param_type": "String"},
+                                {"param_key": "Quantity", "param_type": "Float"},
+                            ],
+                            "denominations": None,
+                            "unfixed_details": {"currency": "RUB", "in_game_currency": None},
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    products = client.list_recharge_service_products(
+        "1",
+        fallback_title="Steam",
+        source_slug="steam",
+        include_unpriced=True,
+    )
+    client.close()
+
+    assert products == [
+        {
+            "id": "recharge:1",
+            "name": "Steam Wallet RUB",
+            "description": "Steam top up",
+            "type": "unfixed",
+            "params": [
+                {"param_key": "Account", "param_type": "String"},
+                {"param_key": "Quantity", "param_type": "Float"},
+            ],
+            "denominations": None,
+            "unfixed_details": {"currency": "RUB", "in_game_currency": None},
+            "source_type": "recharge",
+            "recharge_product_id": "1",
+            "service_id": "1",
+            "service_name": "Steam Wallet RUB",
+            "service_type": "unfixed",
+            "source_slug": "steam",
+            "title": "Steam Wallet RUB",
+            "category": "Recharge",
+            "recharge_param_keys": ["Account", "Quantity"],
+            "denomination": "Variable RUB",
+            "cost_usd": "0",
+            "stock": "0",
+            "is_available": False,
+            "requires_manual_cost": True,
+        }
     ]
 
 

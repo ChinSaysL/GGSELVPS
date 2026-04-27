@@ -546,6 +546,99 @@ def _raw_payload_dict(product: Any) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _is_unconfigured_unfixed_recharge_product(product: Any) -> bool:
+    payload = _raw_payload_dict(product)
+    if payload.get("source_type") != "recharge" and "recharge_product_id" not in payload:
+        return False
+    if not payload.get("requires_manual_cost"):
+        return False
+    try:
+        return Decimal(str(getattr(product, "cost_usd", "0") or "0")) <= 0
+    except InvalidOperation:
+        return True
+
+
+def _apply_manual_recharge_config_to_product(
+    product: Any,
+    *,
+    quantity: Decimal,
+    cost_usd: Decimal,
+) -> None:
+    payload = _raw_payload_dict(product)
+    default_params = payload.get("recharge_default_params")
+    if not isinstance(default_params, dict):
+        default_params = {}
+    default_params["Quantity"] = str(quantity)
+    payload["recharge_default_params"] = default_params
+    payload["requires_manual_cost"] = False
+    payload["manual_recharge_cost_usd"] = str(cost_usd)
+
+    denomination = str(getattr(product, "denomination", "") or "").strip()
+    if "quantity" not in denomination.lower():
+        payload["denomination"] = f"{denomination or 'Variable amount'} | Quantity {quantity}"
+
+    raw_payload_json = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
+    setattr(product, "cost_usd", cost_usd)
+    setattr(product, "supplier_stock", "unlimited")
+    setattr(product, "is_available", True)
+    setattr(product, "raw_payload_json", raw_payload_json)
+    if payload.get("denomination"):
+        setattr(product, "denomination", str(payload["denomination"]))
+
+
+def _save_manual_recharge_config(
+    product: Any,
+    *,
+    quantity: Decimal,
+    cost_usd: Decimal,
+) -> None:
+    try:
+        from app.db import SessionLocal
+        from app.models import SupplierProduct
+    except ImportError as exc:
+        raise RuntimeError(f"Could not import app dependencies: {exc}") from exc
+
+    _apply_manual_recharge_config_to_product(product, quantity=quantity, cost_usd=cost_usd)
+    with SessionLocal() as db:
+        supplier = db.get(SupplierProduct, int(product.id))
+        if supplier is None:
+            raise ValueError("Supplier product not found.")
+        supplier.cost_usd = cost_usd
+        supplier.supplier_stock = "unlimited"
+        supplier.is_available = True
+        supplier.raw_payload_json = str(product.raw_payload_json)
+        supplier.denomination = getattr(product, "denomination", None)
+        db.add(supplier)
+        db.commit()
+
+
+def _configure_unfixed_recharge_products_interactively(products: list[Any]) -> bool:
+    unconfigured_products = [
+        product for product in products if _is_unconfigured_unfixed_recharge_product(product)
+    ]
+    if not unconfigured_products:
+        return True
+
+    print(
+        "\nThis G-Engine recharge service is variable/unfixed. "
+        "To price and fulfill it safely, store the fixed top-up Quantity for this marketplace "
+        "listing and your supplier cost for that Quantity."
+    )
+    for product in unconfigured_products:
+        print(_product_label(product))
+        quantity = _ask_decimal("G-Engine recharge Quantity for this listing")
+        cost_usd = _ask_decimal("Supplier cost in USD for that Quantity")
+        try:
+            _save_manual_recharge_config(product, quantity=quantity, cost_usd=cost_usd)
+        except Exception as exc:  # noqa: BLE001 - CLI should show a readable failure.
+            print(f"Could not save recharge cost/quantity for local {product.id}: {exc}")
+            return False
+        print(
+            f"Configured local {product.id}: Quantity={quantity}, supplier cost={cost_usd} USD."
+        )
+    return True
+
+
 def _collect_payload_values(value: object, keys: set[str]) -> set[str]:
     collected: set[str] = set()
     if isinstance(value, dict):
@@ -652,7 +745,7 @@ def _sort_products_for_reference(
 
 
 def _import_gengine_reference(reference: GEngineProductReference) -> int:
-    if reference.kind not in {"shop", "unknown"}:
+    if reference.kind not in {"shop", "recharge", "unknown"}:
         print(
             f"On-demand import for G-Engine '{reference.kind}' links is not implemented yet. "
             "Run the normal product sync, or use a local product row already imported."
@@ -672,11 +765,19 @@ def _import_gengine_reference(reference: GEngineProductReference) -> int:
     settings = get_settings()
     client = GEngineClient(settings.gengine_base_url, settings.gengine_api_key)
     try:
-        products = client.list_product_denominations(
-            reference.product_id,
-            fallback_title=_title_from_slug(reference.slug),
-            source_slug=reference.slug,
-        )
+        if reference.kind == "recharge":
+            products = client.list_recharge_service_products(
+                reference.product_id,
+                fallback_title=_title_from_slug(reference.slug),
+                source_slug=reference.slug,
+                include_unpriced=True,
+            )
+        else:
+            products = client.list_product_denominations(
+                reference.product_id,
+                fallback_title=_title_from_slug(reference.slug),
+                source_slug=reference.slug,
+            )
     except Exception as exc:  # noqa: BLE001 - CLI should show a readable failure.
         print(f"Could not fetch G-Engine product ID {reference.product_id}: {exc}")
         return 0
@@ -684,7 +785,7 @@ def _import_gengine_reference(reference: GEngineProductReference) -> int:
         client.close()
 
     if not products:
-        print(f"G-Engine returned no denominations for product ID {reference.product_id}.")
+        print(f"G-Engine returned no importable rows for product ID {reference.product_id}.")
         return 0
 
     with SessionLocal() as db:
@@ -881,14 +982,17 @@ def _suggest_price(
         return None
 
     settings = get_settings()
-    calculation = calculate_final_price_usd(
-        product.cost_usd,
-        pricing_mode=settings.pricing_mode,
-        platform_fee_percent=Decimal(str(settings.platform_fee_percent)),
-        fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
-        risk_buffer_percent=Decimal(str(settings.risk_buffer_percent)),
-        markup_percent=markup_percent,
-    )
+    try:
+        calculation = calculate_final_price_usd(
+            product.cost_usd,
+            pricing_mode=settings.pricing_mode,
+            platform_fee_percent=Decimal(str(settings.platform_fee_percent)),
+            fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
+            risk_buffer_percent=Decimal(str(settings.risk_buffer_percent)),
+            markup_percent=markup_percent,
+        )
+    except Exception:
+        return None
     desired_net = calculation.final_price_usd
     if marketplace == "ggsel":
         ggsel_marketplace_commission = (
@@ -1833,7 +1937,7 @@ def _choose_reference_products_interactively() -> tuple[GEngineProductReference,
                 "Slug-only fallback is disabled for recharge/gift links because it can pull in "
                 "unrelated imported rows that merely share the same brand name."
             )
-        if reference.kind in {"shop", "unknown"} and _ask_bool(
+        if reference.kind in {"shop", "recharge", "unknown"} and _ask_bool(
             "Try importing this G-Engine product ID now?",
             default=True,
         ):
@@ -2184,6 +2288,7 @@ def _choose_product_interactively() -> Any | None:
             raw_reference = input(
                 "\nPaste G-Engine product link or product ID "
                 "(examples: https://b2b.g-engine.net/en/shop/5/playstation-store-wallet-turkey, "
+                "https://b2b.g-engine.net/en/recharge/1/steam, "
                 "https://b2b.g-engine.net/en/gifts/4451080/vituber-melody): "
             ).strip()
             reference = _parse_gengine_reference(raw_reference)
@@ -2204,7 +2309,7 @@ def _choose_product_interactively() -> Any | None:
                 f"No imported rows matched G-Engine {reference.kind} product ID "
                 f"{reference.product_id}."
             )
-            if reference.kind in {"shop", "unknown"}:
+            if reference.kind in {"shop", "recharge", "unknown"}:
                 if _ask_bool("Try importing this G-Engine product ID now?", default=True):
                     imported = _import_gengine_reference(reference)
                     print(f"Imported rows: {imported}")
@@ -2524,6 +2629,9 @@ def action_manual_link() -> int:
 
     targets = list(targets_by_product_id.values())
     primary_product = targets[0]["product"]
+    target_products = [target["product"] for target in targets]
+    if not _configure_unfixed_recharge_products_interactively(target_products):
+        return 1
 
     if snapshot and len(targets) == 1 and not _snapshot_matches_selected_product(primary_product, snapshot):
         print("Warning: selected G-Engine denomination does not match fetched marketplace item.")

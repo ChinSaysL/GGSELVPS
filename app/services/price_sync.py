@@ -43,6 +43,15 @@ class SupplierRefreshClientProtocol(Protocol):
         source_slug: str | None = None,
     ) -> list[dict[str, Any]]: ...
 
+    def list_recharge_service_products(
+        self,
+        service_id: str,
+        *,
+        fallback_title: str | None = None,
+        source_slug: str | None = None,
+        include_unpriced: bool = False,
+    ) -> list[dict[str, Any]]: ...
+
     def close(self) -> None: ...
 
 
@@ -59,6 +68,7 @@ class _ListSupplierClient:
 
 @dataclass(frozen=True)
 class _SupplierRefreshReference:
+    kind: str
     product_id: str
     fallback_title: str | None
     source_slug: str | None
@@ -79,6 +89,10 @@ class _PricePlan:
 
 class _PriceSyncSkip(RuntimeError):
     pass
+
+
+def _supplier_refresh_reference_key(reference: _SupplierRefreshReference) -> str:
+    return f"{reference.kind}:{reference.product_id}"
 
 
 def _to_decimal(value: object) -> Decimal | None:
@@ -122,6 +136,19 @@ def _supplier_refresh_reference(
         return None
 
     payload = _load_json_object(supplier_product.raw_payload_json)
+    source_type = _first_payload_value(payload, ("source_type",))
+    if source_type == "recharge" or _first_payload_value(payload, ("recharge_product_id",)) is not None:
+        product_id = _first_payload_value(payload, ("recharge_product_id", "service_id"))
+        if product_id is None:
+            return None
+        source_slug = _first_payload_value(payload, ("source_slug", "slug"))
+        return _SupplierRefreshReference(
+            kind="recharge",
+            product_id=product_id,
+            fallback_title=supplier_product.title,
+            source_slug=source_slug,
+        )
+
     product_id = _first_payload_value(
         payload,
         (
@@ -129,7 +156,6 @@ def _supplier_refresh_reference(
             "product_id",
             "productId",
             "shop_product_id",
-            "recharge_product_id",
         ),
     )
     if product_id is None:
@@ -137,6 +163,7 @@ def _supplier_refresh_reference(
 
     source_slug = _first_payload_value(payload, ("source_slug", "slug"))
     return _SupplierRefreshReference(
+        kind="shop",
         product_id=product_id,
         fallback_title=supplier_product.title,
         source_slug=source_slug,
@@ -170,7 +197,7 @@ def _refresh_linked_supplier_products(
     for mapping in mappings:
         reference = _supplier_refresh_reference(mapping.supplier_product)
         if reference is not None:
-            references.setdefault(reference.product_id, reference)
+            references.setdefault(_supplier_refresh_reference_key(reference), reference)
 
     if supplier_client is None:
         if references:
@@ -191,17 +218,26 @@ def _refresh_linked_supplier_products(
     failed_product_ids: set[str] = set()
     for reference in references.values():
         try:
-            products = supplier_client.list_product_denominations(
-                reference.product_id,
-                fallback_title=reference.fallback_title,
-                source_slug=reference.source_slug,
-            )
+            if reference.kind == "recharge":
+                products = supplier_client.list_recharge_service_products(
+                    reference.product_id,
+                    fallback_title=reference.fallback_title,
+                    source_slug=reference.source_slug,
+                    include_unpriced=False,
+                )
+            else:
+                products = supplier_client.list_product_denominations(
+                    reference.product_id,
+                    fallback_title=reference.fallback_title,
+                    source_slug=reference.source_slug,
+                )
         except Exception as exc:  # noqa: BLE001 - keep scheduler resilient per product group.
             stats["supplier_refresh_errors"] += 1
-            failed_product_ids.add(reference.product_id)
+            failed_product_ids.add(_supplier_refresh_reference_key(reference))
             stats["details"].append(
                 {
                     "action": "supplier_refresh_error",
+                    "gengine_section": reference.kind,
                     "gengine_product_id": reference.product_id,
                     "reason": str(exc),
                 }
@@ -210,12 +246,18 @@ def _refresh_linked_supplier_products(
 
         if not products:
             stats["supplier_refresh_skipped"] += 1
-            failed_product_ids.add(reference.product_id)
+            if reference.kind != "recharge":
+                failed_product_ids.add(_supplier_refresh_reference_key(reference))
             stats["details"].append(
                 {
                     "action": "supplier_refresh_skipped",
+                    "gengine_section": reference.kind,
                     "gengine_product_id": reference.product_id,
-                    "reason": "empty_response",
+                    "reason": (
+                        "recharge_service_has_no_priced_rows_using_existing_cost"
+                        if reference.kind == "recharge"
+                        else "empty_response"
+                    ),
                 }
             )
             continue
@@ -501,7 +543,8 @@ def sync_offer_prices(
                 if (
                     refresh_supplier_prices
                     and refresh_reference is not None
-                    and refresh_reference.product_id in failed_refresh_product_ids
+                    and _supplier_refresh_reference_key(refresh_reference)
+                    in failed_refresh_product_ids
                 ):
                     _skip_detail(stats, grouped_detail, reason="supplier_price_refresh_failed")
                     continue
@@ -736,7 +779,7 @@ def sync_offer_prices(
         if (
             refresh_supplier_prices
             and refresh_reference is not None
-            and refresh_reference.product_id in failed_refresh_product_ids
+            and _supplier_refresh_reference_key(refresh_reference) in failed_refresh_product_ids
         ):
             _skip_detail(stats, detail, reason="supplier_price_refresh_failed")
             continue

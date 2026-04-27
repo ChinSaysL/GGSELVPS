@@ -251,6 +251,45 @@ def test_product_sync_without_marketplace_key_imports_products_without_link_warn
     assert len(offers) == 0
 
 
+def test_product_sync_imports_recharge_metadata_for_exact_link_matching(
+    db_session: Session,
+) -> None:
+    db = db_session
+    supplier_client = FakeSupplierClient(
+        products=[
+            {
+                "id": "recharge:2:10",
+                "title": "Genshin Impact",
+                "category": "Recharge",
+                "denomination": "60 Genesis Crystals",
+                "cost_usd": "0.99",
+                "stock": "unlimited",
+                "is_available": True,
+                "source_type": "recharge",
+                "recharge_product_id": "2",
+                "recharge_denomination_id": "10",
+            }
+        ]
+    )
+
+    result = sync_products(
+        db=db,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_name=None,
+    )
+    db.commit()
+
+    supplier = db.execute(select(SupplierProduct)).scalars().one()
+
+    assert result["products_imported"] == 1
+    assert supplier.supplier_product_id == "recharge:2:10"
+    assert supplier.title == "Genshin Impact"
+    assert supplier.denomination == "60 Genesis Crystals"
+    assert supplier.cost_usd == Decimal("0.99")
+    assert '"recharge_product_id":"2"' in (supplier.raw_payload_json or "")
+
+
 def test_product_sync_skips_products_missing_core_fields(db_session: Session) -> None:
     db = db_session
     supplier_client = FakeSupplierClient(

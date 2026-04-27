@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from decimal import Decimal
 from types import SimpleNamespace
 
 import manage
@@ -215,6 +216,34 @@ def test_default_buyer_input_label_prefers_steam_friend_code() -> None:
         denomination="Steam Key RU+CIS",
     )
     assert manage._default_buyer_input_label(product) == "Steam friend code"
+
+
+def test_apply_manual_recharge_config_updates_cost_quantity_and_payload() -> None:
+    product = SimpleNamespace(
+        id=1,
+        title="Steam Wallet RUB",
+        denomination="Variable RUB",
+        cost_usd=Decimal("0"),
+        supplier_stock="0",
+        is_available=False,
+        raw_payload_json=(
+            '{"source_type":"recharge","recharge_product_id":"1",'
+            '"requires_manual_cost":true}'
+        ),
+    )
+
+    manage._apply_manual_recharge_config_to_product(
+        product,
+        quantity=Decimal("1000"),
+        cost_usd=Decimal("9.50"),
+    )
+
+    assert product.cost_usd == Decimal("9.50")
+    assert product.supplier_stock == "unlimited"
+    assert product.is_available is True
+    assert product.denomination == "Variable RUB | Quantity 1000"
+    assert '"recharge_default_params":{"Quantity":"1000"}' in product.raw_payload_json
+    assert '"requires_manual_cost":false' in product.raw_payload_json
 
 
 def test_title_from_slug_formats_readable_title() -> None:

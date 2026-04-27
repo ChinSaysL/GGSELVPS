@@ -56,6 +56,7 @@ class SupplierOrderClientProtocol(Protocol):
         *,
         buyer_inputs: dict[str, str] | None = None,
         external_order_id: str | None = None,
+        product_payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]: ...
 
     def get_order_status(self, order_id: str) -> dict[str, Any]: ...
@@ -493,7 +494,26 @@ def _extract_delivery_codes(payload: dict[str, Any]) -> list[str]:
 
 def _supplier_payload_is_fulfilled(payload: dict[str, Any]) -> bool:
     status = str(payload.get("status") or payload.get("state") or "").strip().lower()
-    return status in {"completed", "complete", "fulfilled", "delivered", "success", "successful"}
+    return status in {
+        "completed",
+        "complete",
+        "fulfilled",
+        "delivered",
+        "success",
+        "successful",
+        "shipped",
+    }
+
+
+def _supplier_raw_payload(supplier: Any) -> dict[str, Any]:
+    raw_payload_json = getattr(supplier, "raw_payload_json", None)
+    if not raw_payload_json:
+        return {}
+    try:
+        payload = json.loads(str(raw_payload_json))
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _create_supplier_purchase(
@@ -510,6 +530,7 @@ def _create_supplier_purchase(
         sale.quantity,
         buyer_inputs=sale.buyer_inputs,
         external_order_id=external_order_id,
+        product_payload=_supplier_raw_payload(supplier),
     )
     order.supplier_order_id = _extract_supplier_order_id(response, fallback=external_order_id)
     order.cost_usd = supplier.cost_usd * sale.quantity

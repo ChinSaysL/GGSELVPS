@@ -55,6 +55,17 @@ class FakeSupplierRefreshClient:
         _ = (fallback_title, source_slug)
         return self.products_by_id.get(product_id, [])
 
+    def list_recharge_service_products(
+        self,
+        service_id: str,
+        *,
+        fallback_title: str | None = None,
+        source_slug: str | None = None,
+        include_unpriced: bool = False,
+    ) -> list[dict[str, Any]]:
+        _ = (fallback_title, source_slug, include_unpriced)
+        return self.products_by_id.get(f"recharge:{service_id}", [])
+
     def close(self) -> None:
         return None
 
@@ -479,6 +490,91 @@ def test_price_sync_refreshes_linked_gengine_cost_before_preview(
     assert result["prices_previewed"] == 1
     assert supplier.cost_usd == Decimal("6.00")
     assert Decimal(result["details"][0]["cost_usd"]) == Decimal("6.00")
+
+
+def test_price_sync_refreshes_recharge_service_cost_before_preview(
+    db_session: Session,
+) -> None:
+    supplier, _offer, _mapping = _linked_offer(
+        db_session,
+        offer_price=Decimal("1.00"),
+        offer_currency="USD",
+        supplier_cost_usd=Decimal("0.99"),
+        supplier_product_id="recharge:2:10",
+        raw_payload_json=(
+            '{"id":"recharge:2:10","source_type":"recharge",'
+            '"recharge_product_id":"2","recharge_denomination_id":"10"}'
+        ),
+    )
+    supplier_client = FakeSupplierRefreshClient(
+        {
+            "recharge:2": [
+                {
+                    "id": "recharge:2:10",
+                    "title": "Genshin Impact",
+                    "category": "Recharge",
+                    "denomination": "60 Genesis Crystals",
+                    "cost_usd": "1.25",
+                    "stock": "unlimited",
+                    "source_type": "recharge",
+                    "recharge_product_id": "2",
+                    "recharge_denomination_id": "10",
+                }
+            ]
+        }
+    )
+
+    result = sync_offer_prices(
+        db=db_session,
+        settings=_settings_for_tests(default_currency="USD"),
+        marketplace_clients={"digiseller": FakeMarketplacePriceClient()},
+        supplier_client=supplier_client,
+        dry_run=True,
+        refresh_supplier_prices=True,
+    )
+
+    db_session.refresh(supplier)
+
+    assert result["supplier_refresh_products_checked"] == 1
+    assert result["supplier_products_refreshed"] == 1
+    assert result["prices_previewed"] == 1
+    assert supplier.cost_usd == Decimal("1.25")
+
+
+def test_price_sync_keeps_manual_recharge_cost_when_service_has_no_priced_rows(
+    db_session: Session,
+) -> None:
+    supplier, _offer, _mapping = _linked_offer(
+        db_session,
+        offer_price=Decimal("1.00"),
+        offer_currency="USD",
+        supplier_cost_usd=Decimal("9.50"),
+        supplier_product_id="recharge:1",
+        raw_payload_json=(
+            '{"id":"recharge:1","source_type":"recharge",'
+            '"recharge_product_id":"1","requires_manual_cost":false,'
+            '"recharge_default_params":{"Quantity":"1000"}}'
+        ),
+    )
+    supplier_client = FakeSupplierRefreshClient({"recharge:1": []})
+
+    result = sync_offer_prices(
+        db=db_session,
+        settings=_settings_for_tests(default_currency="USD"),
+        marketplace_clients={"digiseller": FakeMarketplacePriceClient()},
+        supplier_client=supplier_client,
+        dry_run=True,
+        refresh_supplier_prices=True,
+    )
+
+    db_session.refresh(supplier)
+
+    assert result["supplier_refresh_skipped"] == 1
+    assert result["prices_previewed"] == 1
+    assert supplier.cost_usd == Decimal("9.50")
+    assert result["details"][0]["reason"] == (
+        "recharge_service_has_no_priced_rows_using_existing_cost"
+    )
 
 
 def test_price_sync_updates_digiseller_variant_group_with_single_api_call(
