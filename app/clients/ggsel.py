@@ -461,11 +461,17 @@ class GGSELClient(BaseAPIClient):
         return None
 
     def _list_product_option_ids(self, product_id: str, *, token: str) -> list[int]:
-        response = self._request_json(
-            method="GET",
-            path=self._build_path(f"/api/products/options/list/{product_id}"),
-            params={"token": token},
-        )
+        try:
+            response = self._request_json(
+                method="GET",
+                path=self._build_path(f"/api/products/options/list/{product_id}"),
+                params={"token": token},
+            )
+        except APIRequestError as exc:
+            if "HTTP 404" in str(exc) or "HTTP 400" in str(exc):
+                raise NotImplementedError("marketplace_disable_not_supported: GGSEL option listing is not supported.") from exc
+            raise
+            
         if not isinstance(response, dict):
             raise APIRequestError("GGSEL options list returned unexpected response format.")
         self._ensure_success_response(response, context="GGSEL options/list failed")
@@ -473,6 +479,7 @@ class GGSELClient(BaseAPIClient):
         content = response.get("content")
         if not isinstance(content, list):
             return []
+        
         option_ids: list[int] = []
         for item in content:
             option_id = self._extract_option_id(item)
@@ -624,10 +631,19 @@ class GGSELClient(BaseAPIClient):
                         list_parts.append(f"{key}: {value}")
                     elif value:
                         list_parts.append(value)
-            return "; ".join(list_parts)
+            if list_parts:
+                return "; ".join(list_parts)
 
-        if raw_errors is None:
-            return ""
+        # Fallback if we completely missed the error structure
+        fallback_errors = {
+            str(k).strip(): str(v).strip() 
+            for k, v in task_status.items() 
+            if str(k).lower() not in ("status", "task_id") and v not in (None, "")
+        }
+        if fallback_errors:
+            return repr(fallback_errors)
+            
+        return ""
         return str(raw_errors).strip()
 
     def _auth_error_hint(self) -> str:

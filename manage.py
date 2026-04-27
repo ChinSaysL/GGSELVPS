@@ -2680,6 +2680,20 @@ def action_manual_link() -> int:
 
     _print_linked_rows_for_offer(marketplace, marketplace_offer_id)
 
+    from app.db import SessionLocal
+    from app.models import MarketplaceOffer
+    from sqlalchemy import select
+
+    with SessionLocal() as db:
+        existing_offer = db.scalar(
+            select(MarketplaceOffer).where(
+                MarketplaceOffer.marketplace == marketplace,
+                MarketplaceOffer.marketplace_offer_id == marketplace_offer_id,
+            )
+        )
+        # Fetch the first mapping to use for defaults if there is one
+        existing_mapping = existing_offer.mappings[0] if existing_offer and existing_offer.mappings else None
+
     targets_by_product_id: dict[int, dict[str, Any]] = {}
     if option_variant_entries:
         auto_matches, unmatched_entries, ambiguous_entries = _auto_match_option_entries_to_products(
@@ -2783,6 +2797,9 @@ def action_manual_link() -> int:
             return 0
 
     currency_default = snapshot.get("currency") if snapshot else None
+    if existing_offer and existing_offer.currency:
+        currency_default = existing_offer.currency
+        
     if currency_default not in VALID_CURRENCIES:
         currency_default = "RUB"
 
@@ -2791,9 +2808,13 @@ def action_manual_link() -> int:
         print(f"Currency must be one of: {', '.join(VALID_CURRENCIES)}.")
         return 1
 
+    mapping_markup_percent_default = None
+    if existing_mapping and existing_mapping.markup_percent is not None:
+        mapping_markup_percent_default = existing_mapping.markup_percent / Decimal("100")
+        
     mapping_markup_percent = _ask_optional_percent_as_ratio(
         "Markup rate percent for mapped rows (blank = automatic tier)",
-        default_percent=None,
+        default_percent=mapping_markup_percent_default,
     )
     if mapping_markup_percent is not None:
         print(f"Using custom markup rate: {(mapping_markup_percent * Decimal('100'))}%")
@@ -2810,12 +2831,18 @@ def action_manual_link() -> int:
             Decimal(str(settings.ggsel_default_payment_system_commission_percent)) * Decimal("100")
         )
 
+    if existing_mapping and existing_mapping.marketplace_commission_percent is not None:
+        default_marketplace_commission_percent = existing_mapping.marketplace_commission_percent / Decimal("100")
+        
     marketplace_commission_percent = _ask_optional_percent_as_ratio(
         "Marketplace commission percentage",
         default_percent=default_marketplace_commission_percent,
     )
     payment_system_commission_percent: Decimal | None = None
     if marketplace == "ggsel":
+        if existing_mapping and existing_mapping.payment_system_commission_percent is not None:
+            default_payment_system_commission_percent = existing_mapping.payment_system_commission_percent / Decimal("100")
+            
         payment_system_commission_percent = _ask_optional_percent_as_ratio(
             "Payment-system commission percentage",
             default_percent=default_payment_system_commission_percent,
@@ -2837,6 +2864,8 @@ def action_manual_link() -> int:
         print(f"Calculated price from markup settings: {suggested_price} {currency}")
 
     price_default = snapshot.get("price") if snapshot else None
+    if existing_offer and existing_offer.price is not None:
+        price_default = existing_offer.price
     if price_default is None:
         price_default = suggested_price
     price = _ask_decimal("Marketplace price", default=price_default)
@@ -2844,11 +2873,19 @@ def action_manual_link() -> int:
     title_default = _default_offer_title(primary_product)
     if snapshot and snapshot.get("title"):
         title_default = str(snapshot["title"])
+    if existing_offer and existing_offer.title:
+        title_default = existing_offer.title
     title = _ask_text("Local offer title", default=title_default)
 
     offer_enabled_default = bool(snapshot.get("is_enabled")) if snapshot else False
+    if existing_offer is not None:
+        offer_enabled_default = existing_offer.is_enabled
     offer_enabled = _ask_bool("Mark local offer enabled?", default=offer_enabled_default)
-    mapping_enabled = _ask_bool("Enable this product mapping?", default=True)
+    
+    mapping_enabled_default = True
+    if existing_mapping is not None:
+        mapping_enabled_default = existing_mapping.is_enabled
+    mapping_enabled = _ask_bool("Enable this product mapping?", default=mapping_enabled_default)
 
     detected_requires_buyer_input = bool(snapshot.get("detected_requires_buyer_input")) if snapshot else False
     detected_buyer_input_label = (

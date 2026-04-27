@@ -499,10 +499,19 @@ class DigisellerClient(BaseAPIClient):
                         list_parts.append(f"{key}: {value}")
                     elif value:
                         list_parts.append(value)
-            return "; ".join(list_parts)
+            if list_parts:
+                return "; ".join(list_parts)
 
-        if raw_errors is None:
-            return ""
+        # Fallback if we completely missed the error structure
+        fallback_errors = {
+            str(k).strip(): str(v).strip() 
+            for k, v in task_status.items() 
+            if str(k).lower() not in ("status", "task_id") and v not in (None, "")
+        }
+        if fallback_errors:
+            return repr(fallback_errors)
+
+        return ""
         return str(raw_errors).strip()
 
     def _fetch_price_update_task_status(self, *, task_id: str, token: str) -> dict[str, Any]:
