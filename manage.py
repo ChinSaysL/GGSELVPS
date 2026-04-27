@@ -731,17 +731,23 @@ def _configure_unfixed_recharge_products_interactively(products: list[Any]) -> b
     return True
 
 
-def _collect_payload_values(value: object, keys: set[str]) -> set[str]:
+def _collect_payload_values(value: object, keys: set[str], depth: int = 0) -> set[str]:
     collected: set[str] = set()
+    
+    current_keys = keys
+    if depth > 0 and "id" in current_keys:
+        # Avoid collecting sub-entity 'id's like category.id which cause false matches
+        current_keys = current_keys - {"id"}
+        
     if isinstance(value, dict):
         for key, item in value.items():
             normalized_key = str(key).lower()
-            if normalized_key in keys and item not in {None, ""}:
+            if normalized_key in current_keys and item not in {None, ""}:
                 collected.add(str(item).strip())
-            collected.update(_collect_payload_values(item, keys))
+            collected.update(_collect_payload_values(item, current_keys, depth + 1))
     elif isinstance(value, list):
         for item in value:
-            collected.update(_collect_payload_values(item, keys))
+            collected.update(_collect_payload_values(item, current_keys, depth + 1))
     return collected
 
 
