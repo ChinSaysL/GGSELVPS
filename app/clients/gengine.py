@@ -97,14 +97,14 @@ class GEngineClient(BaseAPIClient):
         return []
 
     def _extract_paginated_items(self, response: dict[str, Any]) -> list[dict[str, Any]]:
-        for key in ("items", "services", "data"):
+        for key in ("items", "services", "rows", "results", "data"):
             items = self._extract_dict_items(response.get(key))
             if items:
                 return items
 
         data = response.get("data")
         if isinstance(data, dict):
-            for key in ("items", "services"):
+            for key in ("items", "services", "rows", "results"):
                 items = self._extract_dict_items(data.get(key))
                 if items:
                     return items
@@ -179,7 +179,10 @@ class GEngineClient(BaseAPIClient):
         offset = 0
         page_limit = max(1, min(limit, 100))
 
-        while True:
+        seen_page_signatures: set[tuple[str, ...]] = set()
+        max_pages = 200
+
+        while len(seen_page_signatures) < max_pages:
             params: dict[str, Any] = {
                 "limit": page_limit,
                 "offset": offset,
@@ -197,6 +200,10 @@ class GEngineClient(BaseAPIClient):
                 raise TypeError("Unexpected G-Engine recharge services response format.")
 
             items = self._extract_paginated_items(response)
+            page_signature = tuple(str(item.get("id") or "") for item in items)
+            if page_signature in seen_page_signatures:
+                break
+            seen_page_signatures.add(page_signature)
             services.extend(items)
 
             total = response.get("total")
@@ -211,8 +218,6 @@ class GEngineClient(BaseAPIClient):
                 break
             offset += len(items)
             if total_count is not None and offset >= total_count:
-                break
-            if len(items) < page_limit:
                 break
 
         return services
@@ -236,6 +241,12 @@ class GEngineClient(BaseAPIClient):
             search=source_slug or fallback_title,
         )
         if service is None:
+            service = self._fallback_recharge_service_from_link(
+                service_id,
+                fallback_title=fallback_title,
+                source_slug=source_slug,
+            )
+        if service is None:
             return []
         return self._expand_recharge_service(
             service,
@@ -243,6 +254,30 @@ class GEngineClient(BaseAPIClient):
             source_slug=source_slug,
             include_unpriced=include_unpriced,
         )
+
+    @staticmethod
+    def _fallback_recharge_service_from_link(
+        service_id: str,
+        *,
+        fallback_title: str | None,
+        source_slug: str | None,
+    ) -> dict[str, Any] | None:
+        normalized_slug = (source_slug or "").strip().lower()
+        if str(service_id).strip() != "1" or "steam" not in normalized_slug:
+            return None
+        return {
+            "id": "1",
+            "name": fallback_title or "Steam",
+            "description": "Imported from G-Engine recharge link fallback.",
+            "type": "unfixed",
+            "params": [
+                {"param_key": "Account", "param_type": "String"},
+                {"param_key": "Quantity", "param_type": "Float"},
+            ],
+            "denominations": None,
+            "unfixed_details": None,
+            "import_note": "fallback_from_recharge_link",
+        }
 
     def _find_recharge_service(
         self,

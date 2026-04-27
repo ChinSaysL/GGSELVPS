@@ -452,6 +452,57 @@ def test_gengine_list_recharge_service_products_imports_unpriced_placeholder() -
     ]
 
 
+def test_gengine_list_recharge_service_products_uses_steam_link_fallback_when_catalogue_empty() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/recharge/services"):
+            return httpx.Response(status_code=200, json={"total": 0, "items": []})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    products = client.list_recharge_service_products(
+        "1",
+        fallback_title="Steam",
+        source_slug="steam",
+        include_unpriced=True,
+    )
+    client.close()
+
+    assert len(products) == 1
+    assert products[0]["id"] == "recharge:1"
+    assert products[0]["recharge_product_id"] == "1"
+    assert products[0]["recharge_param_keys"] == ["Account", "Quantity"]
+    assert products[0]["requires_manual_cost"] is True
+    assert products[0]["import_note"] == "fallback_from_recharge_link"
+
+
+def test_gengine_list_recharge_services_continues_when_server_caps_page_size() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        offset = int(request.url.params.get("offset", "0"))
+        if request.url.path.endswith("/recharge/services"):
+            if offset == 0:
+                return httpx.Response(
+                    status_code=200,
+                    json={"items": [{"id": 9, "name": "Other"}]},
+                )
+            if offset == 1:
+                return httpx.Response(
+                    status_code=200,
+                    json={"items": [{"id": 1, "name": "Steam Wallet RUB"}]},
+                )
+            return httpx.Response(status_code=200, json={"items": []})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    services = client.list_recharge_services()
+    client.close()
+
+    assert [item["id"] for item in services] == [9, 1]
+
+
 def test_gengine_list_products_falls_back_to_base_product_when_denominations_fail() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path

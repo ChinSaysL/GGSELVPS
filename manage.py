@@ -70,6 +70,12 @@ class GEngineProductReference:
     source: str
 
 
+@dataclass(frozen=True)
+class GEngineImportResult:
+    imported_rows: int
+    error_message: str | None = None
+
+
 @dataclass
 class _ListSupplierClient:
     products: list[dict[str, Any]]
@@ -744,13 +750,26 @@ def _sort_products_for_reference(
     return sorted(products, key=score)
 
 
-def _import_gengine_reference(reference: GEngineProductReference) -> int:
-    if reference.kind not in {"shop", "recharge", "unknown"}:
-        print(
-            f"On-demand import for G-Engine '{reference.kind}' links is not implemented yet. "
-            "Run the normal product sync, or use a local product row already imported."
+def _friendly_gengine_import_error(reference: GEngineProductReference, error: Exception) -> str:
+    message = str(error)
+    if "IP not in whitelist" in message:
+        return (
+            "G-Engine rejected the recharge catalogue request: IP not in whitelist. "
+            "Run this command from the whitelisted VPS, or add this machine's public IP "
+            "to the G-Engine API whitelist."
         )
-        return 0
+    return f"Could not fetch G-Engine product ID {reference.product_id}: {message}"
+
+
+def _import_gengine_reference(reference: GEngineProductReference) -> GEngineImportResult:
+    if reference.kind not in {"shop", "recharge", "unknown"}:
+        return GEngineImportResult(
+            imported_rows=0,
+            error_message=(
+                f"On-demand import for G-Engine '{reference.kind}' links is not implemented yet. "
+                "Run the normal product sync, or use a local product row already imported."
+            ),
+        )
 
     try:
         from app.clients import GEngineClient
@@ -758,9 +777,13 @@ def _import_gengine_reference(reference: GEngineProductReference) -> int:
         from app.db import SessionLocal
         from app.services.product_sync import sync_products
     except ImportError as exc:
-        print(f"Could not import app dependencies: {exc}")
-        print("Run: python -m pip install -r requirements.txt")
-        return 0
+        return GEngineImportResult(
+            imported_rows=0,
+            error_message=(
+                f"Could not import app dependencies: {exc}\n"
+                "Run: python -m pip install -r requirements.txt"
+            ),
+        )
 
     settings = get_settings()
     client = GEngineClient(settings.gengine_base_url, settings.gengine_api_key)
@@ -779,14 +802,22 @@ def _import_gengine_reference(reference: GEngineProductReference) -> int:
                 source_slug=reference.slug,
             )
     except Exception as exc:  # noqa: BLE001 - CLI should show a readable failure.
-        print(f"Could not fetch G-Engine product ID {reference.product_id}: {exc}")
-        return 0
+        return GEngineImportResult(
+            imported_rows=0,
+            error_message=_friendly_gengine_import_error(reference, exc),
+        )
     finally:
         client.close()
 
     if not products:
-        print(f"G-Engine returned no importable rows for product ID {reference.product_id}.")
-        return 0
+        return GEngineImportResult(
+            imported_rows=0,
+            error_message=(
+                f"G-Engine returned no importable rows for {reference.kind} product ID "
+                f"{reference.product_id}. If this is a Steam recharge link, the importer also "
+                "tried the Steam link fallback and still could not create a row."
+            ),
+        )
 
     with SessionLocal() as db:
         result = sync_products(
@@ -797,7 +828,7 @@ def _import_gengine_reference(reference: GEngineProductReference) -> int:
         )
         db.commit()
 
-    return int(result["products_imported"])
+    return GEngineImportResult(imported_rows=int(result["products_imported"]))
 
 
 def _load_recent_products(limit: int = 200) -> list[Any]:
@@ -1941,12 +1972,17 @@ def _choose_reference_products_interactively() -> tuple[GEngineProductReference,
             "Try importing this G-Engine product ID now?",
             default=True,
         ):
-            imported = _import_gengine_reference(reference)
-            print(f"Imported rows: {imported}")
-            products = _load_recent_products(limit=2000)
-            matches = _products_for_reference(reference, products)
-            if matches:
-                return reference, matches
+            import_result = _import_gengine_reference(reference)
+            if import_result.error_message:
+                print(import_result.error_message)
+            print(f"Imported rows: {import_result.imported_rows}")
+            if import_result.imported_rows > 0:
+                products = _load_recent_products(limit=2000)
+                matches = _products_for_reference(reference, products)
+                if matches:
+                    return reference, matches
+            if import_result.error_message:
+                continue
 
         print("If it still does not appear, this G-Engine section may not be")
         print("imported by the current integration yet.")
@@ -2311,9 +2347,12 @@ def _choose_product_interactively() -> Any | None:
             )
             if reference.kind in {"shop", "recharge", "unknown"}:
                 if _ask_bool("Try importing this G-Engine product ID now?", default=True):
-                    imported = _import_gengine_reference(reference)
-                    print(f"Imported rows: {imported}")
-                    products = _load_recent_products(limit=1000)
+                    import_result = _import_gengine_reference(reference)
+                    if import_result.error_message:
+                        print(import_result.error_message)
+                    print(f"Imported rows: {import_result.imported_rows}")
+                    if import_result.imported_rows > 0:
+                        products = _load_recent_products(limit=1000)
                     next_reference = reference
                     continue
 
