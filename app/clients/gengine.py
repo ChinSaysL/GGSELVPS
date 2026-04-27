@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 from app.clients.base import APIClientError, BaseAPIClient
@@ -608,15 +609,52 @@ class GEngineClient(BaseAPIClient):
                 return value
         return None
 
+    @staticmethod
+    def _decimal_payload_value(value: object, *, default: Decimal) -> Decimal:
+        if value in {None, ""}:
+            return default
+        try:
+            return Decimal(str(value))
+        except (InvalidOperation, ValueError):
+            return default
+
+    @staticmethod
+    def _format_decimal_param(value: Decimal) -> str:
+        normalized = value.normalize()
+        return format(normalized, "f")
+
+    @classmethod
+    def _recharge_default_params(
+        cls,
+        *,
+        product_payload: dict[str, Any],
+        marketplace_quantity: int,
+    ) -> dict[str, Any]:
+        default_params_payload = product_payload.get("recharge_default_params")
+        default_params = dict(default_params_payload) if isinstance(default_params_payload, dict) else {}
+
+        quantity_source = str(product_payload.get("recharge_quantity_source") or "").strip().lower()
+        if quantity_source == "marketplace_quantity":
+            multiplier = cls._decimal_payload_value(
+                product_payload.get("recharge_quantity_multiplier"),
+                default=Decimal("1"),
+            )
+            recharge_quantity = Decimal(marketplace_quantity) * multiplier
+            default_params["Quantity"] = cls._format_decimal_param(recharge_quantity)
+        return default_params
+
     @classmethod
     def _build_recharge_params(
         cls,
         *,
         product_payload: dict[str, Any],
         buyer_inputs: dict[str, str],
+        marketplace_quantity: int,
     ) -> list[dict[str, str]]:
-        default_params_payload = product_payload.get("recharge_default_params")
-        default_params = default_params_payload if isinstance(default_params_payload, dict) else {}
+        default_params = cls._recharge_default_params(
+            product_payload=product_payload,
+            marketplace_quantity=marketplace_quantity,
+        )
         params: list[dict[str, str]] = []
         missing: list[str] = []
 
@@ -680,12 +718,14 @@ class GEngineClient(BaseAPIClient):
         external_order_id: str | None,
         product_payload: dict[str, Any] | None,
     ) -> dict[str, Any]:
-        if quantity != 1:
+        payload = product_payload if isinstance(product_payload, dict) else {}
+        quantity_source = str(payload.get("recharge_quantity_source") or "").strip().lower()
+        if quantity != 1 and quantity_source != "marketplace_quantity":
             raise APIClientError(
-                "G-Engine recharge fulfillment currently supports one marketplace unit per order."
+                "G-Engine recharge fulfillment with marketplace quantity > 1 requires "
+                "recharge_quantity_source=marketplace_quantity."
             )
 
-        payload = product_payload if isinstance(product_payload, dict) else {}
         service_id, denomination_id = self._parse_recharge_product_id(product_id)
         denomination_id = str(payload.get("recharge_denomination_id") or denomination_id or "")
 
@@ -693,6 +733,7 @@ class GEngineClient(BaseAPIClient):
             "params": self._build_recharge_params(
                 product_payload=payload,
                 buyer_inputs=self._clean_buyer_inputs(buyer_inputs),
+                marketplace_quantity=quantity,
             )
         }
         if denomination_id:

@@ -316,6 +316,86 @@ def test_ggsel_paid_recharge_order_delivers_after_shipped_without_code(
     assert "has been fulfilled" in marketplace_client.messages[0][1]
 
 
+def test_ggsel_quantity_based_recharge_order_scales_cost_and_supplier_quantity(
+    db_session: Session,
+) -> None:
+    raw_payload_json = (
+        '{"source_type":"recharge","recharge_product_id":"1",'
+        '"recharge_param_keys":["Account","Quantity"],'
+        '"recharge_quantity_source":"marketplace_quantity",'
+        '"recharge_quantity_multiplier":"1"}'
+    )
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="recharge:1",
+        title="Steam Wallet RUB",
+        category="Recharge",
+        denomination="Variable RUB | Marketplace quantity x 1",
+        region=None,
+        cost_usd=Decimal("0.0600"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json=raw_payload_json,
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="ggsel",
+        marketplace_offer_id="102251279",
+        supplier_product_id=supplier.id,
+        title="STEAM RUB",
+        price=Decimal("1.10"),
+        currency="RUB",
+        is_enabled=True,
+        requires_buyer_input=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+    db_session.add(
+        ProductMapping(
+            supplier_product_id=supplier.id,
+            marketplace_offer_id=offer.id,
+            enabled=True,
+        )
+    )
+    db_session.commit()
+
+    sale = {
+        "invoice_id": "9003",
+        "id_goods": "102251279",
+        "date_pay": "2026-04-27 10:00:00",
+        "amount": "110.00",
+        "cnt_goods": "100",
+        "options": [
+            {"name": "Steam friend code", "user_data": "123456789", "user_data_id": None}
+        ],
+    }
+    supplier_client = FakeSupplierOrderClient(
+        create_response={"id": 7004, "status": "shipped", "supplier_order_id": "recharge:7004"}
+    )
+    marketplace_client = FakeMarketplaceOrderClient(sales=[sale], order_payloads={"9003": sale})
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"ggsel": marketplace_client},
+    )
+
+    order = db_session.execute(select(Order)).scalars().one()
+    assert stats["orders_delivered"] == 1
+    assert order.cost_usd == Decimal("6.0000")
+    assert supplier_client.create_calls[0]["quantity"] == 100
+    assert supplier_client.create_calls[0]["product_payload"] == {
+        "source_type": "recharge",
+        "recharge_product_id": "1",
+        "recharge_param_keys": ["Account", "Quantity"],
+        "recharge_quantity_source": "marketplace_quantity",
+        "recharge_quantity_multiplier": "1",
+    }
+
+
 def test_digiseller_order_waits_for_unique_code_then_delivers(db_session: Session) -> None:
     _add_linked_offer(db_session, marketplace="digiseller", offer_id="5850465")
     sale = {

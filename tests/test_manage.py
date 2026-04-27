@@ -243,7 +243,37 @@ def test_apply_manual_recharge_config_updates_cost_quantity_and_payload() -> Non
     assert product.is_available is True
     assert product.denomination == "Variable RUB | Quantity 1000"
     assert '"recharge_default_params":{"Quantity":"1000"}' in product.raw_payload_json
+    assert '"recharge_quantity_source":"fixed"' in product.raw_payload_json
     assert '"requires_manual_cost":false' in product.raw_payload_json
+
+
+def test_apply_manual_recharge_config_supports_marketplace_quantity_mode() -> None:
+    product = SimpleNamespace(
+        id=1,
+        title="Steam Wallet RUB",
+        denomination="Variable RUB | Quantity 90",
+        cost_usd=Decimal("6.00"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json=(
+            '{"source_type":"recharge","recharge_product_id":"1",'
+            '"recharge_default_params":{"Quantity":"90"},'
+            '"requires_manual_cost":false}'
+        ),
+    )
+
+    manage._apply_manual_recharge_config_to_product(
+        product,
+        quantity=Decimal("1"),
+        cost_usd=Decimal("0.06"),
+        quantity_source="marketplace_quantity",
+    )
+
+    assert product.cost_usd == Decimal("0.06")
+    assert product.denomination == "Variable RUB | Marketplace quantity x 1"
+    assert '"recharge_quantity_source":"marketplace_quantity"' in product.raw_payload_json
+    assert '"recharge_quantity_multiplier":"1"' in product.raw_payload_json
+    assert "recharge_default_params" not in product.raw_payload_json
 
 
 def test_title_from_slug_formats_readable_title() -> None:

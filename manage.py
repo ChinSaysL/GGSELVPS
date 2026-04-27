@@ -564,24 +564,66 @@ def _is_unconfigured_unfixed_recharge_product(product: Any) -> bool:
         return True
 
 
+def _is_unfixed_recharge_product(product: Any) -> bool:
+    payload = _raw_payload_dict(product)
+    if payload.get("source_type") != "recharge" and "recharge_product_id" not in payload:
+        return False
+    if payload.get("recharge_denomination_id"):
+        return False
+    param_keys = payload.get("recharge_param_keys")
+    if isinstance(param_keys, list) and any(str(item).lower() == "quantity" for item in param_keys):
+        return True
+    params = payload.get("params")
+    if isinstance(params, list):
+        return any(
+            isinstance(item, dict)
+            and str(item.get("param_key") or "").strip().lower() == "quantity"
+            for item in params
+        )
+    return str(payload.get("service_type") or payload.get("type") or "").strip().lower() == "unfixed"
+
+
+def _recharge_default_quantity(payload: dict[str, Any]) -> str | None:
+    default_params = payload.get("recharge_default_params")
+    if not isinstance(default_params, dict):
+        return None
+    for key, value in default_params.items():
+        if str(key).strip().lower() == "quantity" and value not in {None, ""}:
+            return str(value).strip()
+    return None
+
+
 def _apply_manual_recharge_config_to_product(
     product: Any,
     *,
     quantity: Decimal,
     cost_usd: Decimal,
+    quantity_source: str = "fixed",
 ) -> None:
     payload = _raw_payload_dict(product)
     default_params = payload.get("recharge_default_params")
     if not isinstance(default_params, dict):
         default_params = {}
-    default_params["Quantity"] = str(quantity)
-    payload["recharge_default_params"] = default_params
+    if quantity_source == "marketplace_quantity":
+        default_params.pop("Quantity", None)
+        payload["recharge_quantity_source"] = "marketplace_quantity"
+        payload["recharge_quantity_multiplier"] = str(quantity)
+        denomination_suffix = f"Marketplace quantity x {quantity}"
+    else:
+        default_params["Quantity"] = str(quantity)
+        payload["recharge_quantity_source"] = "fixed"
+        payload.pop("recharge_quantity_multiplier", None)
+        denomination_suffix = f"Quantity {quantity}"
+    if default_params:
+        payload["recharge_default_params"] = default_params
+    else:
+        payload.pop("recharge_default_params", None)
     payload["requires_manual_cost"] = False
     payload["manual_recharge_cost_usd"] = str(cost_usd)
 
     denomination = str(getattr(product, "denomination", "") or "").strip()
-    if "quantity" not in denomination.lower():
-        payload["denomination"] = f"{denomination or 'Variable amount'} | Quantity {quantity}"
+    base_denomination = denomination.split("|", maxsplit=1)[0].strip() or "Variable amount"
+    payload["denomination"] = f"{base_denomination} | {denomination_suffix}"
 
     raw_payload_json = json.dumps(payload, ensure_ascii=True, separators=(",", ":"))
     setattr(product, "cost_usd", cost_usd)
@@ -597,6 +639,7 @@ def _save_manual_recharge_config(
     *,
     quantity: Decimal,
     cost_usd: Decimal,
+    quantity_source: str = "fixed",
 ) -> None:
     try:
         from app.db import SessionLocal
@@ -604,7 +647,12 @@ def _save_manual_recharge_config(
     except ImportError as exc:
         raise RuntimeError(f"Could not import app dependencies: {exc}") from exc
 
-    _apply_manual_recharge_config_to_product(product, quantity=quantity, cost_usd=cost_usd)
+    _apply_manual_recharge_config_to_product(
+        product,
+        quantity=quantity,
+        cost_usd=cost_usd,
+        quantity_source=quantity_source,
+    )
     with SessionLocal() as db:
         supplier = db.get(SupplierProduct, int(product.id))
         if supplier is None:
@@ -620,28 +668,66 @@ def _save_manual_recharge_config(
 
 def _configure_unfixed_recharge_products_interactively(products: list[Any]) -> bool:
     unconfigured_products = [
-        product for product in products if _is_unconfigured_unfixed_recharge_product(product)
+        product for product in products if _is_unfixed_recharge_product(product)
     ]
     if not unconfigured_products:
         return True
 
     print(
         "\nThis G-Engine recharge service is variable/unfixed. "
-        "To price and fulfill it safely, store the fixed top-up Quantity for this marketplace "
-        "listing and your supplier cost for that Quantity."
+        "To price and fulfill it safely, configure how marketplace quantity maps to "
+        "G-Engine Quantity and what the supplier cost is."
     )
     for product in unconfigured_products:
+        payload = _raw_payload_dict(product)
+        if not _is_unconfigured_unfixed_recharge_product(product):
+            current_source = str(payload.get("recharge_quantity_source") or "fixed")
+            if current_source == "marketplace_quantity":
+                continue
+            current_quantity = _recharge_default_quantity(payload)
+            if current_quantity is not None:
+                print(_product_label(product))
+                if not _ask_bool(
+                    "This row is configured as a fixed G-Engine Quantity. "
+                    "Does this marketplace listing use buyer quantity as the top-up amount instead?",
+                    default=False,
+                ):
+                    continue
+
         print(_product_label(product))
-        quantity = _ask_decimal("G-Engine recharge Quantity for this listing")
-        cost_usd = _ask_decimal("Supplier cost in USD for that Quantity")
+        use_marketplace_quantity = _ask_bool(
+            "Use marketplace order quantity as G-Engine recharge Quantity? "
+            "(buyer buys 100 units -> top up 100 RUB)",
+            default=True,
+        )
+        if use_marketplace_quantity:
+            quantity = _ask_decimal("G-Engine Quantity per 1 marketplace unit", default=Decimal("1"))
+            cost_usd = _ask_decimal("Supplier cost in USD per 1 marketplace unit")
+            quantity_source = "marketplace_quantity"
+        else:
+            quantity = _ask_decimal("Fixed G-Engine recharge Quantity for this listing")
+            cost_usd = _ask_decimal("Supplier cost in USD for that fixed Quantity")
+            quantity_source = "fixed"
         try:
-            _save_manual_recharge_config(product, quantity=quantity, cost_usd=cost_usd)
+            _save_manual_recharge_config(
+                product,
+                quantity=quantity,
+                cost_usd=cost_usd,
+                quantity_source=quantity_source,
+            )
         except Exception as exc:  # noqa: BLE001 - CLI should show a readable failure.
             print(f"Could not save recharge cost/quantity for local {product.id}: {exc}")
             return False
-        print(
-            f"Configured local {product.id}: Quantity={quantity}, supplier cost={cost_usd} USD."
-        )
+        if quantity_source == "marketplace_quantity":
+            print(
+                f"Configured local {product.id}: G-Engine Quantity = marketplace quantity "
+                f"x {quantity}; supplier cost={cost_usd} USD per marketplace unit."
+            )
+        else:
+            print(
+                f"Configured local {product.id}: fixed Quantity={quantity}, "
+                f"supplier cost={cost_usd} USD."
+            )
     return True
 
 

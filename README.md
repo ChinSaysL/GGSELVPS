@@ -141,12 +141,14 @@ Supported G-Engine link shapes include:
 
 Recharge links are imported from the G-Engine `/recharge/services` catalogue. Fixed recharge
 denominations are imported as separate local rows. Variable/unfixed recharge services, such as
-Steam Wallet top-ups, can also be linked: during `manual-link`, enter the fixed G-Engine
-`Quantity` your marketplace listing sells and your supplier cost in USD for that Quantity. The app
-stores that cost for safe cost-based pricing and sends the fixed `Quantity` plus the buyer's
-account input to G-Engine at order time. Recharge orders use `/recharge/orders/{service_id}`, pay
-verified orders through `/recharge/orders/{order_id}/pay`, and treat `shipped` as fulfilled without
-a gift-card code.
+Steam Wallet top-ups, can also be linked in two modes during `manual-link`:
+- fixed package mode: every order sends the same G-Engine `Quantity`
+- marketplace-quantity mode: the buyer's marketplace quantity is sent as G-Engine `Quantity`
+
+For unit listings like "1 Steam RUB unit", use marketplace-quantity mode with `G-Engine Quantity
+per 1 marketplace unit = 1` and supplier cost per 1 marketplace unit. Recharge orders use
+`/recharge/orders/{service_id}`, pay verified orders through `/recharge/orders/{order_id}/pay`, and
+treat `shipped` as fulfilled without a gift-card code.
 
 ## Delivery flow
 
