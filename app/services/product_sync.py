@@ -57,6 +57,14 @@ def _first_non_empty_str(payload: dict[str, Any], keys: tuple[str, ...]) -> str 
     return None
 
 
+def _first_decimal(payload: dict[str, Any], keys: tuple[str, ...]) -> Decimal | None:
+    for key in keys:
+        value = _to_decimal(payload.get(key))
+        if value is not None:
+            return value
+    return None
+
+
 def _parse_bool(value: Any, default: bool = True) -> bool:
     if value is None:
         return default
@@ -72,17 +80,23 @@ def _parse_bool(value: Any, default: bool = True) -> bool:
     return default
 
 
+def _is_manual_cost_recharge_placeholder(raw_product: dict[str, Any]) -> bool:
+    return (
+        str(raw_product.get("source_type") or "").strip().lower() == "recharge"
+        and _parse_bool(raw_product.get("requires_manual_cost"), default=False)
+    )
+
+
 def _normalize_supplier_product(raw_product: dict[str, Any]) -> NormalizedSupplierProduct | None:
     supplier_product_id = _first_non_empty_str(raw_product, ("id", "product_id", "productId", "sku"))
     title = _first_non_empty_str(raw_product, ("title", "name", "product_name"))
-    cost_value = (
-        _to_decimal(raw_product.get("cost_usd"))
-        or _to_decimal(raw_product.get("cost"))
-        or _to_decimal(raw_product.get("price_usd"))
-        or _to_decimal(raw_product.get("price"))
-        or _to_decimal(raw_product.get("amount"))
+    cost_value = _first_decimal(
+        raw_product,
+        ("cost_usd", "cost", "price_usd", "price", "amount"),
     )
     if supplier_product_id is None or title is None or cost_value is None:
+        return None
+    if cost_value <= 0 and not _is_manual_cost_recharge_placeholder(raw_product):
         return None
 
     category = _first_non_empty_str(raw_product, ("category", "category_name", "group"))

@@ -290,6 +290,73 @@ def test_product_sync_imports_recharge_metadata_for_exact_link_matching(
     assert '"recharge_product_id":"2"' in (supplier.raw_payload_json or "")
 
 
+def test_product_sync_imports_zero_cost_recharge_placeholder_for_manual_cost(
+    db_session: Session,
+) -> None:
+    db = db_session
+    supplier_client = FakeSupplierClient(
+        products=[
+            {
+                "id": "recharge:1",
+                "title": "Steam",
+                "category": "Recharge",
+                "denomination": "Variable amount",
+                "cost_usd": "0",
+                "stock": "0",
+                "is_available": False,
+                "source_type": "recharge",
+                "recharge_product_id": "1",
+                "requires_manual_cost": True,
+            }
+        ]
+    )
+
+    result = sync_products(
+        db=db,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_name=None,
+    )
+    db.commit()
+
+    supplier = db.execute(select(SupplierProduct)).scalars().one()
+
+    assert result["products_imported"] == 1
+    assert result["skipped"] == 0
+    assert supplier.supplier_product_id == "recharge:1"
+    assert supplier.cost_usd == Decimal("0")
+    assert supplier.supplier_stock == "0"
+    assert supplier.is_available is False
+    assert '"requires_manual_cost":true' in (supplier.raw_payload_json or "")
+
+
+def test_product_sync_skips_zero_cost_non_placeholder_product(db_session: Session) -> None:
+    db = db_session
+    supplier_client = FakeSupplierClient(
+        products=[
+            {
+                "id": "zero-cost",
+                "title": "Unexpected Free Product",
+                "cost_usd": "0",
+            }
+        ]
+    )
+
+    result = sync_products(
+        db=db,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_name=None,
+    )
+    db.commit()
+
+    suppliers = db.execute(select(SupplierProduct)).scalars().all()
+
+    assert result["products_imported"] == 0
+    assert result["skipped"] == 1
+    assert suppliers == []
+
+
 def test_product_sync_skips_products_missing_core_fields(db_session: Session) -> None:
     db = db_session
     supplier_client = FakeSupplierClient(

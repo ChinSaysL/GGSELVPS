@@ -828,7 +828,16 @@ def _import_gengine_reference(reference: GEngineProductReference) -> GEngineImpo
         )
         db.commit()
 
-    return GEngineImportResult(imported_rows=int(result["products_imported"]))
+    imported_rows = int(result["products_imported"])
+    if imported_rows == 0:
+        return GEngineImportResult(
+            imported_rows=0,
+            error_message=(
+                "G-Engine returned rows, but product sync skipped them because required "
+                f"fields were missing or unsafe. Sync stats: skipped={result.get('skipped')}."
+            ),
+        )
+    return GEngineImportResult(imported_rows=imported_rows)
 
 
 def _load_recent_products(limit: int = 200) -> list[Any]:
