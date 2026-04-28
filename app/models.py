@@ -97,6 +97,8 @@ class ProductMapping(Base):
     min_margin_percent: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
     min_profit_usd: Mapped[Decimal | None] = mapped_column(Numeric(10, 2), nullable=True)
     max_price: Mapped[Decimal | None] = mapped_column(Numeric(12, 2), nullable=True)
+    manage_stock_quantity: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    min_purchase_quantity: Mapped[int | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

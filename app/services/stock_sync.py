@@ -324,6 +324,39 @@ def _is_marketplace_quantity_recharge_mapping(mapping: ProductMapping, supplier:
     return quantity_source == "marketplace_quantity"
 
 
+def _effective_supplier_cost(supplier: SupplierProduct, mapping: ProductMapping) -> Decimal:
+    if mapping.marketplace_variant_id is None:
+        return supplier.cost_usd
+    try:
+        payload = json.loads(supplier.raw_payload_json or "{}")
+    except json.JSONDecodeError:
+        return supplier.cost_usd
+    if not isinstance(payload, dict):
+        return supplier.cost_usd
+    quantity_source = str(payload.get("recharge_quantity_source") or "").strip().lower()
+    if quantity_source != "marketplace_quantity":
+        return supplier.cost_usd
+    quantity = _parse_decimal_quantity(mapping.marketplace_variant_name)
+    if quantity is None or quantity <= 0:
+        return supplier.cost_usd
+    return supplier.cost_usd * quantity
+
+
+def _compute_managed_stock_quantity(
+    *,
+    usable_balance_usd: Decimal,
+    cost_per_unit_usd: Decimal,
+    min_purchase_quantity: int | None,
+) -> int:
+    if cost_per_unit_usd <= 0:
+        return 0
+    max_units = int(usable_balance_usd / cost_per_unit_usd)
+    if min_purchase_quantity is not None and min_purchase_quantity > 0:
+        if max_units < min_purchase_quantity:
+            return 0
+    return max(0, max_units)
+
+
 def _extract_runtime_quantity_variants_from_offer(
     offer_payload: dict[str, Any],
 ) -> list[tuple[int, Decimal, str]]:
@@ -497,7 +530,7 @@ def sync_offer_stock(
                 supplier_is_available=supplier.is_available,
                 supplier_stock=supplier.supplier_stock,
                 usable_balance_usd=usable_balance_usd,
-                supplier_cost_usd=supplier.cost_usd,
+                supplier_cost_usd=_effective_supplier_cost(supplier, mapping),
                 has_positive_profit=True,
             )
             decisions.append(
@@ -977,6 +1010,48 @@ def sync_offer_stock(
             detail["required_balance_usd"] = str(required_balance)
             detail["stock_reason"] = reason
             _updated_detail(stats, detail, enabled=target_enabled)
+
+    for group in grouped.values():
+        offer = group[0].marketplace_offer
+        if offer is None:
+            continue
+        marketplace = offer.marketplace.lower()
+        client = marketplace_clients.get(marketplace)
+        if client is None or not hasattr(client, "set_offer_stock"):
+            continue
+
+        managed = [
+            mapping for mapping in group
+            if mapping.manage_stock_quantity and mapping.supplier_product is not None
+        ]
+        if not managed:
+            continue
+
+        mapping = managed[0]
+        supplier = mapping.supplier_product
+        stock_qty = _compute_managed_stock_quantity(
+            usable_balance_usd=usable_balance_usd,
+            cost_per_unit_usd=supplier.cost_usd,
+            min_purchase_quantity=mapping.min_purchase_quantity,
+        )
+        detail: dict[str, Any] = {
+            "offer_id": offer.id,
+            "marketplace": offer.marketplace,
+            "marketplace_offer_id": offer.marketplace_offer_id,
+            "action": "stock_quantity_update",
+            "computed_stock": stock_qty,
+            "cost_per_unit_usd": str(supplier.cost_usd),
+            "usable_balance_usd": str(usable_balance_usd),
+            "min_purchase_quantity": mapping.min_purchase_quantity,
+        }
+        try:
+            cast(Any, client).set_offer_stock(offer.marketplace_offer_id, stock_qty)
+            detail["status"] = "ok"
+        except Exception as exc:  # noqa: BLE001
+            detail["status"] = "error"
+            detail["reason"] = str(exc)
+            stats["errors"] += 1
+        stats["details"].append(detail)
 
     if stats["errors"] > 0:
         stats["status"] = "partial"

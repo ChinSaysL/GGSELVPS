@@ -42,6 +42,8 @@ class MappingImportItem(BaseModel):
     min_margin_percent: Decimal | None = None
     min_profit_usd: Decimal | None = None
     max_price: Decimal | None = None
+    manage_stock_quantity: bool = False
+    min_purchase_quantity: int | None = None
 
 
 class MappingImportRequest(BaseModel):
@@ -67,6 +69,8 @@ class ManualOfferLinkRequest(BaseModel):
     min_margin_percent: Decimal | None = None
     min_profit_usd: Decimal | None = None
     max_price: Decimal | None = None
+    manage_stock_quantity: bool = False
+    min_purchase_quantity: int | None = None
 
 
 def _serialize_datetime(value: datetime | None) -> str | None:
@@ -271,6 +275,8 @@ def import_mappings(
                 min_margin_percent=item.min_margin_percent,
                 min_profit_usd=item.min_profit_usd,
                 max_price=item.max_price,
+                manage_stock_quantity=item.manage_stock_quantity,
+                min_purchase_quantity=item.min_purchase_quantity,
             )
             db.add(mapping)
             created += 1
@@ -282,6 +288,8 @@ def import_mappings(
         existing.min_margin_percent = item.min_margin_percent
         existing.min_profit_usd = item.min_profit_usd
         existing.max_price = item.max_price
+        existing.manage_stock_quantity = item.manage_stock_quantity
+        existing.min_purchase_quantity = item.min_purchase_quantity
         db.add(existing)
         updated += 1
 
@@ -441,6 +449,8 @@ def manual_link_offer(
             min_margin_percent=payload.min_margin_percent,
             min_profit_usd=payload.min_profit_usd,
             max_price=payload.max_price,
+            manage_stock_quantity=payload.manage_stock_quantity,
+            min_purchase_quantity=payload.min_purchase_quantity,
         )
         db.add(mapping)
         mapping_created = True
@@ -453,6 +463,8 @@ def manual_link_offer(
         mapping.min_margin_percent = payload.min_margin_percent
         mapping.min_profit_usd = payload.min_profit_usd
         mapping.max_price = payload.max_price
+        mapping.manage_stock_quantity = payload.manage_stock_quantity
+        mapping.min_purchase_quantity = payload.min_purchase_quantity
         db.add(mapping)
 
     db.commit()
@@ -487,5 +499,7 @@ def manual_link_offer(
             "payment_system_commission_percent": _serialize_decimal(
                 mapping.payment_system_commission_percent
             ),
+            "manage_stock_quantity": mapping.manage_stock_quantity,
+            "min_purchase_quantity": mapping.min_purchase_quantity,
         },
     }

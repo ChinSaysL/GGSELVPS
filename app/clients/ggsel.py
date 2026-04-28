@@ -642,9 +642,8 @@ class GGSELClient(BaseAPIClient):
         }
         if fallback_errors:
             return repr(fallback_errors)
-            
+
         return ""
-        return str(raw_errors).strip()
 
     def _auth_error_hint(self) -> str:
         if self.seller_id:
@@ -818,6 +817,57 @@ class GGSELClient(BaseAPIClient):
                 task_id=task_id,
                 token=self._get_access_token(),
             )
+            task_status.setdefault("task_id", task_id)
+            return task_status
+        return response
+
+    def set_offer_stock(self, offer_id: str, stock: int) -> dict[str, Any]:
+        # GGSEL Seller API v1 does not document a stock-update endpoint.
+        # This targets /api/product/edit/stock by analogy with the documented
+        # /api/product/edit/prices endpoint.  If GGSEL returns 4xx, the stock
+        # sync catches the exception and logs it as a non-fatal error.
+        request_payload: list[dict[str, Any]] = [
+            {"product_id": int(offer_id), "stock": max(0, stock)}
+        ]
+        last_auth_error: APIRequestError | None = None
+        refresh_rounds = (False, True) if self.seller_id else (False,)
+        for force_refresh in refresh_rounds:
+            token = self._get_access_token(force_refresh=force_refresh)
+            try:
+                response = self._request_json(
+                    method="POST",
+                    path=self._build_path("/api/product/edit/stock"),
+                    params={"token": token},
+                    json_body=request_payload,
+                )
+            except APIRequestError as exc:
+                if "HTTP 401" in str(exc) or "HTTP 403" in str(exc):
+                    last_auth_error = exc
+                    continue
+                raise
+            if not isinstance(response, dict):
+                return {"status": "ok", "stock": stock}
+            task_id = self._extract_task_id(response)
+            if task_id:
+                task_status = self._wait_for_price_update_task(task_id=task_id, token=token)
+                task_status.setdefault("task_id", task_id)
+                return task_status
+            return response
+
+        if last_auth_error is not None:
+            raise last_auth_error
+        token = self._get_access_token()
+        response = self._request_json(
+            method="POST",
+            path=self._build_path("/api/product/edit/stock"),
+            params={"token": token},
+            json_body=request_payload,
+        )
+        if not isinstance(response, dict):
+            return {"status": "ok", "stock": stock}
+        task_id = self._extract_task_id(response)
+        if task_id:
+            task_status = self._wait_for_price_update_task(task_id=task_id, token=token)
             task_status.setdefault("task_id", task_id)
             return task_status
         return response

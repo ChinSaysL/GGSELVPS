@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.venv/Scripts/python.exe -m pytest tests/test_stock_rules.py -v)",
+      "Bash(.venv/Scripts/pytest tests/ -v)",
+      "WebFetch(domain:seller.ggsel.com)"
+    ]
+  }
+}

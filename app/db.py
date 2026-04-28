@@ -109,6 +109,12 @@ def _run_sqlite_migrations() -> None:
         "payment_system_commission_percent": (
             "ALTER TABLE product_mappings ADD COLUMN payment_system_commission_percent NUMERIC(8, 4)"
         ),
+        "manage_stock_quantity": (
+            "ALTER TABLE product_mappings ADD COLUMN manage_stock_quantity BOOLEAN NOT NULL DEFAULT 0"
+        ),
+        "min_purchase_quantity": (
+            "ALTER TABLE product_mappings ADD COLUMN min_purchase_quantity INTEGER"
+        ),
     }
 
     with engine.begin() as connection:
