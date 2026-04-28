@@ -843,6 +843,37 @@ def _product_reference_parent_id(product: Any, reference: GEngineProductReferenc
     return None
 
 
+def _product_recharge_service_id_from_supplier_id(product: Any) -> str | None:
+    supplier_id = _product_direct_supplier_id(product)
+    if not supplier_id:
+        return None
+    parts = supplier_id.split(":")
+    if len(parts) >= 2 and parts[0] == "recharge" and parts[1]:
+        return parts[1]
+    return None
+
+
+def _product_reference_id_candidates(product: Any, reference: GEngineProductReference) -> set[str]:
+    if reference.kind == "unknown":
+        return _product_reference_ids(product)
+
+    candidates: set[str] = set()
+    direct_supplier_id = _product_direct_supplier_id(product)
+    if direct_supplier_id:
+        candidates.add(direct_supplier_id)
+
+    parent_id = _product_reference_parent_id(product, reference)
+    if parent_id:
+        candidates.add(parent_id)
+
+    if reference.kind == "recharge":
+        recharge_service_id = _product_recharge_service_id_from_supplier_id(product)
+        if recharge_service_id:
+            candidates.add(recharge_service_id)
+
+    return candidates
+
+
 def _is_specific_reference_product(product: Any, reference: GEngineProductReference) -> bool:
     direct_supplier_id = _product_direct_supplier_id(product)
     if not direct_supplier_id:
@@ -853,7 +884,7 @@ def _is_specific_reference_product(product: Any, reference: GEngineProductRefere
 
 
 def _product_matches_reference(product: Any, reference: GEngineProductReference) -> bool:
-    if reference.product_id in _product_reference_ids(product):
+    if reference.product_id in _product_reference_id_candidates(product, reference):
         return True
     if reference.slug is None:
         return False
@@ -861,7 +892,7 @@ def _product_matches_reference(product: Any, reference: GEngineProductReference)
 
 
 def _product_matches_reference_id(product: Any, reference: GEngineProductReference) -> bool:
-    return reference.product_id in _product_reference_ids(product)
+    return reference.product_id in _product_reference_id_candidates(product, reference)
 
 
 def _product_matches_reference_slug(product: Any, reference: GEngineProductReference) -> bool:
@@ -875,7 +906,7 @@ def _sort_products_for_reference(
     reference: GEngineProductReference,
 ) -> list[Any]:
     def score(product: Any) -> tuple[int, int]:
-        ids = _product_reference_ids(product)
+        ids = _product_reference_id_candidates(product, reference)
         direct_id_score = 0 if reference.product_id in ids else 1
         return (direct_id_score, product.id)
 

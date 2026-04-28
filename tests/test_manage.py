@@ -204,6 +204,75 @@ def test_products_for_reference_recharge_requires_exact_id_metadata() -> None:
     assert matches == []
 
 
+def test_product_matches_reference_id_shop_ignores_recharge_id_collision() -> None:
+    product = SimpleNamespace(
+        id=142,
+        title="Mobile Legends Bang Bang (Russia)",
+        category="Recharge",
+        denomination="250 + 25 Diamonds",
+        supplier_product_id="recharge:5:250",
+        raw_payload_json='{"source_type":"recharge","recharge_product_id":"5"}',
+    )
+    reference = manage.GEngineProductReference(
+        kind="shop",
+        product_id="5",
+        slug="playstation-store-wallet-turkey",
+        source="link",
+    )
+
+    assert not manage._product_matches_reference_id(product, reference)
+
+
+def test_products_for_reference_shop_skips_recharge_rows_with_same_numeric_id() -> None:
+    reference = manage.GEngineProductReference(
+        kind="shop",
+        product_id="5",
+        slug="playstation-store-wallet-turkey",
+        source="https://b2b.g-engine.net/en/shop/5/playstation-store-wallet-turkey",
+    )
+    products = [
+        SimpleNamespace(
+            id=142,
+            title="Mobile Legends Bang Bang (Russia)",
+            category="Recharge",
+            denomination="250 + 25 Diamonds",
+            supplier_product_id="recharge:5:250",
+            raw_payload_json='{"source_type":"recharge","recharge_product_id":"5"}',
+        ),
+        SimpleNamespace(
+            id=300,
+            title="Playstation Store Wallet Turkey",
+            category="Gift Card, PlayStation",
+            denomination="250 TRY",
+            supplier_product_id="145829",
+            raw_payload_json='{"id":"145829","base_product_id":"5"}',
+        ),
+    ]
+
+    matches = manage._products_for_reference(reference, products)
+
+    assert [product.id for product in matches] == [300]
+
+
+def test_product_reference_matches_recharge_service_id_in_supplier_id() -> None:
+    product = SimpleNamespace(
+        id=1,
+        title="Steam top up",
+        category="Recharge",
+        denomination="Variable amount",
+        supplier_product_id="recharge:1:500",
+        raw_payload_json="{}",
+    )
+    reference = manage.GEngineProductReference(
+        kind="recharge",
+        product_id="1",
+        slug="steam",
+        source="link",
+    )
+
+    assert manage._product_matches_reference_id(product, reference)
+
+
 def test_default_offer_title_includes_distinct_denomination() -> None:
     product = SimpleNamespace(title="Turkey Gift Card", denomination="500 TL")
     assert manage._default_offer_title(product) == "Turkey Gift Card - 500 TL"
