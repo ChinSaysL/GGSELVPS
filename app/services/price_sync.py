@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation, ROUND_UP
+from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol
 
 from sqlalchemy import select
@@ -17,7 +17,6 @@ from app.pricing import (
     PricingConfigError,
     calculate_compounded_price,
     calculate_final_price_usd,
-    convert_usd_to_currency,
     get_markup_percent,
 )
 from app.services.fx import resolve_usd_rub_rate
@@ -176,14 +175,6 @@ def _supplier_refresh_reference(
     )
 
 
-def _is_marketplace_quantity_recharge_product(supplier_product: SupplierProduct) -> bool:
-    payload = _load_json_object(supplier_product.raw_payload_json)
-    if payload.get("source_type") != "recharge" and "recharge_product_id" not in payload:
-        return False
-    quantity_source = str(payload.get("recharge_quantity_source") or "").strip().lower()
-    return quantity_source == "marketplace_quantity"
-
-
 def _load_enabled_mappings(db: Session) -> list[ProductMapping]:
     stmt = (
         select(ProductMapping)
@@ -327,53 +318,34 @@ def _calculate_price_plan(
         )
         if marketplace_commission_percent < 0 or payment_system_commission_percent < 0:
             raise PricingConfigError("GGSEL commission percents must be >= 0.")
-        total_commission_percent = (
-            marketplace_commission_percent + payment_system_commission_percent
-        )
-        if total_commission_percent >= Decimal("1"):
-            raise PricingConfigError("GGSEL total commission percent must be < 1.")
+        if marketplace_commission_percent >= Decimal("1") or payment_system_commission_percent >= Decimal("1"):
+            raise PricingConfigError("GGSEL commission percents must be < 1.")
 
-    uses_marketplace_quantity_recharge = _is_marketplace_quantity_recharge_product(supplier_product)
-    if uses_marketplace_quantity_recharge:
-        if currency == "USD":
-            base_amount = Decimal(str(supplier_product.cost_usd))
-        elif currency == "RUB":
-            if usd_rub_rate is None:
-                raise PricingConfigError("USD/RUB rate is required for RUB price calculation.")
-            base_amount = Decimal(str(supplier_product.cost_usd)) * usd_rub_rate
-        else:
-            raise PricingConfigError(f"Unsupported target currency: {currency}")
-        effective_markup = (
-            mapping.min_margin_percent
-            if mapping.min_margin_percent is not None
-            else get_markup_percent(supplier_product.cost_usd)
-        )
-        fee_percent = Decimal(str(settings.platform_fee_percent))
-        if offer.marketplace.lower() == "ggsel" and payment_system_commission_percent > 0:
-            fee_percent = payment_system_commission_percent
-
-        target_net_price = calculate_compounded_price(
-            base_amount,
-            markup_percent=effective_markup,
-            fee_percent=fee_percent,
-            fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
-        )
-        recommended_price = target_net_price
+    if currency == "USD":
+        base_amount = Decimal(str(supplier_product.cost_usd))
+    elif currency == "RUB":
+        if usd_rub_rate is None:
+            raise PricingConfigError("USD/RUB rate is required for RUB price calculation.")
+        base_amount = Decimal(str(supplier_product.cost_usd)) * usd_rub_rate
     else:
-        target_net_price = convert_usd_to_currency(
-            calculation.final_price_usd,
-            currency,
-            manual_usd_rub_rate=usd_rub_rate,
-        )
-        recommended_price = target_net_price
-        if offer.marketplace.lower() == "ggsel":
-            total_commission_percent = (
-                marketplace_commission_percent + payment_system_commission_percent
-            )
-            recommended_price = (target_net_price / (Decimal("1") - total_commission_percent)).quantize(
-                Decimal("0.01"),
-                rounding=ROUND_UP,
-            )
+        raise PricingConfigError(f"Unsupported target currency: {currency}")
+
+    effective_markup = (
+        mapping.min_margin_percent
+        if mapping.min_margin_percent is not None
+        else get_markup_percent(supplier_product.cost_usd)
+    )
+    fee_percent = Decimal(str(settings.platform_fee_percent))
+    if offer.marketplace.lower() == "ggsel":
+        fee_percent = payment_system_commission_percent
+
+    target_net_price = calculate_compounded_price(
+        base_amount,
+        markup_percent=effective_markup,
+        fee_percent=fee_percent,
+        fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
+    )
+    recommended_price = target_net_price
 
     max_price = _to_decimal(mapping.max_price)
     if max_price is not None and recommended_price > max_price:

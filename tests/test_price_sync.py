@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from dataclasses import dataclass, field
-from decimal import ROUND_UP, Decimal
+from decimal import Decimal
 from typing import Any, Literal
 
 import pytest
@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import Settings
 from app.db import Base
 from app.models import MarketplaceOffer, ProductMapping, SupplierProduct
-from app.pricing import calculate_compounded_price, calculate_final_price_usd, convert_usd_to_currency
+from app.pricing import calculate_compounded_price, get_markup_percent
 from app.services.price_sync import sync_offer_prices
 
 
@@ -171,7 +171,7 @@ def _linked_offer(
 def test_price_preview_calculates_recommended_price_without_marketplace_update(
     db_session: Session,
 ) -> None:
-    _supplier, offer, _mapping = _linked_offer(db_session)
+    supplier, offer, _mapping = _linked_offer(db_session)
     client = FakeMarketplacePriceClient()
 
     result = sync_offer_prices(
@@ -187,7 +187,13 @@ def test_price_preview_calculates_recommended_price_without_marketplace_update(
     assert client.calls == []
     assert offer.price == Decimal("1.00")
     assert result["details"][0]["action"] == "preview"
-    assert Decimal(result["details"][0]["recommended_price"]) > Decimal("11.00")
+    expected_price = calculate_compounded_price(
+        supplier.cost_usd,
+        markup_percent=get_markup_percent(supplier.cost_usd),
+        fee_percent=Decimal("0.06"),
+        fx_buffer_percent=Decimal("0.03"),
+    )
+    assert Decimal(result["details"][0]["recommended_price"]) == expected_price
 
 
 def test_price_sync_updates_digiseller_rub_price_for_linked_offer(
@@ -209,13 +215,12 @@ def test_price_sync_updates_digiseller_rub_price_for_linked_offer(
         refresh_supplier_prices=False,
     )
 
-    expected_usd = calculate_final_price_usd(
-        supplier.cost_usd,
-        platform_fee_percent=Decimal(str(settings.platform_fee_percent)),
+    expected_rub = calculate_compounded_price(
+        supplier.cost_usd * Decimal("100"),
+        markup_percent=get_markup_percent(supplier.cost_usd),
+        fee_percent=Decimal(str(settings.platform_fee_percent)),
         fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
-        risk_buffer_percent=Decimal(str(settings.risk_buffer_percent)),
-    ).final_price_usd
-    expected_rub = convert_usd_to_currency(expected_usd, "RUB", Decimal("100.0"))
+    )
 
     assert result["prices_updated"] == 1
     assert offer.price == expected_rub
@@ -223,7 +228,7 @@ def test_price_sync_updates_digiseller_rub_price_for_linked_offer(
     assert result["details"][0]["action"] == "updated"
 
 
-def test_price_sync_uses_ggsel_commission_absorption_formula(
+def test_price_sync_uses_ggsel_payment_system_fee_in_compounded_formula(
     db_session: Session,
 ) -> None:
     supplier, offer, _mapping = _linked_offer(
@@ -244,25 +249,17 @@ def test_price_sync_uses_ggsel_commission_absorption_formula(
         refresh_supplier_prices=False,
     )
 
-    expected_target_net = calculate_final_price_usd(
+    expected_listed = calculate_compounded_price(
         supplier.cost_usd,
-        pricing_mode=settings.pricing_mode,
-        platform_fee_percent=Decimal(str(settings.platform_fee_percent)),
+        markup_percent=get_markup_percent(supplier.cost_usd),
+        fee_percent=Decimal(str(settings.ggsel_default_payment_system_commission_percent)),
         fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
-        risk_buffer_percent=Decimal(str(settings.risk_buffer_percent)),
-    ).final_price_usd
-    total_commission = Decimal(str(settings.ggsel_default_marketplace_commission_percent)) + Decimal(
-        str(settings.ggsel_default_payment_system_commission_percent)
-    )
-    expected_listed = (expected_target_net / (Decimal("1") - total_commission)).quantize(
-        Decimal("0.01"),
-        rounding=ROUND_UP,
     )
 
     assert result["prices_updated"] == 1
     assert offer.price == expected_listed
     assert client.calls == [("5850465", float(expected_listed), "USD", None)]
-    assert Decimal(result["details"][0]["target_net_price"]) == expected_target_net
+    assert Decimal(result["details"][0]["target_net_price"]) == expected_listed
 
 
 def test_price_sync_uses_mapping_commission_override_for_ggsel(
@@ -288,16 +285,11 @@ def test_price_sync_uses_mapping_commission_override_for_ggsel(
         refresh_supplier_prices=False,
     )
 
-    expected_target_net = calculate_final_price_usd(
+    expected_listed = calculate_compounded_price(
         supplier.cost_usd,
-        pricing_mode=settings.pricing_mode,
-        platform_fee_percent=Decimal(str(settings.platform_fee_percent)),
+        markup_percent=get_markup_percent(supplier.cost_usd),
+        fee_percent=Decimal("0.01"),
         fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
-        risk_buffer_percent=Decimal(str(settings.risk_buffer_percent)),
-    ).final_price_usd
-    expected_listed = (expected_target_net / Decimal("0.97")).quantize(
-        Decimal("0.01"),
-        rounding=ROUND_UP,
     )
 
     assert result["prices_updated"] == 1
@@ -411,13 +403,12 @@ def test_price_sync_uses_auto_resolved_fx_rate_when_manual_rate_missing(
         refresh_supplier_prices=False,
     )
 
-    expected_usd = calculate_final_price_usd(
-        supplier.cost_usd,
-        platform_fee_percent=Decimal(str(settings.platform_fee_percent)),
+    expected_rub = calculate_compounded_price(
+        supplier.cost_usd * Decimal("95"),
+        markup_percent=get_markup_percent(supplier.cost_usd),
+        fee_percent=Decimal(str(settings.platform_fee_percent)),
         fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
-        risk_buffer_percent=Decimal(str(settings.risk_buffer_percent)),
-    ).final_price_usd
-    expected_rub = convert_usd_to_currency(expected_usd, "RUB", Decimal("95"))
+    )
 
     assert result["prices_updated"] == 1
     assert offer.price == expected_rub

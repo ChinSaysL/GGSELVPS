@@ -863,3 +863,35 @@ def test_suggest_price_for_marketplace_quantity_recharge_uses_compounded_usd_for
     )
 
     assert suggested_price == Decimal("1.25")
+
+
+def test_suggest_price_for_standard_product_uses_compounded_formula(
+    monkeypatch,
+) -> None:
+    from app.config import Settings
+
+    monkeypatch.setattr(
+        "app.config.get_settings",
+        lambda: Settings(
+            _env_file=None,
+            default_currency="USD",
+            scheduler_enabled=False,
+            platform_fee_percent=0.06,
+            fx_buffer_percent=0.03,
+        ),
+    )
+
+    product = SimpleNamespace(
+        cost_usd=Decimal("1.00"),
+        raw_payload_json="{}",
+    )
+    suggested_price = manage._suggest_price(
+        product,
+        "USD",
+        marketplace="digiseller",
+        markup_percent=Decimal("0.15"),
+        marketplace_commission_percent=None,
+        payment_system_commission_percent=None,
+    )
+
+    assert suggested_price == Decimal("1.25")

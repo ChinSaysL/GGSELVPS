@@ -121,8 +121,8 @@ For marketplace pages with option values like `250 TRY` and `500 TRY`, keep thos
 After `python manage.py manual-link`, run the offered live stock sync prompt if the listing is already public. Price sync only updates prices; stock sync is what hides/disables denominations when G-Engine balance is too low.
 
 `python manage.py price-preview` refreshes linked G-Engine costs when possible and shows the recommended cost-based price. `python manage.py sync-prices` applies those prices to linked marketplaces.
-- Digiseller: standard mapped-price sync with optional variant price modifiers.
-- GGSEL: listed price is increased by commission absorption so net received after commissions still matches the target markup/profit. Multi-denomination GGSEL offers with linked variant IDs are updated in one bulk price call using variant modifiers.
+- Digiseller: compound pricing based on supplier cost and configured percentages, with optional variant price modifiers.
+- GGSEL: uses the same compound pricing model; payment-system commission is used as the fee component in the formula. Multi-denomination GGSEL offers with linked variant IDs are updated in one bulk price call using variant modifiers.
 
 For GGSEL live writes, set `GGSEL_API_KEY` to the seller API key/token accepted by GGSEL write endpoints. If you have the long-lived seller API key plus seller ID, also set `GGSEL_SELLER_ID` so the app can call `/api_sellers/api/apilogin` and refresh the short-lived token automatically. A browser/session JWT may work for public item lookup but can still return `401` for price updates.
 
@@ -293,14 +293,14 @@ docker compose logs -f
 
 - No competitor pricing data is used.
 - No competitor scraping is implemented.
-- Price sync default (`PRICING_MODE=safe`) uses supplier cost, fee/buffer settings, markup tiers, and minimum profit only.
-- Set `PRICING_MODE=cost_plus_markup` to use direct `cost * (1 + markup)` pricing.
+- Price sync uses a compound markup model from supplier cost:
+  - `base = supplier_cost` (USD) or `supplier_cost * usd_rub_rate` (RUB)
+  - `price = base * (1 + markup) * (1 + fee) * (1 + fx_buffer)`
+  - final listing price is rounded to 2 decimals
 - GGSEL commission defaults are configurable:
   - `GGSEL_DEFAULT_MARKETPLACE_COMMISSION_PERCENT` (gift-card default `0.09`)
   - `GGSEL_DEFAULT_PAYMENT_SYSTEM_COMMISSION_PERCENT` (example default `0.029`)
-- GGSEL price formula uses reverse-calculation:
-  - `desired_net = target price from pricing mode`
-  - `listed_price = desired_net / (1 - marketplace_commission - payment_system_commission)`
+- In this compound model, GGSEL uses `payment_system_commission` as the fee term.
 - No browser automation is used.
 - No automatic marketplace listing creation is implemented.
 - Automatic listing creation is disabled in client code.

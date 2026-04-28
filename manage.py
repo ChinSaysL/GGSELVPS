@@ -9,7 +9,7 @@ import sys
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from decimal import ROUND_UP, Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlparse
@@ -550,14 +550,6 @@ def _raw_payload_dict(product: Any) -> dict[str, Any]:
     except json.JSONDecodeError:
         return {}
     return payload if isinstance(payload, dict) else {}
-
-
-def _is_marketplace_quantity_recharge_product(product: Any) -> bool:
-    payload = _raw_payload_dict(product)
-    if payload.get("source_type") != "recharge" and "recharge_product_id" not in payload:
-        return False
-    quantity_source = str(payload.get("recharge_quantity_source") or "").strip().lower()
-    return quantity_source == "marketplace_quantity"
 
 
 def _is_unconfigured_unfixed_recharge_product(product: Any) -> bool:
@@ -1117,8 +1109,6 @@ def _suggest_price(
     try:
         from app.pricing import (
             calculate_compounded_price,
-            calculate_final_price_usd,
-            convert_usd_to_currency,
             get_markup_percent,
         )
         from app.services.fx import resolve_usd_rub_rate
@@ -1127,74 +1117,33 @@ def _suggest_price(
         return None
 
     settings = get_settings()
-    if _is_marketplace_quantity_recharge_product(product):
-        try:
-            if currency == "USD":
-                base_amount = Decimal(str(product.cost_usd))
-            elif currency == "RUB":
-                usd_rub_rate = resolve_usd_rub_rate(settings)
-                base_amount = Decimal(str(product.cost_usd)) * usd_rub_rate
-            else:
-                return None
-            effective_markup = (
-                markup_percent if markup_percent is not None else get_markup_percent(product.cost_usd)
-            )
-            fee_percent = Decimal(str(settings.platform_fee_percent))
-            if marketplace == "ggsel" and payment_system_commission_percent is not None:
-                fee_percent = payment_system_commission_percent
-            return calculate_compounded_price(
-                base_amount,
-                markup_percent=effective_markup,
-                fee_percent=fee_percent,
-                fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
-            )
-        except Exception:
+    try:
+        if currency == "USD":
+            base_amount = Decimal(str(product.cost_usd))
+        elif currency == "RUB":
+            usd_rub_rate = resolve_usd_rub_rate(settings)
+            base_amount = Decimal(str(product.cost_usd)) * usd_rub_rate
+        else:
             return None
 
-    try:
-        calculation = calculate_final_price_usd(
-            product.cost_usd,
-            pricing_mode=settings.pricing_mode,
-            platform_fee_percent=Decimal(str(settings.platform_fee_percent)),
+        effective_markup = (
+            markup_percent if markup_percent is not None else get_markup_percent(product.cost_usd)
+        )
+        fee_percent = Decimal(str(settings.platform_fee_percent))
+        if marketplace == "ggsel":
+            fee_percent = (
+                payment_system_commission_percent
+                if payment_system_commission_percent is not None
+                else Decimal(str(settings.ggsel_default_payment_system_commission_percent))
+            )
+        return calculate_compounded_price(
+            base_amount,
+            markup_percent=effective_markup,
+            fee_percent=fee_percent,
             fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
-            risk_buffer_percent=Decimal(str(settings.risk_buffer_percent)),
-            markup_percent=markup_percent,
         )
     except Exception:
         return None
-    desired_net = calculation.final_price_usd
-    if marketplace == "ggsel":
-        ggsel_marketplace_commission = (
-            marketplace_commission_percent
-            if marketplace_commission_percent is not None
-            else Decimal(str(settings.ggsel_default_marketplace_commission_percent))
-        )
-        ggsel_payment_system_commission = (
-            payment_system_commission_percent
-            if payment_system_commission_percent is not None
-            else Decimal(str(settings.ggsel_default_payment_system_commission_percent))
-        )
-        total_commission = ggsel_marketplace_commission + ggsel_payment_system_commission
-        if total_commission >= Decimal("1"):
-            return None
-        desired_net = (desired_net / (Decimal("1") - total_commission)).quantize(
-            Decimal("0.01"),
-            rounding=ROUND_UP,
-        )
-
-    if currency == "USD":
-        return desired_net
-    if currency == "RUB":
-        try:
-            usd_rub_rate = resolve_usd_rub_rate(settings)
-        except Exception:
-            return None
-        return convert_usd_to_currency(
-            desired_net,
-            "RUB",
-            manual_usd_rub_rate=usd_rub_rate,
-        )
-    return None
 
 
 def _payload_first_str(payload: dict[str, Any], keys: tuple[str, ...]) -> str | None:
