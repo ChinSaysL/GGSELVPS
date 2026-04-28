@@ -1780,6 +1780,16 @@ def _normalize_amount_text(value: str) -> str:
     return text
 
 
+def _extract_standalone_amount(value: object) -> str | None:
+    if value in {None, ""}:
+        return None
+    text = _normalize_text_for_matching(value)
+    if not re.fullmatch(r"\d(?:[\d\s.,]*\d)?", text):
+        return None
+    amount = _normalize_amount_text(text)
+    return amount or None
+
+
 def _extract_denomination_signature(*texts: str | None) -> str | None:
     pattern = re.compile(r"(\d(?:[\d\s.,]*\d)?)\s*([^\W\d_]{2,8}|[$€₺₽₱])")
     for text in texts:
@@ -1794,12 +1804,87 @@ def _extract_denomination_signature(*texts: str | None) -> str | None:
     return None
 
 
+def _payload_currency_hint(payload: dict[str, Any]) -> str | None:
+    for key in ("currency", "currency_code", "curr", "valute"):
+        currency = _normalize_currency_code(_payload_first_str(payload, (key,)))
+        if currency in _CURRENCY_REGION_TOKENS:
+            return currency
+    return None
+
+
+def _currency_or_region_hints_from_text(value: object) -> set[str]:
+    hints = _currency_hints_from_text(value)
+    tokens = set(_normalize_search_text(value).split())
+    for currency, region_tokens in _CURRENCY_REGION_TOKENS.items():
+        if tokens & region_tokens:
+            hints.add(currency)
+    return hints
+
+
+def _product_currency_hint(product: Any) -> str | None:
+    payload = _raw_payload_dict(product)
+    direct_hint = _payload_currency_hint(payload)
+    if direct_hint is not None:
+        return direct_hint
+
+    text_parts = [
+        getattr(product, "region", None),
+        getattr(product, "title", None),
+        getattr(product, "category", None),
+        payload.get("region"),
+        payload.get("country"),
+        payload.get("country_code"),
+        payload.get("title"),
+        payload.get("name"),
+        payload.get("category"),
+        payload.get("source_slug"),
+    ]
+    hints: set[str] = set()
+    for text in text_parts:
+        hints.update(_currency_or_region_hints_from_text(text))
+    if len(hints) == 1:
+        return next(iter(hints))
+    return None
+
+
+def _product_standalone_denomination_amount(product: Any) -> str | None:
+    payload = _raw_payload_dict(product)
+    candidates = [
+        getattr(product, "denomination", None),
+        payload.get("denomination"),
+        payload.get("nominal"),
+        payload.get("value"),
+        payload.get("face_value"),
+    ]
+    for candidate in candidates:
+        amount = _extract_standalone_amount(candidate)
+        if amount is not None:
+            return amount
+    return None
+
+
 def _product_denomination_signature(product: Any) -> str | None:
-    return _extract_denomination_signature(
+    payload = _raw_payload_dict(product)
+    signature = _extract_denomination_signature(
         str(getattr(product, "denomination", "") or ""),
         str(getattr(product, "title", "") or ""),
         str(getattr(product, "category", "") or ""),
+        str(getattr(product, "region", "") or ""),
+        str(payload.get("denomination") or ""),
+        str(payload.get("nominal") or ""),
+        str(payload.get("value") or ""),
+        str(payload.get("face_value") or ""),
+        str(payload.get("title") or ""),
+        str(payload.get("name") or ""),
     )
+    if signature is not None:
+        return signature
+
+    amount = _product_standalone_denomination_amount(product)
+    currency = _product_currency_hint(product)
+    if amount is not None and currency is not None:
+        return f"{amount} {currency}"
+    return None
 
 
 def _snapshot_denomination_signature(snapshot: dict[str, Any]) -> str | None:

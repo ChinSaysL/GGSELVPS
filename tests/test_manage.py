@@ -838,6 +838,50 @@ def test_auto_match_option_entries_to_products_matches_hidden_spaces_and_confusa
     assert ambiguous == []
 
 
+def test_product_denomination_signature_combines_plain_amount_with_payload_currency() -> None:
+    product = SimpleNamespace(
+        id=142,
+        title="Playstation Store Wallet Turkey",
+        category="Gift Card, PlayStation",
+        denomination="250",
+        region=None,
+        raw_payload_json='{"denomination":250,"currency":"TRY","base_product_id":"5"}',
+    )
+
+    assert manage._product_denomination_signature(product) == "250 TRY"
+
+
+def test_auto_match_option_entries_to_products_combines_plain_amount_with_region_hint() -> None:
+    products = [
+        SimpleNamespace(
+            id=142,
+            title="Playstation Store Wallet Turkey",
+            category="Gift Card, PlayStation",
+            denomination="250",
+            region=None,
+            raw_payload_json='{"denomination":250,"base_product_id":"5"}',
+        ),
+        SimpleNamespace(
+            id=143,
+            title="Playstation Store Wallet Turkey",
+            category="Gift Card, PlayStation",
+            denomination="750",
+            region=None,
+            raw_payload_json='{"denomination":750,"base_product_id":"5"}',
+        ),
+    ]
+    entries = [
+        {"option_label": "Gift Card Amount", "variant_value": "250 TRY"},
+        {"option_label": "Gift Card Amount", "variant_value": "750 TRY"},
+    ]
+
+    matches, unmatched, ambiguous = manage._auto_match_option_entries_to_products(products, entries)
+
+    assert [item["product"].id for item in matches] == [142, 143]
+    assert unmatched == []
+    assert ambiguous == []
+
+
 def test_suggest_price_for_marketplace_quantity_recharge_uses_compounded_rub_formula(
     monkeypatch,
 ) -> None:
