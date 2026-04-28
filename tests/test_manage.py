@@ -722,6 +722,52 @@ def test_single_offer_manual_candidates_hide_gift_card_rows_for_recharge() -> No
     assert [product.id for product in candidates] == [2, 3]
 
 
+def test_should_use_recharge_runtime_option_mapping_for_single_direct_row() -> None:
+    reference = manage.GEngineProductReference(
+        kind="recharge",
+        product_id="1",
+        slug="steam",
+        source="https://b2b.g-engine.net/en/recharge/1/steam",
+    )
+    products = [
+        SimpleNamespace(
+            id=2,
+            title="Steam RUB top up",
+            category="Recharge",
+            denomination=None,
+        )
+    ]
+    entries = [{"option_label": "Количество", "variant_value": "100 RUB", "variant_id": 19472011}]
+
+    assert manage._should_use_recharge_runtime_option_mapping(reference, products, entries)
+
+
+def test_should_not_use_recharge_runtime_option_mapping_for_multiple_rows() -> None:
+    reference = manage.GEngineProductReference(
+        kind="recharge",
+        product_id="1",
+        slug="steam",
+        source="https://b2b.g-engine.net/en/recharge/1/steam",
+    )
+    products = [
+        SimpleNamespace(
+            id=2,
+            title="Steam RUB top up",
+            category="Recharge",
+            denomination=None,
+        ),
+        SimpleNamespace(
+            id=3,
+            title="Steam USD top up",
+            category="Recharge",
+            denomination=None,
+        ),
+    ]
+    entries = [{"option_label": "Количество", "variant_value": "100 RUB", "variant_id": 19472011}]
+
+    assert not manage._should_use_recharge_runtime_option_mapping(reference, products, entries)
+
+
 def test_auto_select_single_offer_recharge_does_not_auto_select_key_like_row() -> None:
     reference = manage.GEngineProductReference(
         kind="recharge",

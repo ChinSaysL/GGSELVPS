@@ -2346,6 +2346,20 @@ def _single_offer_manual_candidates(
     return products
 
 
+def _should_use_recharge_runtime_option_mapping(
+    reference: GEngineProductReference,
+    products: list[Any],
+    option_variant_entries: list[dict[str, Any]],
+) -> bool:
+    if reference.kind != "recharge":
+        return False
+    if len(products) != 1:
+        return False
+    if not option_variant_entries:
+        return False
+    return _is_direct_service_product(products[0])
+
+
 def _reference_query_hint(reference: GEngineProductReference, products: list[Any]) -> str:
     if reference.slug:
         return _normalize_search_text(reference.slug)
@@ -3037,55 +3051,75 @@ def action_manual_link() -> int:
 
     targets_by_product_id: dict[int, dict[str, Any]] = {}
     if option_variant_entries:
-        auto_matches, unmatched_entries, ambiguous_entries = _auto_match_option_entries_to_products(
+        if _should_use_recharge_runtime_option_mapping(
+            reference,
             reference_products,
             option_variant_entries,
-        )
-        for item in auto_matches:
-            entry = item["entry"]
-            raw_variant_id = entry.get("variant_id")
-            variant_id = int(raw_variant_id) if isinstance(raw_variant_id, int) else None
+        ):
+            selected_product = reference_products[0]
             _add_link_target(
                 targets_by_product_id,
-                product=item["product"],
-                option_description=str(item["option_description"]),
-                variant_id=variant_id,
-                variant_value=str(entry.get("variant_value") or ""),
+                product=selected_product,
+                option_description=(
+                    "Runtime option values are passed to G-Engine inputs "
+                    "(for example Quantity/Currency)."
+                ),
             )
-
-        print(
-            "\nAuto-map summary: "
-            f"matched {len(auto_matches)}/{len(option_variant_entries)} option values."
-        )
-        if unmatched_entries:
-            print("Unmatched option values (skipped):")
-            for item in unmatched_entries[:20]:
+            print("\nAuto-map summary: recharge runtime option mode enabled.")
+            print(
+                f"Using local row {selected_product.id} for all "
+                f"{len(option_variant_entries)} option values."
+            )
+        else:
+            auto_matches, unmatched_entries, ambiguous_entries = _auto_match_option_entries_to_products(
+                reference_products,
+                option_variant_entries,
+            )
+            for item in auto_matches:
                 entry = item["entry"]
-                option_label = str(entry.get("option_label") or "Option")
-                variant_value = str(entry.get("variant_value") or "")
-                print(f"- {option_label}: {variant_value}")
-            if len(unmatched_entries) > 20:
-                print(f"...and {len(unmatched_entries) - 20} more unmatched values.")
-        if ambiguous_entries:
-            print("Ambiguous option values (skipped, multiple local matches):")
-            for item in ambiguous_entries[:20]:
-                entry = item["entry"]
-                option_label = str(entry.get("option_label") or "Option")
-                variant_value = str(entry.get("variant_value") or "")
-                product_ids = ", ".join(str(product.id) for product in item["products"][:5])
-                print(f"- {option_label}: {variant_value} -> local ids {product_ids}")
-            if len(ambiguous_entries) > 20:
-                print(f"...and {len(ambiguous_entries) - 20} more ambiguous values.")
-
-        if unmatched_entries and sys.stdin.isatty():
-            if _ask_bool("Map unmatched option values manually now?", default=True):
-                mapped_count = _manual_map_unmatched_option_entries(
-                    unmatched_entries=unmatched_entries,
-                    reference_products=reference_products,
-                    targets_by_product_id=targets_by_product_id,
+                raw_variant_id = entry.get("variant_id")
+                variant_id = int(raw_variant_id) if isinstance(raw_variant_id, int) else None
+                _add_link_target(
+                    targets_by_product_id,
+                    product=item["product"],
+                    option_description=str(item["option_description"]),
+                    variant_id=variant_id,
+                    variant_value=str(entry.get("variant_value") or ""),
                 )
-                if mapped_count > 0:
-                    print(f"Manual option mapping added: {mapped_count} value(s).")
+
+            print(
+                "\nAuto-map summary: "
+                f"matched {len(auto_matches)}/{len(option_variant_entries)} option values."
+            )
+            if unmatched_entries:
+                print("Unmatched option values (skipped):")
+                for item in unmatched_entries[:20]:
+                    entry = item["entry"]
+                    option_label = str(entry.get("option_label") or "Option")
+                    variant_value = str(entry.get("variant_value") or "")
+                    print(f"- {option_label}: {variant_value}")
+                if len(unmatched_entries) > 20:
+                    print(f"...and {len(unmatched_entries) - 20} more unmatched values.")
+            if ambiguous_entries:
+                print("Ambiguous option values (skipped, multiple local matches):")
+                for item in ambiguous_entries[:20]:
+                    entry = item["entry"]
+                    option_label = str(entry.get("option_label") or "Option")
+                    variant_value = str(entry.get("variant_value") or "")
+                    product_ids = ", ".join(str(product.id) for product in item["products"][:5])
+                    print(f"- {option_label}: {variant_value} -> local ids {product_ids}")
+                if len(ambiguous_entries) > 20:
+                    print(f"...and {len(ambiguous_entries) - 20} more ambiguous values.")
+
+            if unmatched_entries and sys.stdin.isatty():
+                if _ask_bool("Map unmatched option values manually now?", default=True):
+                    mapped_count = _manual_map_unmatched_option_entries(
+                        unmatched_entries=unmatched_entries,
+                        reference_products=reference_products,
+                        targets_by_product_id=targets_by_product_id,
+                    )
+                    if mapped_count > 0:
+                        print(f"Manual option mapping added: {mapped_count} value(s).")
 
     if not targets_by_product_id:
         if option_variant_entries:

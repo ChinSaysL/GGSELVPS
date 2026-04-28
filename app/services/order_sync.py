@@ -158,6 +158,29 @@ def _normalize_input_key(value: str | None, fallback: str) -> str:
     return text or fallback
 
 
+def _extract_numeric_quantity(value: str) -> str | None:
+    compact = re.sub(r"[\s\u00A0\u202F]+", "", value)
+    match = re.search(r"\d+(?:[.,]\d+)?", compact)
+    if match is None:
+        return None
+    candidate = match.group(0).replace(",", ".")
+    try:
+        parsed = Decimal(candidate)
+    except (InvalidOperation, ValueError):
+        return None
+    return format(parsed.normalize(), "f")
+
+
+def _canonical_recharge_option_key(label: str | None, fallback: str) -> str:
+    raw_label = str(label or "").strip()
+    lowered = raw_label.lower()
+    if any(token in lowered for token in ("quantity", "qty", "count", "amount", "sum", "колич", "сумм")):
+        return "quantity"
+    if any(token in lowered for token in ("currency", "curr", "валют")):
+        return "currency"
+    return _normalize_input_key(raw_label, fallback)
+
+
 def _extract_options(payload: dict[str, Any]) -> list[dict[str, Any]]:
     options = payload.get("options")
     if isinstance(options, dict):
@@ -215,8 +238,12 @@ def _extract_recharge_option_inputs(payload: dict[str, Any]) -> dict[str, str]:
         label = _first_non_empty_str(option, ("name", "label", "title"))
         option_id = _first_non_empty_str(option, ("id", "option_id", "optionId"))
         fallback = f"option_{option_id}" if option_id else f"option_{option_index}"
-        key = _normalize_input_key(label, fallback)
-        option_inputs[key] = value
+        key = _canonical_recharge_option_key(label, fallback)
+        if key == "quantity":
+            parsed_quantity = _extract_numeric_quantity(value)
+            option_inputs[key] = parsed_quantity or value
+        else:
+            option_inputs[key] = value
         option_index += 1
     return option_inputs
 
@@ -383,10 +410,26 @@ def _select_mapping(
     if not enabled_mappings:
         return None, "offer_has_no_enabled_mappings"
 
+    def _single_mapping_fallback_for_recharge() -> ProductMapping | None:
+        if len(enabled_mappings) != 1:
+            return None
+        mapping = enabled_mappings[0]
+        supplier_id = str(getattr(mapping.supplier_product, "supplier_product_id", "") or "").strip()
+        parts = supplier_id.split(":")
+        is_recharge_service = len(parts) == 2 and parts[0] == "recharge" and bool(parts[1])
+        if is_recharge_service:
+            return mapping
+        if mapping.marketplace_variant_id is None:
+            return mapping
+        return None
+
     if sale.variant_id is not None:
         for mapping in enabled_mappings:
             if mapping.marketplace_variant_id == sale.variant_id:
                 return mapping, None
+        fallback_mapping = _single_mapping_fallback_for_recharge()
+        if fallback_mapping is not None:
+            return fallback_mapping, None
         return None, f"variant_mapping_not_found:{sale.variant_id}"
 
     if sale.variant_text:

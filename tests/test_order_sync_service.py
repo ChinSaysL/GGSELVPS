@@ -410,6 +410,83 @@ def test_digiseller_recharge_includes_radio_option_values_in_buyer_inputs(
     }
 
 
+def test_digiseller_recharge_uses_quantity_radio_value_and_single_mapping_fallback(
+    db_session: Session,
+) -> None:
+    raw_payload_json = (
+        '{"source_type":"recharge","recharge_product_id":"1",'
+        '"recharge_param_keys":["Account","Quantity"],'
+        '"recharge_default_params":{}}'
+    )
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="recharge:1",
+        title="Steam Wallet Top Up",
+        category="Recharge",
+        denomination="Variable",
+        region=None,
+        cost_usd=Decimal("1.00"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json=raw_payload_json,
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="digiseller",
+        marketplace_offer_id="5850465",
+        supplier_product_id=supplier.id,
+        title="Steam RUB",
+        price=Decimal("0.29"),
+        currency="USD",
+        is_enabled=True,
+        requires_buyer_input=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+    db_session.add(
+        ProductMapping(
+            supplier_product_id=supplier.id,
+            marketplace_offer_id=offer.id,
+            enabled=True,
+            marketplace_variant_id=999999,
+            marketplace_variant_name="legacy",
+        )
+    )
+    db_session.commit()
+
+    sale = {
+        "invoice_id": "9001",
+        "id_goods": "5850465",
+        "date_pay": "2026-04-27 10:00:00",
+        "amount": "0.29",
+        "options": [
+            {"name": "Количество", "user_data": "100 RUB", "user_data_id": 19472011},
+            {"name": "Account", "user_data": "steam_friend_123", "user_data_id": None},
+        ],
+        "unique_code": "digiseller-9310",
+    }
+
+    supplier_client = FakeSupplierOrderClient(
+        create_response={"id": 7010, "status": "shipped", "supplier_order_id": "recharge:7010"}
+    )
+    marketplace_client = FakeDigisellerOrderClient(sales=[sale], order_payloads={"9001": sale})
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"digiseller": marketplace_client},
+    )
+
+    assert stats["orders_delivered"] == 1
+    assert supplier_client.create_calls[0]["buyer_inputs"] == {
+        "account": "steam_friend_123",
+        "quantity": "100",
+    }
+
+
 def test_ggsel_steam_game_gift_delivery_instructs_friend_request(
     db_session: Session,
 ) -> None:
