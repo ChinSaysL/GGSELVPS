@@ -1654,6 +1654,84 @@ def _auto_match_option_entries_to_products(
     return matches, unmatched, ambiguous
 
 
+def _option_entry_description(entry: dict[str, Any]) -> str:
+    option_label = str(entry.get("option_label") or "Option")
+    variant_value = str(entry.get("variant_value") or "").strip()
+    if variant_value:
+        return f"{option_label}: {variant_value}"
+    return option_label
+
+
+def _suggest_products_for_option_entry(
+    products: list[Any],
+    entry: dict[str, Any],
+) -> list[Any]:
+    variant_value = str(entry.get("variant_value") or "").strip()
+    if not variant_value:
+        return []
+    exact = _products_matching_variant_exact(products, variant_value)
+    if exact:
+        return exact
+    return _products_matching_variant(products, variant_value)
+
+
+def _merged_unique_products(products: list[Any], fallback_products: list[Any]) -> list[Any]:
+    by_id: dict[int, Any] = {}
+    for product in products:
+        by_id[int(product.id)] = product
+    for product in fallback_products:
+        by_id.setdefault(int(product.id), product)
+    return sorted(by_id.values(), key=lambda item: int(item.id))
+
+
+def _manual_map_unmatched_option_entries(
+    *,
+    unmatched_entries: list[dict[str, Any]],
+    reference_products: list[Any],
+    targets_by_product_id: dict[int, dict[str, Any]],
+) -> int:
+    try:
+        pool_products = _merged_unique_products(
+            _load_recent_products(limit=2000),
+            reference_products,
+        )
+    except RuntimeError:
+        pool_products = sorted(reference_products, key=lambda item: int(item.id))
+
+    mapped = 0
+    for item in unmatched_entries:
+        entry = item["entry"]
+        description = _option_entry_description(entry)
+        suggestions = _suggest_products_for_option_entry(pool_products, entry)
+        print(f"\nManual mapping for option value: {description}")
+        if suggestions:
+            print("Suggested local rows:")
+            _print_reference_products(suggestions, limit=10)
+        else:
+            print("No automatic row suggestions for this option value.")
+
+        selected_product = _choose_product_from_reference_rows(
+            pool_products,
+            prompt="Local row id for this option value (blank = skip)",
+            default_product_id=int(suggestions[0].id) if suggestions else None,
+            allow_skip=True,
+        )
+        if selected_product is None:
+            continue
+
+        raw_variant_id = entry.get("variant_id")
+        variant_id = int(raw_variant_id) if isinstance(raw_variant_id, int) else None
+        _add_link_target(
+            targets_by_product_id,
+            product=selected_product,
+            option_description=description,
+            variant_id=variant_id,
+            variant_value=str(entry.get("variant_value") or ""),
+        )
+        mapped += 1
+    return mapped
+
+
 def _debug_payload_hint(payload: dict[str, Any], keys: tuple[str, ...]) -> str:
     parts: list[str] = []
     for key in keys:
@@ -2998,6 +3076,16 @@ def action_manual_link() -> int:
                 print(f"- {option_label}: {variant_value} -> local ids {product_ids}")
             if len(ambiguous_entries) > 20:
                 print(f"...and {len(ambiguous_entries) - 20} more ambiguous values.")
+
+        if unmatched_entries and sys.stdin.isatty():
+            if _ask_bool("Map unmatched option values manually now?", default=True):
+                mapped_count = _manual_map_unmatched_option_entries(
+                    unmatched_entries=unmatched_entries,
+                    reference_products=reference_products,
+                    targets_by_product_id=targets_by_product_id,
+                )
+                if mapped_count > 0:
+                    print(f"Manual option mapping added: {mapped_count} value(s).")
 
     if not targets_by_product_id:
         if option_variant_entries:

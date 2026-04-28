@@ -129,6 +129,35 @@ def test_gengine_create_recharge_order_posts_params_and_pays_when_verified() -> 
     }
 
 
+def test_gengine_recharge_account_fallback_skips_currency_like_inputs() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode("utf-8") or "{}")
+        return httpx.Response(status_code=200, json={"id": 7004, "status": "processing"})
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    response = client.create_order(
+        "recharge:1",
+        buyer_inputs={"currency": "RUB", "steam_friend_code": "123456789"},
+        product_payload={
+            "source_type": "recharge",
+            "recharge_product_id": "1",
+            "recharge_param_keys": ["Account", "Quantity"],
+            "recharge_default_params": {"Quantity": "1000"},
+        },
+    )
+    client.close()
+
+    assert response == {"id": 7004, "status": "processing", "supplier_order_id": "recharge:7004"}
+    assert captured["body"]["params"] == [
+        {"param_key": "Account", "param_value": "123456789"},
+        {"param_key": "Quantity", "param_value": "1000"},
+    ]
+
+
 def test_gengine_create_recharge_order_uses_marketplace_quantity_for_direct_topup() -> None:
     captured: dict[str, Any] = {}
 

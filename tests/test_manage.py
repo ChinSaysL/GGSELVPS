@@ -912,6 +912,33 @@ def test_auto_match_option_entries_to_products_matches_hidden_spaces_and_confusa
     assert ambiguous == []
 
 
+def test_option_entry_description_formats_label_and_value() -> None:
+    entry = {"option_label": "Currency", "variant_value": "RUB"}
+    assert manage._option_entry_description(entry) == "Currency: RUB"
+
+
+def test_suggest_products_for_option_entry_falls_back_to_fuzzy_currency_match() -> None:
+    products = [
+        SimpleNamespace(
+            id=1,
+            title="Steam RUB top up",
+            category="Recharge",
+            denomination="Variable RUB",
+        ),
+        SimpleNamespace(
+            id=2,
+            title="Steam USD top up",
+            category="Recharge",
+            denomination="Variable USD",
+        ),
+    ]
+    entry = {"option_label": "Currency", "variant_value": "RUB"}
+
+    suggestions = manage._suggest_products_for_option_entry(products, entry)
+
+    assert [product.id for product in suggestions] == [1]
+
+
 def test_product_denomination_signature_combines_plain_amount_with_payload_currency() -> None:
     product = SimpleNamespace(
         id=142,

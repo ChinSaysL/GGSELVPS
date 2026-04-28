@@ -604,7 +604,16 @@ class GEngineClient(BaseAPIClient):
 
         if normalized_param == "account" and buyer_inputs:
             for key, value in buyer_inputs.items():
-                if cls._normalize_param_key(key) == "quantity":
+                normalized_key = cls._normalize_param_key(key)
+                if normalized_key in {
+                    "quantity",
+                    "currency",
+                    "amount",
+                    "sum",
+                    "option",
+                    "variant",
+                    "denomination",
+                }:
                     continue
                 return value
         return None

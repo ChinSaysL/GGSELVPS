@@ -197,6 +197,30 @@ def _extract_buyer_inputs(payload: dict[str, Any]) -> dict[str, str]:
     return buyer_inputs
 
 
+def _extract_recharge_option_inputs(payload: dict[str, Any]) -> dict[str, str]:
+    option_inputs: dict[str, str] = {}
+    option_index = 1
+    for option in _extract_options(payload):
+        value = _first_non_empty_str(option, ("user_data", "value", "text"))
+        if not value:
+            continue
+        variant_id = _to_int(
+            _first_non_empty_str(
+                option,
+                ("user_data_id", "variant_id", "variantId", "value_id", "id_variant"),
+            )
+        )
+        if variant_id is None:
+            continue
+        label = _first_non_empty_str(option, ("name", "label", "title"))
+        option_id = _first_non_empty_str(option, ("id", "option_id", "optionId"))
+        fallback = f"option_{option_id}" if option_id else f"option_{option_index}"
+        key = _normalize_input_key(label, fallback)
+        option_inputs[key] = value
+        option_index += 1
+    return option_inputs
+
+
 def _extract_variant_id(payload: dict[str, Any]) -> int | None:
     direct = _to_int(
         _first_non_empty_str(
@@ -579,10 +603,15 @@ def _create_supplier_purchase(
 ) -> dict[str, Any]:
     supplier = mapping.supplier_product
     external_order_id = f"{sale.marketplace}:{sale.order_id}"
+    buyer_inputs = dict(sale.buyer_inputs)
+    if str(supplier.supplier_product_id).startswith("recharge:"):
+        recharge_option_inputs = _extract_recharge_option_inputs(sale.raw_payload)
+        for key, value in recharge_option_inputs.items():
+            buyer_inputs.setdefault(key, value)
     response = supplier_client.create_order(
         supplier.supplier_product_id,
         sale.quantity,
-        buyer_inputs=sale.buyer_inputs,
+        buyer_inputs=buyer_inputs,
         external_order_id=external_order_id,
         product_payload=_supplier_raw_payload(supplier),
     )

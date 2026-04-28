@@ -104,6 +104,7 @@ python manage.py manual-link-example
 - entering the marketplace offer/product ID and attempting to fetch marketplace metadata
 - auto-mapping marketplace option values (for example `250 TRY`, `500 TRY`) to imported G-Engine rows by exact denomination/signature
 - showing unmatched/ambiguous option values that were skipped
+- manual fallback for unmatched option values so one marketplace post can map each radio/drop-down value to different G-Engine rows
 - entering/confirming marketplace price and currency (prefilled when fetched)
 - entering marketplace commission percent (manual override per mapping)
 - for GGSEL: entering payment-system commission percent (defaults are configurable in `.env`)
@@ -117,6 +118,8 @@ python manage.py manual-link-example
 - creating/updating local links in one batch
 
 For marketplace pages with option values like `250 TRY` and `500 TRY`, keep those option texts aligned with G-Engine denominations and `manual-link` can map the whole page in one run.
+
+For Digiseller recharge offers, selected radio/drop-down option values (for example currency or amount) are passed into G-Engine recharge params when keys match (such as `Currency`, `Amount`, `Quantity`).
 
 After `python manage.py manual-link`, run the offered live stock sync prompt if the listing is already public. Price sync only updates prices; stock sync is what hides/disables denominations when G-Engine balance is too low.
 
