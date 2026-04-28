@@ -218,6 +218,21 @@ def test_default_buyer_input_label_prefers_steam_friend_code() -> None:
     assert manage._default_buyer_input_label(product) == "Steam friend code"
 
 
+def test_mapping_enabled_value_prefers_enabled_field() -> None:
+    mapping = SimpleNamespace(enabled=False, is_enabled=True)
+    assert manage._mapping_enabled_value(mapping) is False
+
+
+def test_mapping_enabled_value_supports_legacy_is_enabled_field() -> None:
+    mapping = SimpleNamespace(is_enabled=False)
+    assert manage._mapping_enabled_value(mapping) is False
+
+
+def test_mapping_enabled_value_defaults_to_true_when_missing() -> None:
+    mapping = SimpleNamespace()
+    assert manage._mapping_enabled_value(mapping) is True
+
+
 def test_apply_manual_recharge_config_updates_cost_quantity_and_payload() -> None:
     product = SimpleNamespace(
         id=1,

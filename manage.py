@@ -1097,6 +1097,17 @@ def _default_buyer_input_help(label: str) -> str:
     return f"Ask the buyer to provide their {label} before fulfillment."
 
 
+def _mapping_enabled_value(mapping: Any) -> bool:
+    if mapping is None:
+        return True
+    enabled_value = getattr(mapping, "enabled", None)
+    if enabled_value is None:
+        enabled_value = getattr(mapping, "is_enabled", None)
+    if enabled_value is None:
+        return True
+    return bool(enabled_value)
+
+
 def _suggest_price(
     product: Any,
     currency: str,
@@ -2870,9 +2881,7 @@ def action_manual_link() -> int:
         offer_enabled_default = existing_offer.is_enabled
     offer_enabled = _ask_bool("Mark local offer enabled?", default=offer_enabled_default)
     
-    mapping_enabled_default = True
-    if existing_mapping is not None:
-        mapping_enabled_default = existing_mapping.is_enabled
+    mapping_enabled_default = _mapping_enabled_value(existing_mapping)
     mapping_enabled = _ask_bool("Enable this product mapping?", default=mapping_enabled_default)
 
     detected_requires_buyer_input = bool(snapshot.get("detected_requires_buyer_input")) if snapshot else False
