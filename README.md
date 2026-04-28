@@ -106,6 +106,7 @@ python manage.py manual-link-example
 - showing unmatched/ambiguous option values that were skipped
 - entering/confirming marketplace price and currency (prefilled when fetched)
 - entering marketplace commission percent (manual override per mapping)
+- for GGSEL: entering payment-system commission percent (defaults are configurable in `.env`)
 - auto-detecting required buyer text fields (such as Steam friend code), with optional manual override
 
 `python manage.py auto-link` walks through:

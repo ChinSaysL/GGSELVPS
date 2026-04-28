@@ -2884,6 +2884,12 @@ def action_manual_link() -> int:
     if marketplace not in VALID_MARKETPLACES:
         print(f"Marketplace must be one of: {', '.join(VALID_MARKETPLACES)}.")
         return 1
+    try:
+        from app.config import get_settings
+    except ImportError as exc:
+        print(f"Could not import app config: {exc}")
+        return 1
+    settings = get_settings()
 
     chosen = _choose_reference_products_interactively()
     if chosen is None:
@@ -3080,6 +3086,14 @@ def action_manual_link() -> int:
         print("Using automatic markup tier based on cost.")
 
     default_marketplace_commission_percent = Decimal("0")
+    default_payment_system_commission_percent = Decimal("0")
+    if marketplace == "ggsel":
+        default_marketplace_commission_percent = (
+            Decimal(str(settings.ggsel_default_marketplace_commission_percent)) * Decimal("100")
+        )
+        default_payment_system_commission_percent = (
+            Decimal(str(settings.ggsel_default_payment_system_commission_percent)) * Decimal("100")
+        )
 
     if existing_mapping and existing_mapping.marketplace_commission_percent is not None:
         default_marketplace_commission_percent = existing_mapping.marketplace_commission_percent * Decimal("100")
@@ -3088,6 +3102,17 @@ def action_manual_link() -> int:
         "Marketplace commission percentage",
         default_percent=default_marketplace_commission_percent,
     )
+    payment_system_commission_percent: Decimal | None = None
+    if marketplace == "ggsel":
+        if existing_mapping and existing_mapping.payment_system_commission_percent is not None:
+            default_payment_system_commission_percent = (
+                existing_mapping.payment_system_commission_percent * Decimal("100")
+            )
+            
+        payment_system_commission_percent = _ask_optional_percent_as_ratio(
+            "Payment-system commission percentage",
+            default_percent=default_payment_system_commission_percent,
+        )
 
     suggested_price = _suggest_price(
         primary_product,
@@ -3095,6 +3120,7 @@ def action_manual_link() -> int:
         marketplace=marketplace,
         markup_percent=mapping_markup_percent,
         marketplace_commission_percent=marketplace_commission_percent,
+        payment_system_commission_percent=payment_system_commission_percent,
     )
     if suggested_price is None:
         print("No automatic markup-based price available; enter the current marketplace price.")
@@ -3203,6 +3229,11 @@ def action_manual_link() -> int:
         print("- mapping markup rate: automatic tier")
     if marketplace_commission_percent is not None:
         print(f"- marketplace commission: {(marketplace_commission_percent * Decimal('100'))}%")
+    if payment_system_commission_percent is not None:
+        print(
+            f"- payment-system commission: "
+            f"{(payment_system_commission_percent * Decimal('100'))}%"
+        )
     print(f"- local offer enabled: {offer_enabled}")
     print(f"- mapping enabled: {mapping_enabled}")
     print(f"- requires buyer input: {requires_buyer_input}")
@@ -3243,7 +3274,7 @@ def action_manual_link() -> int:
                 marketplace_variant_id=marketplace_variant_id,
                 marketplace_variant_name=marketplace_variant_name,
                 marketplace_commission_percent=marketplace_commission_percent,
-                payment_system_commission_percent=None,
+                payment_system_commission_percent=payment_system_commission_percent,
                 min_margin_percent=mapping_markup_percent,
                 min_profit_usd=None,
                 max_price=None,
