@@ -1889,6 +1889,8 @@ def _linked_rows_for_marketplace_offer(
                 "marketplace_variant_name": mapping.marketplace_variant_name,
                 "marketplace_commission_percent": mapping.marketplace_commission_percent,
                 "payment_system_commission_percent": mapping.payment_system_commission_percent,
+                "manage_stock_quantity": mapping.manage_stock_quantity,
+                "min_purchase_quantity": mapping.min_purchase_quantity,
             }
         )
     return linked
@@ -1908,7 +1910,9 @@ def _print_linked_rows_for_offer(marketplace: str, marketplace_offer_id: str) ->
             f"variant_id={row['marketplace_variant_id']} | "
             f"variant_name={row['marketplace_variant_name'] or ''} | enabled={row['enabled']} | "
             f"marketplace_commission={row['marketplace_commission_percent']} | "
-            f"payment_system_commission={row['payment_system_commission_percent']}"
+            f"payment_system_commission={row['payment_system_commission_percent']} | "
+            f"manage_stock={row['manage_stock_quantity']} | "
+            f"min_qty={row['min_purchase_quantity']}"
         )
 
 
@@ -2867,6 +2871,8 @@ def _upsert_manual_link(
     min_margin_percent: Decimal | None = None,
     min_profit_usd: Decimal | None = None,
     max_price: Decimal | None = None,
+    manage_stock_quantity: bool = False,
+    min_purchase_quantity: int | None = None,
 ) -> dict[str, Any]:
     from sqlalchemy import select
 
@@ -2934,6 +2940,8 @@ def _upsert_manual_link(
                 min_margin_percent=min_margin_percent,
                 min_profit_usd=min_profit_usd,
                 max_price=max_price,
+                manage_stock_quantity=manage_stock_quantity,
+                min_purchase_quantity=min_purchase_quantity,
             )
             db.add(mapping)
             mapping_created = True
@@ -2946,6 +2954,8 @@ def _upsert_manual_link(
             mapping.min_margin_percent = min_margin_percent
             mapping.min_profit_usd = min_profit_usd
             mapping.max_price = max_price
+            mapping.manage_stock_quantity = manage_stock_quantity
+            mapping.min_purchase_quantity = min_purchase_quantity
             db.add(mapping)
 
         db.commit()
@@ -3331,6 +3341,19 @@ def action_manual_link() -> int:
             buyer_input_label = None
             buyer_input_help = None
 
+    manage_stock_quantity = _ask_bool(
+        "Manage 'Products in stock' count dynamically from supplier balance?",
+        default=False,
+    )
+    min_purchase_quantity: int | None = None
+    if manage_stock_quantity:
+        raw_min = _ask_text("Minimum purchase quantity (leave blank for none)", required=False)
+        if raw_min.strip():
+            try:
+                min_purchase_quantity = int(raw_min.strip())
+            except ValueError:
+                print("Invalid integer — skipping minimum purchase quantity.")
+
     print("\nReview:")
     print(f"- marketplace: {marketplace}")
     print(f"- marketplace_offer_id: {marketplace_offer_id}")
@@ -3369,6 +3392,9 @@ def action_manual_link() -> int:
     if requires_buyer_input:
         print(f"- buyer input label: {buyer_input_label}")
         print(f"- buyer input help: {buyer_input_help}")
+    print(f"- manage stock quantity: {manage_stock_quantity}")
+    if manage_stock_quantity:
+        print(f"- min purchase quantity: {min_purchase_quantity}")
 
     if not _ask_bool("Create/update this local link?", default=True):
         print("Cancelled.")
@@ -3407,6 +3433,8 @@ def action_manual_link() -> int:
                 min_margin_percent=mapping_markup_percent,
                 min_profit_usd=None,
                 max_price=None,
+                manage_stock_quantity=manage_stock_quantity,
+                min_purchase_quantity=min_purchase_quantity,
             )
             successful += 1
         except Exception as exc:  # noqa: BLE001 - continue remaining links.

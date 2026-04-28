@@ -635,10 +635,13 @@ class GGSELClient(BaseAPIClient):
                 return "; ".join(list_parts)
 
         # Fallback if we completely missed the error structure
+        _non_error_keys = {
+            "status", "task_id", "taskid", "successcount", "totalcount", "errorcount",
+        }
         fallback_errors = {
-            str(k).strip(): str(v).strip() 
-            for k, v in task_status.items() 
-            if str(k).lower() not in ("status", "task_id") and v not in (None, "")
+            str(k).strip(): str(v).strip()
+            for k, v in task_status.items()
+            if str(k).strip().lower() not in _non_error_keys and v not in (None, "")
         }
         if fallback_errors:
             return repr(fallback_errors)
@@ -729,7 +732,9 @@ class GGSELClient(BaseAPIClient):
                 status_payload.get("Status", status_payload.get("status"))
             )
 
-            if status_code == 3:
+            # GGSEL uses Status=2 for "completed" (Digiseller uses 3).
+            # Treat both as terminal; rely on ErrorCount to distinguish success from failure.
+            if status_code in (2, 3):
                 error_count_raw = status_payload.get("ErrorCount", status_payload.get("errorCount", 0))
                 try:
                     error_count = int(str(error_count_raw))
@@ -744,11 +749,6 @@ class GGSELClient(BaseAPIClient):
                 success_payload.setdefault("status", "ok")
                 success_payload.setdefault("task_id", task_id)
                 return success_payload
-            if status_code == 2:
-                error_text = self._task_error_descriptions(status_payload) or "unknown task failure"
-                raise APIRequestError(
-                    f"GGSEL price update task failed ({task_id}): {error_text}"
-                )
 
             time.sleep(self._task_poll_interval_seconds)
 
