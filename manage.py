@@ -2809,8 +2809,8 @@ def action_manual_link() -> int:
         return 1
 
     mapping_markup_percent_default = None
-    if existing_mapping and existing_mapping.markup_percent is not None:
-        mapping_markup_percent_default = existing_mapping.markup_percent / Decimal("100")
+    if existing_mapping and existing_mapping.min_margin_percent is not None:
+        mapping_markup_percent_default = existing_mapping.min_margin_percent / Decimal("100")
         
     mapping_markup_percent = _ask_optional_percent_as_ratio(
         "Markup rate percent for mapped rows (blank = automatic tier)",
