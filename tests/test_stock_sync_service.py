@@ -33,6 +33,7 @@ class FakeDigisellerStockClient:
     variant_state_calls: list[tuple[str, int, bool, bool | None]] = field(default_factory=list)
     variant_state_error_ids: set[int] = field(default_factory=set)
     offer_error: Exception | None = None
+    offer_payload_by_id: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def set_offer_enabled(self, offer_id: str, enabled: bool) -> dict[str, Any]:
         self.offer_calls.append((offer_id, enabled))
@@ -64,6 +65,9 @@ class FakeDigisellerStockClient:
 
     def close(self) -> None:
         return None
+
+    def get_offer_by_id(self, offer_id: str) -> dict[str, Any] | None:
+        return self.offer_payload_by_id.get(str(offer_id))
 
 
 def _db_session() -> Generator[Session, None, None]:
@@ -741,3 +745,139 @@ def test_stock_sync_disables_digiseller_parent_when_variant_control_fails(
     assert client.variant_state_calls == [("5850465", 19472011, True, True)]
     assert client.offer_calls == [("5850465", False)]
     assert offer.is_enabled is False
+
+
+def test_stock_sync_controls_digiseller_runtime_quantity_variants(
+    db_session: Session,
+) -> None:
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="recharge:1",
+        title="Steam RUB",
+        category="Recharge",
+        denomination="Variable RUB | Marketplace quantity x 1",
+        region=None,
+        cost_usd=Decimal("0.0132"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json=(
+            '{"source_type":"recharge","recharge_product_id":"1",'
+            '"recharge_quantity_source":"marketplace_quantity","recharge_quantity_multiplier":"1"}'
+        ),
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="digiseller",
+        marketplace_offer_id="5856532",
+        supplier_product_id=supplier.id,
+        title="Steam RUB",
+        price=Decimal("0.29"),
+        currency="USD",
+        is_enabled=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+
+    mapping = ProductMapping(
+        supplier_product_id=supplier.id,
+        marketplace_offer_id=offer.id,
+        enabled=True,
+        marketplace_variant_id=None,
+    )
+    db_session.add(mapping)
+    db_session.commit()
+
+    client = FakeDigisellerStockClient(
+        offer_payload_by_id={
+            "5856532": {
+                "id": 5856532,
+                "name": "Steam RUB",
+                "options": [
+                    {
+                        "label": "Количество",
+                        "variants": [
+                            {"id": 19472011, "text": "100 RUB"},
+                            {"id": 19472012, "text": "200 RUB"},
+                            {"id": 19472013, "text": "5000 RUB"},
+                        ],
+                    }
+                ],
+            }
+        }
+    )
+    stats = sync_offer_stock(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_balance_client=FakeSupplierBalanceClient({"balance": "50.00"}),
+        marketplace_clients={"digiseller": client},
+    )
+
+    assert stats["errors"] == 0
+    assert client.variant_state_calls == [
+        ("5856532", 19472011, True, True),
+        ("5856532", 19472012, True, False),
+        ("5856532", 19472013, False, False),
+    ]
+    assert client.offer_calls == [("5856532", True)]
+    assert offer.is_enabled is True
+
+
+def test_stock_sync_treats_digiseller_status_update_error_as_safe_noop_for_enabled_offer(
+    db_session: Session,
+) -> None:
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="7",
+        title="Steam RU+CIS",
+        category="Games, Steam",
+        denomination="Steam Key RU+CIS",
+        region=None,
+        cost_usd=Decimal("1.00"),
+        supplier_stock="10",
+        is_available=True,
+        raw_payload_json="{}",
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="digiseller",
+        marketplace_offer_id="718",
+        supplier_product_id=supplier.id,
+        title="Steam RU+CIS",
+        price=Decimal("2.00"),
+        currency="USD",
+        is_enabled=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+
+    db_session.add(
+        ProductMapping(
+            supplier_product_id=supplier.id,
+            marketplace_offer_id=offer.id,
+            enabled=True,
+        )
+    )
+    db_session.commit()
+
+    client = FakeDigisellerStockClient(
+        offer_error=RuntimeError(
+            "Digiseller price update task failed (task-id): 718: "
+            "The current status of product does not allow the specified action to be applied"
+        )
+    )
+    stats = sync_offer_stock(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_balance_client=FakeSupplierBalanceClient({"balance": "200.00"}),
+        marketplace_clients={"digiseller": client},
+    )
+
+    assert stats["errors"] == 0
+    assert stats["skipped"] == 1
+    assert client.offer_calls == [("718", True)]
+    assert offer.is_enabled is True
+    assert stats["details"][0]["reason"].startswith("offer_status_unchanged:")

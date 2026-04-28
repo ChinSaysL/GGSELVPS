@@ -3050,12 +3050,14 @@ def action_manual_link() -> int:
         existing_mapping = existing_offer.mappings[0] if existing_offer and existing_offer.mappings else None
 
     targets_by_product_id: dict[int, dict[str, Any]] = {}
+    runtime_option_mode = False
     if option_variant_entries:
         if _should_use_recharge_runtime_option_mapping(
             reference,
             reference_products,
             option_variant_entries,
         ):
+            runtime_option_mode = True
             selected_product = reference_products[0]
             _add_link_target(
                 targets_by_product_id,
@@ -3173,7 +3175,12 @@ def action_manual_link() -> int:
     if not _configure_unfixed_recharge_products_interactively(target_products):
         return 1
 
-    if snapshot and len(targets) == 1 and not _snapshot_matches_selected_product(primary_product, snapshot):
+    if (
+        snapshot
+        and len(targets) == 1
+        and not runtime_option_mode
+        and not _snapshot_matches_selected_product(primary_product, snapshot)
+    ):
         print("Warning: selected G-Engine denomination does not match fetched marketplace item.")
         print(f"- G-Engine denomination: {getattr(primary_product, 'denomination', None) or '(none)'}")
         print(f"- marketplace denomination: {snapshot.get('denomination') or '(not provided)'}")

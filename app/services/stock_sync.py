@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Protocol, cast
@@ -48,6 +49,16 @@ class MarketplaceVariantStateClientProtocol(MarketplaceVariantStockClientProtoco
         visible: bool,
         is_default: bool | None = None,
     ) -> dict[str, Any]: ...
+
+
+class MarketplaceOfferLookupClientProtocol(MarketplaceStockClientProtocol, Protocol):
+    def get_offer_by_id(self, offer_id: str) -> dict[str, Any] | None: ...
+
+
+class MarketplaceRuntimeVariantClientProtocol(
+    MarketplaceVariantStateClientProtocol, MarketplaceOfferLookupClientProtocol, Protocol
+):
+    pass
 
 
 def _to_decimal(value: object) -> Decimal | None:
@@ -231,10 +242,146 @@ def _digiseller_disable_is_already_unavailable_error(reason: str) -> bool:
     return "current status of product does not allow the specified action" in text
 
 
-def _marketplace_disable_error_is_safe_noop(*, marketplace: str, reason: str) -> bool:
+def _marketplace_status_update_error_is_safe_noop(*, marketplace: str, reason: str) -> bool:
     if marketplace != "digiseller":
         return False
     return _digiseller_disable_is_already_unavailable_error(reason)
+
+
+def _parse_int_token(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    match = re.search(r"\d+", text)
+    if match is None:
+        return None
+    return int(match.group(0))
+
+
+def _first_non_empty_str(payload: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _parse_decimal_quantity(value: str | None) -> Decimal | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    compact = re.sub(r"[\s\u00A0\u202F]+", "", text)
+    match = re.search(r"\d+(?:[.,]\d+)?", compact)
+    if match is None:
+        return None
+    candidate = match.group(0).replace(",", ".")
+    try:
+        parsed = Decimal(candidate)
+    except (InvalidOperation, ValueError):
+        return None
+    if parsed <= 0:
+        return None
+    return parsed
+
+
+def _is_quantity_option_label(label: str) -> bool:
+    normalized = str(label or "").strip().lower()
+    if not normalized:
+        return False
+    return any(
+        token in normalized
+        for token in ("quantity", "qty", "count", "amount", "sum", "колич", "сумм")
+    )
+
+
+def _is_marketplace_quantity_recharge_mapping(mapping: ProductMapping, supplier: SupplierProduct) -> bool:
+    if mapping.marketplace_variant_id is not None:
+        return False
+    supplier_id = str(supplier.supplier_product_id or "").strip()
+    parts = supplier_id.split(":")
+    if not (len(parts) == 2 and parts[0] == "recharge" and parts[1]):
+        return False
+    try:
+        payload = json.loads(supplier.raw_payload_json or "{}")
+    except json.JSONDecodeError:
+        payload = {}
+    if not isinstance(payload, dict):
+        return False
+    if payload.get("source_type") != "recharge" and payload.get("recharge_product_id") is None:
+        return False
+    quantity_source = str(payload.get("recharge_quantity_source") or "").strip().lower()
+    return quantity_source == "marketplace_quantity"
+
+
+def _extract_runtime_quantity_variants_from_offer(
+    offer_payload: dict[str, Any],
+) -> list[tuple[int, Decimal, str]]:
+    options = offer_payload.get("options")
+    if not isinstance(options, list):
+        return []
+    variant_value_keys = ("text", "label", "name", "title", "value")
+    variant_id_keys = (
+        "variant_id",
+        "variantId",
+        "id_variant",
+        "id_var",
+        "var_id",
+        "value_id",
+        "id_option_value",
+        "option_value_id",
+        "id",
+    )
+
+    quantity_labeled: list[tuple[int, Decimal, str]] = []
+    fallback: list[tuple[int, Decimal, str]] = []
+    seen_variant_ids: set[int] = set()
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        option_label = _first_non_empty_str(option, ("label", "name", "title")) or "Option"
+        option_variants = option.get("variants")
+        if not isinstance(option_variants, list):
+            option_variants = option.get("values")
+        if not isinstance(option_variants, list):
+            option_variants = option.get("items")
+        if not isinstance(option_variants, list):
+            option_variants = option.get("options")
+        if not isinstance(option_variants, list):
+            continue
+
+        for variant in option_variants:
+            if not isinstance(variant, dict):
+                continue
+            variant_id: int | None = None
+            for key in variant_id_keys:
+                variant_id = _parse_int_token(variant.get(key))
+                if variant_id is not None:
+                    break
+            if variant_id is None or variant_id in seen_variant_ids:
+                continue
+            variant_value = _first_non_empty_str(variant, variant_value_keys)
+            quantity = _parse_decimal_quantity(variant_value)
+            if quantity is None:
+                continue
+            seen_variant_ids.add(variant_id)
+            payload = (variant_id, quantity, str(variant_value))
+            fallback.append(payload)
+            if _is_quantity_option_label(option_label):
+                quantity_labeled.append(payload)
+
+    chosen = quantity_labeled if quantity_labeled else fallback
+    return sorted(chosen, key=lambda item: (item[1], item[0]))
 
 
 def _set_offer_variant_stock_state(
@@ -367,6 +514,180 @@ def sync_offer_stock(
                 _skip_detail(stats, detail, reason=f"marketplace_client_not_configured:{reason}")
             continue
 
+        runtime_quantity_variant_mode = (
+            marketplace == "digiseller"
+            and len(decisions) == 1
+            and _is_marketplace_quantity_recharge_mapping(decisions[0][0], decisions[0][1])
+            and hasattr(client, "set_offer_variant_visible")
+            and hasattr(client, "get_offer_by_id")
+        )
+        if runtime_quantity_variant_mode:
+            runtime_mapping, runtime_supplier, _runtime_in_stock, _runtime_reason, _runtime_required = decisions[0]
+            runtime_client = cast(MarketplaceRuntimeVariantClientProtocol, client)
+            try:
+                raw_offer = runtime_client.get_offer_by_id(offer.marketplace_offer_id)
+            except Exception as exc:  # noqa: BLE001
+                detail = _base_detail(mapping=runtime_mapping, offer=offer, supplier=runtime_supplier)
+                _error_detail(stats, detail, reason=f"runtime_variant_lookup_failed:{exc}")
+                continue
+            if not isinstance(raw_offer, dict):
+                detail = _base_detail(mapping=runtime_mapping, offer=offer, supplier=runtime_supplier)
+                _skip_detail(stats, detail, reason="runtime_variant_lookup_empty")
+                continue
+
+            runtime_variants = _extract_runtime_quantity_variants_from_offer(raw_offer)
+            if not runtime_variants:
+                detail = _base_detail(mapping=runtime_mapping, offer=offer, supplier=runtime_supplier)
+                _skip_detail(stats, detail, reason="runtime_quantity_variants_not_found")
+                continue
+
+            variant_decisions: list[tuple[int, Decimal, bool, str, Decimal]] = []
+            runtime_default_variant_id: int | None = None
+            for variant_id, quantity, variant_value in runtime_variants:
+                decision = evaluate_stock_status(
+                    mapping_enabled=runtime_mapping.enabled,
+                    supplier_is_available=runtime_supplier.is_available,
+                    supplier_stock=runtime_supplier.supplier_stock,
+                    usable_balance_usd=usable_balance_usd,
+                    supplier_cost_usd=runtime_supplier.cost_usd * quantity,
+                    has_positive_profit=True,
+                )
+                if decision.in_stock and runtime_default_variant_id is None:
+                    runtime_default_variant_id = variant_id
+                variant_decisions.append(
+                    (
+                        variant_id,
+                        quantity,
+                        decision.in_stock,
+                        decision.reason,
+                        decision.required_balance_usd,
+                    )
+                )
+
+            confirmed_visible_variant = False
+            variant_control_failed = False
+            ordered_variant_decisions = sorted(
+                variant_decisions,
+                key=lambda item: (
+                    0
+                    if runtime_default_variant_id is not None
+                    and item[0] == runtime_default_variant_id
+                    else 1
+                ),
+            )
+
+            for variant_id, quantity, in_stock, reason, required_balance in ordered_variant_decisions:
+                detail = _base_detail(mapping=runtime_mapping, offer=offer, supplier=runtime_supplier)
+                detail["variant_id"] = variant_id
+                detail["variant_quantity"] = str(quantity)
+                detail["required_balance_usd"] = str(required_balance)
+                detail["stock_reason"] = reason
+
+                runtime_desired_default = (
+                    bool(
+                        runtime_default_variant_id is not None
+                        and variant_id == runtime_default_variant_id
+                    )
+                    if runtime_default_variant_id is not None
+                    else False
+                )
+                try:
+                    response = _set_offer_variant_stock_state(
+                        client=runtime_client,
+                        offer_id=offer.marketplace_offer_id,
+                        variant_id=variant_id,
+                        visible=in_stock,
+                        is_default=runtime_desired_default,
+                    )
+                except NotImplementedError as exc:
+                    variant_control_failed = True
+                    _skip_detail(stats, detail, reason=str(exc))
+                    continue
+                except Exception as exc:  # noqa: BLE001
+                    variant_control_failed = True
+                    _error_detail(stats, detail, reason=str(exc))
+                    continue
+
+                is_pending, task_id = _is_pending_response(response if isinstance(response, dict) else None)
+                if is_pending:
+                    variant_control_failed = True
+                    pending_reason = "marketplace_async_task_pending"
+                    if task_id:
+                        pending_reason = f"{pending_reason}:{task_id}"
+                    _skip_detail(stats, detail, reason=pending_reason)
+                    continue
+
+                if in_stock:
+                    confirmed_visible_variant = True
+                _updated_detail(stats, detail, enabled=in_stock)
+
+            parent_enabled = confirmed_visible_variant and not variant_control_failed
+            runtime_parent_detail: dict[str, Any] = {
+                "offer_id": offer.id,
+                "marketplace": offer.marketplace,
+                "marketplace_offer_id": offer.marketplace_offer_id,
+                "target_enabled": parent_enabled,
+                "variant_group": True,
+                "runtime_variant_mode": True,
+                "variant_control_failed": variant_control_failed,
+            }
+            try:
+                parent_response = runtime_client.set_offer_enabled(
+                    offer.marketplace_offer_id,
+                    parent_enabled,
+                )
+            except NotImplementedError as exc:
+                _status_detail(
+                    stats,
+                    runtime_parent_detail,
+                    action="skipped",
+                    reason=f"parent_offer_status_not_updated:{str(exc)}",
+                )
+            except Exception as exc:  # noqa: BLE001
+                error_reason = str(exc)
+                if _marketplace_status_update_error_is_safe_noop(
+                    marketplace=marketplace,
+                    reason=error_reason,
+                ):
+                    _status_detail(
+                        stats,
+                        runtime_parent_detail,
+                        action="skipped",
+                        reason=f"parent_offer_status_unchanged:{error_reason}",
+                    )
+                else:
+                    _error_detail(
+                        stats,
+                        runtime_parent_detail,
+                        reason=f"parent_offer_status_update_failed:{error_reason}",
+                    )
+            else:
+                parent_pending, parent_task_id = _is_pending_response(
+                    parent_response if isinstance(parent_response, dict) else None
+                )
+                if parent_pending:
+                    parent_reason = "parent_offer_status_async_task_pending"
+                    if parent_task_id:
+                        parent_reason = f"{parent_reason}:{parent_task_id}"
+                    _status_detail(
+                        stats,
+                        runtime_parent_detail,
+                        action="skipped",
+                        reason=parent_reason,
+                    )
+                else:
+                    _status_detail(
+                        stats,
+                        runtime_parent_detail,
+                        action="parent_status_updated",
+                        enabled=parent_enabled,
+                    )
+
+            offer.is_enabled = parent_enabled
+            offer.last_synced_at = now
+            db.add(offer)
+            continue
+
         has_variant_bindings = any(item[0].marketplace_variant_id is not None for item in decisions)
         has_variant_stock_api = hasattr(client, "set_offer_variant_visible")
         if has_variant_bindings and has_variant_stock_api:
@@ -398,7 +719,7 @@ def sync_offer_stock(
                     )
                 except Exception as exc:  # noqa: BLE001
                     error_reason = str(exc)
-                    if _marketplace_disable_error_is_safe_noop(
+                    if _marketplace_status_update_error_is_safe_noop(
                         marketplace=marketplace,
                         reason=error_reason,
                     ):
@@ -455,21 +776,21 @@ def sync_offer_stock(
                 detail = _base_detail(mapping=mapping, offer=offer, supplier=supplier)
                 detail["required_balance_usd"] = str(required_balance)
                 detail["stock_reason"] = reason
-                variant_id = mapping.marketplace_variant_id
-                if variant_id is None:
+                mapped_variant_id = mapping.marketplace_variant_id
+                if mapped_variant_id is None:
                     variant_control_failed = True
                     _skip_detail(stats, detail, reason="variant_id_missing_for_variant_offer")
                     continue
 
                 desired_default: bool | None = None
                 if default_variant_id is not None:
-                    desired_default = int(variant_id) == default_variant_id
+                    desired_default = int(mapped_variant_id) == default_variant_id
 
                 try:
                     response = _set_offer_variant_stock_state(
                         client=variant_client,
                         offer_id=offer.marketplace_offer_id,
-                        variant_id=int(variant_id),
+                        variant_id=int(mapped_variant_id),
                         visible=in_stock,
                         is_default=desired_default,
                     )
@@ -516,7 +837,7 @@ def sync_offer_stock(
                 )
             except Exception as exc:  # noqa: BLE001
                 error_reason = str(exc)
-                if not parent_enabled and _marketplace_disable_error_is_safe_noop(
+                if _marketplace_status_update_error_is_safe_noop(
                     marketplace=marketplace,
                     reason=error_reason,
                 ):
@@ -524,7 +845,7 @@ def sync_offer_stock(
                         stats,
                         parent_detail,
                         action="skipped",
-                        reason=f"parent_offer_already_unavailable:{error_reason}",
+                        reason=f"parent_offer_status_unchanged:{error_reason}",
                     )
                 else:
                     _error_detail(
@@ -585,26 +906,23 @@ def sync_offer_stock(
             continue
         except Exception as exc:  # noqa: BLE001
             error_reason = str(exc)
-            disable_safe_noop = (
-                not target_enabled
-                and _marketplace_disable_error_is_safe_noop(
-                    marketplace=marketplace,
-                    reason=error_reason,
-                )
+            status_safe_noop = _marketplace_status_update_error_is_safe_noop(
+                marketplace=marketplace,
+                reason=error_reason,
             )
             for mapping, supplier, _in_stock, reason, required_balance in decisions:
                 detail = _base_detail(mapping=mapping, offer=offer, supplier=supplier)
                 detail["required_balance_usd"] = str(required_balance)
-                if disable_safe_noop:
+                if status_safe_noop:
                     _skip_detail(
                         stats,
                         detail,
-                        reason=f"offer_already_unavailable:{error_reason}:{reason}",
+                        reason=f"offer_status_unchanged:{error_reason}:{reason}",
                     )
                 else:
                     _error_detail(stats, detail, reason=f"{error_reason}:{reason}")
-            if disable_safe_noop:
-                offer.is_enabled = False
+            if status_safe_noop:
+                offer.is_enabled = target_enabled
                 offer.last_synced_at = now
                 db.add(offer)
             continue

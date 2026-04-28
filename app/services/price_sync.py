@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session, selectinload
@@ -93,6 +94,14 @@ class _PricePlan:
 
 class _PriceSyncSkip(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class _RuntimeQuantityVariant:
+    variant_id: int
+    quantity: Decimal
+    variant_value: str
+    option_label: str
 
 
 def _supplier_refresh_reference_key(reference: _SupplierRefreshReference) -> str:
@@ -414,6 +423,167 @@ def _group_mappings_by_offer(mappings: list[ProductMapping]) -> dict[int, list[P
     return grouped
 
 
+def _parse_int_token(value: object) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value
+    text = str(value).strip()
+    if not text:
+        return None
+    if text.isdigit():
+        return int(text)
+    match = re.search(r"\d+", text)
+    if match is None:
+        return None
+    return int(match.group(0))
+
+
+def _first_non_empty_str(payload: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
+
+
+def _parse_decimal_quantity(value: str | None) -> Decimal | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    compact = re.sub(r"[\s\u00A0\u202F]+", "", text)
+    match = re.search(r"\d+(?:[.,]\d+)?", compact)
+    if match is None:
+        return None
+    candidate = match.group(0).replace(",", ".")
+    try:
+        parsed = Decimal(candidate)
+    except (InvalidOperation, ValueError):
+        return None
+    if parsed <= 0:
+        return None
+    return parsed
+
+
+def _is_quantity_option_label(label: str) -> bool:
+    normalized = str(label or "").strip().lower()
+    if not normalized:
+        return False
+    return any(
+        token in normalized
+        for token in ("quantity", "qty", "count", "amount", "sum", "колич", "сумм")
+    )
+
+
+def _extract_runtime_quantity_variants_from_offer(
+    offer_payload: dict[str, Any],
+) -> list[_RuntimeQuantityVariant]:
+    options = offer_payload.get("options")
+    if not isinstance(options, list):
+        return []
+
+    quantity_labeled: list[_RuntimeQuantityVariant] = []
+    fallback: list[_RuntimeQuantityVariant] = []
+    seen_variant_ids: set[int] = set()
+    variant_value_keys = ("text", "label", "name", "title", "value")
+    variant_id_keys = (
+        "variant_id",
+        "variantId",
+        "id_variant",
+        "id_var",
+        "var_id",
+        "value_id",
+        "id_option_value",
+        "option_value_id",
+        "id",
+    )
+
+    for option in options:
+        if not isinstance(option, dict):
+            continue
+        option_label = _first_non_empty_str(option, ("label", "name", "title")) or "Option"
+        option_variants = option.get("variants")
+        if not isinstance(option_variants, list):
+            option_variants = option.get("values")
+        if not isinstance(option_variants, list):
+            option_variants = option.get("items")
+        if not isinstance(option_variants, list):
+            option_variants = option.get("options")
+        if not isinstance(option_variants, list):
+            continue
+
+        for variant in option_variants:
+            if not isinstance(variant, dict):
+                continue
+            variant_id: int | None = None
+            for key in variant_id_keys:
+                variant_id = _parse_int_token(variant.get(key))
+                if variant_id is not None:
+                    break
+            if variant_id is None or variant_id in seen_variant_ids:
+                continue
+
+            variant_value = _first_non_empty_str(variant, variant_value_keys)
+            quantity = _parse_decimal_quantity(variant_value)
+            if quantity is None:
+                continue
+
+            seen_variant_ids.add(variant_id)
+            item = _RuntimeQuantityVariant(
+                variant_id=variant_id,
+                quantity=quantity,
+                variant_value=str(variant_value),
+                option_label=option_label,
+            )
+            fallback.append(item)
+            if _is_quantity_option_label(option_label):
+                quantity_labeled.append(item)
+
+    chosen = quantity_labeled if quantity_labeled else fallback
+    return sorted(chosen, key=lambda item: (item.quantity, item.variant_id))
+
+
+def _is_marketplace_quantity_recharge_mapping(
+    mapping: ProductMapping,
+    supplier_product: SupplierProduct,
+) -> bool:
+    if mapping.marketplace_variant_id is not None:
+        return False
+    supplier_id = str(supplier_product.supplier_product_id or "").strip()
+    parts = supplier_id.split(":")
+    if not (len(parts) == 2 and parts[0] == "recharge" and parts[1]):
+        return False
+    payload = _load_json_object(supplier_product.raw_payload_json)
+    if payload.get("source_type") != "recharge" and _first_payload_value(payload, ("recharge_product_id",)) is None:
+        return False
+    quantity_source = str(payload.get("recharge_quantity_source") or "").strip().lower()
+    return quantity_source == "marketplace_quantity"
+
+
+def _runtime_variant_price_payload(
+    prices_by_variant_id: dict[int, Decimal],
+) -> tuple[Decimal, list[dict[str, Any]]]:
+    base_price = min(prices_by_variant_id.values())
+    variants: list[dict[str, Any]] = []
+    for variant_id, price in sorted(prices_by_variant_id.items()):
+        delta = price - base_price
+        if delta < Decimal("0"):
+            delta = Decimal("0")
+        variants.append(
+            {
+                "variant_id": int(variant_id),
+                "rate": float(delta.quantize(Decimal("0.01"))),
+                "type": 2,
+            }
+        )
+    return base_price, variants
+
+
 def _filter_mappings_by_marketplace_offer_ids(
     mappings: list[ProductMapping],
     offer_ids: set[str],
@@ -529,6 +699,139 @@ def sync_offer_prices(
         group = mappings_by_offer.get(int(offer.id), [mapping])
         marketplace = offer.marketplace.lower()
         supports_variant_price_group = marketplace in {"digiseller", "ggsel"} and len(group) > 1
+
+        runtime_quantity_mode = (
+            marketplace == "digiseller"
+            and len(group) == 1
+            and _is_marketplace_quantity_recharge_mapping(mapping, supplier_product)
+        )
+
+        if runtime_quantity_mode:
+            client = marketplace_clients.get(marketplace)
+            if client is None:
+                _skip_detail(stats, detail, reason="marketplace_price_client_not_configured")
+                continue
+            if not hasattr(client, "get_offer_by_id"):
+                _skip_detail(stats, detail, reason="marketplace_offer_lookup_not_supported")
+                continue
+
+            try:
+                raw_offer = cast(Any, client).get_offer_by_id(offer.marketplace_offer_id)
+            except Exception as exc:  # noqa: BLE001
+                _error_detail(stats, detail, reason=f"runtime_variant_lookup_failed:{exc}")
+                continue
+            if not isinstance(raw_offer, dict):
+                _skip_detail(stats, detail, reason="runtime_variant_lookup_empty")
+                continue
+
+            runtime_variants = _extract_runtime_quantity_variants_from_offer(raw_offer)
+            if not runtime_variants:
+                _skip_detail(stats, detail, reason="runtime_quantity_variants_not_found")
+                continue
+
+            try:
+                marketplace_commission_percent = _to_decimal(mapping.marketplace_commission_percent)
+                if marketplace_commission_percent is None:
+                    marketplace_commission_percent = Decimal("0")
+                if marketplace_commission_percent < 0:
+                    raise PricingConfigError("marketplace_commission_percent must be >= 0.")
+                effective_markup = (
+                    mapping.min_margin_percent
+                    if mapping.min_margin_percent is not None
+                    else get_markup_percent(supplier_product.cost_usd)
+                )
+                if effective_markup < 0:
+                    raise PricingConfigError("markup_percent must be >= 0.")
+
+                currency = (offer.currency or settings.default_currency).upper()
+                usd_rub_rate: Decimal | None = None
+                if currency == "RUB":
+                    usd_rub_rate = resolve_usd_rub_rate(settings)
+
+                prices_by_variant_id: dict[int, Decimal] = {}
+                for runtime_variant in runtime_variants:
+                    base_amount_usd = Decimal(str(supplier_product.cost_usd)) * runtime_variant.quantity
+                    if currency == "USD":
+                        base_amount = base_amount_usd
+                    elif currency == "RUB":
+                        if usd_rub_rate is None:
+                            raise PricingConfigError(
+                                "USD/RUB rate is required for RUB price calculation."
+                            )
+                        base_amount = base_amount_usd * usd_rub_rate
+                    else:
+                        raise PricingConfigError(f"Unsupported target currency: {currency}")
+
+                    prices_by_variant_id[runtime_variant.variant_id] = calculate_compounded_price(
+                        base_amount,
+                        markup_percent=effective_markup,
+                        fee_percent=marketplace_commission_percent,
+                    )
+            except PricingConfigError as exc:
+                _skip_detail(stats, detail, reason=str(exc))
+                continue
+
+            base_price, variant_payload = _runtime_variant_price_payload(prices_by_variant_id)
+            detail.update(
+                {
+                    "runtime_variant_mode": True,
+                    "runtime_variant_count": len(runtime_variants),
+                    "group_base_price": _decimal_to_str(base_price),
+                }
+            )
+
+            if dry_run:
+                detail["action"] = "preview"
+                stats["details"].append(detail)
+                stats["prices_previewed"] += 1
+                continue
+
+            try:
+                update_response = client.set_offer_price(
+                    offer.marketplace_offer_id,
+                    float(base_price),
+                    currency,
+                    variants=variant_payload,
+                )
+            except NotImplementedError as exc:
+                _skip_detail(stats, detail, reason=str(exc))
+                continue
+            except Exception as exc:  # noqa: BLE001 - one failed offer should not stop the batch.
+                if marketplace == "digiseller" and _is_digiseller_offer_access_error(str(exc)):
+                    mapping.enabled = False
+                    db.add(mapping)
+                    _skip_detail(
+                        stats,
+                        detail,
+                        reason="marketplace_offer_not_accessible_mapping_disabled",
+                    )
+                    continue
+                _error_detail(stats, detail, reason=str(exc))
+                continue
+
+            response_status = ""
+            task_id: str | None = None
+            if isinstance(update_response, dict):
+                response_status = str(update_response.get("status") or "").strip().lower()
+                task_id_value = update_response.get("task_id")
+                if task_id_value is not None:
+                    task_text = str(task_id_value).strip()
+                    task_id = task_text or None
+            if response_status == "pending":
+                pending_reason = "marketplace_async_task_pending"
+                if task_id:
+                    pending_reason = f"{pending_reason}:{task_id}"
+                _skip_detail(stats, detail, reason=pending_reason)
+                continue
+
+            offer.price = base_price
+            offer.currency = currency
+            offer.last_synced_at = now
+            db.add(offer)
+            stats["prices_updated"] += 1
+            detail["action"] = "updated"
+            stats["details"].append(detail)
+            continue
 
         if supports_variant_price_group:
             processed_offer_ids.add(int(offer.id))

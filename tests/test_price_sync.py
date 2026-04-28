@@ -21,6 +21,7 @@ class FakeMarketplacePriceClient:
     calls: list[tuple[str, float, str, list[dict[str, Any]] | None]] = field(default_factory=list)
     response: dict[str, Any] | None = None
     error: Exception | None = None
+    offer_payload_by_id: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def set_offer_price(
         self,
@@ -39,6 +40,9 @@ class FakeMarketplacePriceClient:
 
     def close(self) -> None:
         return None
+
+    def get_offer_by_id(self, offer_id: str) -> dict[str, Any] | None:
+        return self.offer_payload_by_id.get(str(offer_id))
 
 
 @dataclass
@@ -935,3 +939,91 @@ def test_price_sync_updates_ggsel_variant_group_with_single_api_call(
     variant_rates = {int(item["variant_id"]): Decimal(str(item["rate"])) for item in variants}
     assert variant_rates[19472011] == Decimal("0.0")
     assert variant_rates[19472020] > Decimal("0")
+
+
+def test_price_sync_updates_digiseller_runtime_quantity_variants(
+    db_session: Session,
+) -> None:
+    supplier, offer, mapping = _linked_offer(
+        db_session,
+        marketplace="digiseller",
+        marketplace_offer_id="5856532",
+        offer_price=Decimal("0.29"),
+        offer_currency="USD",
+        supplier_cost_usd=Decimal("0.0132"),
+        supplier_product_id="recharge:1",
+        raw_payload_json=(
+            '{"id":"recharge:1","source_type":"recharge","recharge_product_id":"1",'
+            '"recharge_quantity_source":"marketplace_quantity","recharge_quantity_multiplier":"1"}'
+        ),
+    )
+    mapping.min_margin_percent = Decimal("0.25")
+    mapping.marketplace_commission_percent = Decimal("0.03")
+    db_session.add(mapping)
+    db_session.commit()
+
+    client = FakeMarketplacePriceClient(
+        offer_payload_by_id={
+            "5856532": {
+                "id": 5856532,
+                "name": "Steam RUB",
+                "options": [
+                    {
+                        "label": "Количество",
+                        "variants": [
+                            {"id": 19472011, "text": "100 RUB"},
+                            {"id": 19472012, "text": "200 RUB"},
+                            {"id": 19472013, "text": "5000 RUB"},
+                        ],
+                    }
+                ],
+            }
+        }
+    )
+
+    result = sync_offer_prices(
+        db=db_session,
+        settings=_settings_for_tests(default_currency="USD"),
+        marketplace_clients={"digiseller": client},
+        dry_run=False,
+        refresh_supplier_prices=False,
+    )
+
+    expected_100 = calculate_compounded_price(
+        Decimal("0.0132") * Decimal("100"),
+        markup_percent=Decimal("0.25"),
+        fee_percent=Decimal("0.03"),
+    )
+    expected_200 = calculate_compounded_price(
+        Decimal("0.0132") * Decimal("200"),
+        markup_percent=Decimal("0.25"),
+        fee_percent=Decimal("0.03"),
+    )
+    expected_5000 = calculate_compounded_price(
+        Decimal("0.0132") * Decimal("5000"),
+        markup_percent=Decimal("0.25"),
+        fee_percent=Decimal("0.03"),
+    )
+
+    assert result["prices_updated"] == 1
+    assert offer.price == expected_100
+    assert len(client.calls) == 1
+    offer_id, base_price, currency, variants = client.calls[0]
+    assert offer_id == "5856532"
+    assert currency == "USD"
+    assert Decimal(str(base_price)) == expected_100
+    assert variants == [
+        {"variant_id": 19472011, "rate": 0.0, "type": 2},
+        {
+            "variant_id": 19472012,
+            "rate": float((expected_200 - expected_100).quantize(Decimal("0.01"))),
+            "type": 2,
+        },
+        {
+            "variant_id": 19472013,
+            "rate": float((expected_5000 - expected_100).quantize(Decimal("0.01"))),
+            "type": 2,
+        },
+    ]
+    assert result["details"][0]["runtime_variant_mode"] is True
+    assert result["details"][0]["runtime_variant_count"] == 3
