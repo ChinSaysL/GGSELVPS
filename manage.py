@@ -1624,6 +1624,64 @@ def _auto_match_option_entries_to_products(
     return matches, unmatched, ambiguous
 
 
+def _debug_payload_hint(payload: dict[str, Any], keys: tuple[str, ...]) -> str:
+    parts: list[str] = []
+    for key in keys:
+        value = payload.get(key)
+        if value in {None, ""}:
+            continue
+        text = str(value).strip()
+        if text:
+            parts.append(f"{key}={text}")
+    return ", ".join(parts)
+
+
+def _print_auto_map_diagnostics(
+    products: list[Any],
+    option_entries: list[dict[str, Any]],
+) -> None:
+    print("\nAuto-map diagnostics:")
+    print("Marketplace option signatures:")
+    for entry in option_entries[:20]:
+        option_label = str(entry.get("option_label") or "Option")
+        variant_value = str(entry.get("variant_value") or "")
+        print(f"- {option_label}: {variant_value} -> {_variant_match_key(variant_value) or '(none)'}")
+    if len(option_entries) > 20:
+        print(f"...and {len(option_entries) - 20} more marketplace option values.")
+
+    print("Local G-Engine row signatures:")
+    for product in products[:25]:
+        payload = _raw_payload_dict(product)
+        payload_hint = _debug_payload_hint(
+            payload,
+            (
+                "denomination",
+                "nominal",
+                "value",
+                "face_value",
+                "amount",
+                "sum",
+                "currency",
+                "currency_code",
+                "region",
+                "country",
+                "source_slug",
+                "label",
+                "text",
+                "name",
+            ),
+        )
+        suffix = f" | payload hints: {payload_hint}" if payload_hint else ""
+        print(
+            f"- local {getattr(product, 'id', '?')}: "
+            f"signature={_product_denomination_signature(product) or '(none)'} | "
+            f"denomination={getattr(product, 'denomination', None) or ''} | "
+            f"title={getattr(product, 'title', None) or ''}{suffix}"
+        )
+    if len(products) > 25:
+        print(f"...and {len(products) - 25} more local rows.")
+
+
 def _print_reference_products(products: list[Any], *, limit: int = 50) -> None:
     visible = products[:limit]
     for product in visible:
@@ -1772,6 +1830,25 @@ def _normalize_currency_code(value: str | None) -> str | None:
     return aliases.get(raw, raw)
 
 
+def _normalize_denomination_currency_code(value: str | None) -> str | None:
+    currency = _normalize_currency_code(value)
+    if not value:
+        return currency
+    raw = re.sub(r"[^A-Z]", "", _normalize_text_for_matching(value).upper())
+    aliases = {
+        "TR": "TRY",
+        "TURKEY": "TRY",
+        "TURKIYE": "TRY",
+        "RU": "RUB",
+        "RUSSIA": "RUB",
+        "US": "USD",
+        "USA": "USD",
+        "EU": "EUR",
+        "EURO": "EUR",
+    }
+    return aliases.get(raw, currency)
+
+
 def _normalize_amount_text(value: str) -> str:
     text = _normalize_text_for_matching(value).replace(" ", "")
     text = text.replace(",", ".").strip()
@@ -1791,15 +1868,23 @@ def _extract_standalone_amount(value: object) -> str | None:
 
 
 def _extract_denomination_signature(*texts: str | None) -> str | None:
-    pattern = re.compile(r"(\d(?:[\d\s.,]*\d)?)\s*([^\W\d_]{2,8}|[$€₺₽₱])")
+    amount_first_pattern = re.compile(r"(\d(?:[\d\s.,]*\d)?)\s*([^\W\d_]{2,8}|[$€₺₽₱])")
+    currency_first_pattern = re.compile(r"([^\W\d_]{2,8}|[$€₺₽₱])\s*(\d(?:[\d\s.,]*\d)?)")
     for text in texts:
         if not text:
             continue
         normalized_text = _normalize_text_for_matching(text)
-        for match in pattern.finditer(normalized_text):
+        for match in amount_first_pattern.finditer(normalized_text):
             amount = _normalize_amount_text(match.group(1))
-            currency = _normalize_currency_code(match.group(2))
+            currency = _normalize_denomination_currency_code(match.group(2))
             if amount and currency:
+                return f"{amount} {currency}"
+        for match in currency_first_pattern.finditer(normalized_text):
+            currency = _normalize_denomination_currency_code(match.group(1))
+            if currency not in _CURRENCY_REGION_TOKENS:
+                continue
+            amount = _normalize_amount_text(match.group(2))
+            if amount:
                 return f"{amount} {currency}"
     return None
 
@@ -1807,6 +1892,10 @@ def _extract_denomination_signature(*texts: str | None) -> str | None:
 def _payload_currency_hint(payload: dict[str, Any]) -> str | None:
     for key in ("currency", "currency_code", "curr", "valute"):
         currency = _normalize_currency_code(_payload_first_str(payload, (key,)))
+        if currency in _CURRENCY_REGION_TOKENS:
+            return currency
+    for value in _collect_payload_values(payload, {"currency", "currency_code", "curr", "valute"}):
+        currency = _normalize_currency_code(value)
         if currency in _CURRENCY_REGION_TOKENS:
             return currency
     return None
@@ -1855,6 +1944,10 @@ def _product_standalone_denomination_amount(product: Any) -> str | None:
         payload.get("nominal"),
         payload.get("value"),
         payload.get("face_value"),
+        payload.get("amount"),
+        payload.get("sum"),
+        payload.get("label"),
+        payload.get("text"),
     ]
     for candidate in candidates:
         amount = _extract_standalone_amount(candidate)
@@ -1874,6 +1967,10 @@ def _product_denomination_signature(product: Any) -> str | None:
         str(payload.get("nominal") or ""),
         str(payload.get("value") or ""),
         str(payload.get("face_value") or ""),
+        str(payload.get("amount") or ""),
+        str(payload.get("sum") or ""),
+        str(payload.get("label") or ""),
+        str(payload.get("text") or ""),
         str(payload.get("title") or ""),
         str(payload.get("name") or ""),
     )
@@ -2874,10 +2971,11 @@ def action_manual_link() -> int:
 
     if not targets_by_product_id:
         if option_variant_entries:
+            _print_auto_map_diagnostics(reference_products, option_variant_entries)
             print(
                 "No option values could be auto-mapped. "
-                "Make denomination text match exactly between marketplace and G-Engine "
-                "(for example 250 TRY) and retry."
+                "The diagnostics above show the normalized signatures from both sides; "
+                "make those line up and retry."
             )
             return 1
 

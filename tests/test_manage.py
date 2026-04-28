@@ -307,6 +307,11 @@ def test_extract_denomination_signature_handles_confusable_letters() -> None:
     assert manage._extract_denomination_signature("Playstation 500 \u0422RY") == "500 TRY"
 
 
+def test_extract_denomination_signature_handles_currency_before_amount() -> None:
+    assert manage._extract_denomination_signature("Playstation TRY 500") == "500 TRY"
+    assert manage._extract_denomination_signature("Playstation TR 500") == "500 TRY"
+
+
 def test_auto_match_products_and_snapshots_by_signature() -> None:
     products = [
         SimpleNamespace(
@@ -846,6 +851,19 @@ def test_product_denomination_signature_combines_plain_amount_with_payload_curre
         denomination="250",
         region=None,
         raw_payload_json='{"denomination":250,"currency":"TRY","base_product_id":"5"}',
+    )
+
+    assert manage._product_denomination_signature(product) == "250 TRY"
+
+
+def test_product_denomination_signature_reads_payload_amount_field() -> None:
+    product = SimpleNamespace(
+        id=142,
+        title="Playstation Store Wallet Turkey",
+        category="Gift Card, PlayStation",
+        denomination=None,
+        region=None,
+        raw_payload_json='{"amount":250,"base_product_id":"5"}',
     )
 
     assert manage._product_denomination_signature(product) == "250 TRY"
