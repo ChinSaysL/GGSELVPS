@@ -552,6 +552,14 @@ def _raw_payload_dict(product: Any) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _is_marketplace_quantity_recharge_product(product: Any) -> bool:
+    payload = _raw_payload_dict(product)
+    if payload.get("source_type") != "recharge" and "recharge_product_id" not in payload:
+        return False
+    quantity_source = str(payload.get("recharge_quantity_source") or "").strip().lower()
+    return quantity_source == "marketplace_quantity"
+
+
 def _is_unconfigured_unfixed_recharge_product(product: Any) -> bool:
     payload = _raw_payload_dict(product)
     if payload.get("source_type") != "recharge" and "recharge_product_id" not in payload:
@@ -1107,13 +1115,42 @@ def _suggest_price(
     payment_system_commission_percent: Decimal | None = None,
 ) -> Decimal | None:
     try:
-        from app.pricing import calculate_final_price_usd, convert_usd_to_currency
+        from app.pricing import (
+            calculate_compounded_price,
+            calculate_final_price_usd,
+            convert_usd_to_currency,
+            get_markup_percent,
+        )
         from app.services.fx import resolve_usd_rub_rate
         from app.config import get_settings
     except ImportError:
         return None
 
     settings = get_settings()
+    if _is_marketplace_quantity_recharge_product(product):
+        try:
+            if currency == "USD":
+                base_amount = Decimal(str(product.cost_usd))
+            elif currency == "RUB":
+                usd_rub_rate = resolve_usd_rub_rate(settings)
+                base_amount = Decimal(str(product.cost_usd)) * usd_rub_rate
+            else:
+                return None
+            effective_markup = (
+                markup_percent if markup_percent is not None else get_markup_percent(product.cost_usd)
+            )
+            fee_percent = Decimal(str(settings.platform_fee_percent))
+            if marketplace == "ggsel" and payment_system_commission_percent is not None:
+                fee_percent = payment_system_commission_percent
+            return calculate_compounded_price(
+                base_amount,
+                markup_percent=effective_markup,
+                fee_percent=fee_percent,
+                fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
+            )
+        except Exception:
+            return None
+
     try:
         calculation = calculate_final_price_usd(
             product.cost_usd,
@@ -2832,7 +2869,7 @@ def action_manual_link() -> int:
         )
 
     if existing_mapping and existing_mapping.marketplace_commission_percent is not None:
-        default_marketplace_commission_percent = existing_mapping.marketplace_commission_percent / Decimal("100")
+        default_marketplace_commission_percent = existing_mapping.marketplace_commission_percent * Decimal("100")
         
     marketplace_commission_percent = _ask_optional_percent_as_ratio(
         "Marketplace commission percentage",
@@ -2841,7 +2878,9 @@ def action_manual_link() -> int:
     payment_system_commission_percent: Decimal | None = None
     if marketplace == "ggsel":
         if existing_mapping and existing_mapping.payment_system_commission_percent is not None:
-            default_payment_system_commission_percent = existing_mapping.payment_system_commission_percent / Decimal("100")
+            default_payment_system_commission_percent = (
+                existing_mapping.payment_system_commission_percent * Decimal("100")
+            )
             
         payment_system_commission_percent = _ask_optional_percent_as_ratio(
             "Payment-system commission percentage",

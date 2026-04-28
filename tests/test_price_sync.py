@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import Settings
 from app.db import Base
 from app.models import MarketplaceOffer, ProductMapping, SupplierProduct
-from app.pricing import calculate_final_price_usd, convert_usd_to_currency
+from app.pricing import calculate_compounded_price, calculate_final_price_usd, convert_usd_to_currency
 from app.services.price_sync import sync_offer_prices
 
 
@@ -575,6 +575,98 @@ def test_price_sync_keeps_manual_recharge_cost_when_service_has_no_priced_rows(
     assert result["details"][0]["reason"] == (
         "recharge_service_has_no_priced_rows_using_existing_cost"
     )
+
+
+def test_price_sync_uses_compounded_rub_formula_for_marketplace_quantity_recharge(
+    db_session: Session,
+) -> None:
+    supplier, offer, mapping = _linked_offer(
+        db_session,
+        marketplace="ggsel",
+        offer_price=Decimal("1.72"),
+        offer_currency="RUB",
+        supplier_cost_usd=Decimal("0.0132"),
+        supplier_product_id="recharge:1",
+        raw_payload_json=(
+            '{"id":"recharge:1","source_type":"recharge","recharge_product_id":"1",'
+            '"recharge_quantity_source":"marketplace_quantity","recharge_quantity_multiplier":"1"}'
+        ),
+    )
+    mapping.min_margin_percent = Decimal("0.15")
+    mapping.marketplace_commission_percent = Decimal("0.09")
+    mapping.payment_system_commission_percent = Decimal("0.06")
+    db_session.add(mapping)
+    db_session.commit()
+
+    client = FakeMarketplacePriceClient()
+    settings = _settings_for_tests(default_currency="RUB", manual_usd_rub_rate=75.5273)
+
+    result = sync_offer_prices(
+        db=db_session,
+        settings=settings,
+        marketplace_clients={"ggsel": client},
+        dry_run=False,
+        refresh_supplier_prices=False,
+    )
+
+    expected_rub = calculate_compounded_price(
+        supplier.cost_usd * Decimal("75.5273"),
+        markup_percent=Decimal("0.15"),
+        fee_percent=Decimal("0.06"),
+        fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
+    )
+
+    assert result["prices_updated"] == 1
+    assert offer.price == expected_rub
+    assert client.calls == [("5850465", float(expected_rub), "RUB", None)]
+    assert result["details"][0]["marketplace_commission_percent"] == "0.09"
+    assert result["details"][0]["payment_system_commission_percent"] == "0.06"
+
+
+def test_price_sync_uses_compounded_usd_formula_for_marketplace_quantity_recharge(
+    db_session: Session,
+) -> None:
+    _supplier, offer, mapping = _linked_offer(
+        db_session,
+        marketplace="ggsel",
+        offer_price=Decimal("1.72"),
+        offer_currency="USD",
+        supplier_cost_usd=Decimal("1.00"),
+        supplier_product_id="recharge:1",
+        raw_payload_json=(
+            '{"id":"recharge:1","source_type":"recharge","recharge_product_id":"1",'
+            '"recharge_quantity_source":"marketplace_quantity","recharge_quantity_multiplier":"1"}'
+        ),
+    )
+    mapping.min_margin_percent = Decimal("0.15")
+    mapping.marketplace_commission_percent = Decimal("0.09")
+    mapping.payment_system_commission_percent = Decimal("0.06")
+    db_session.add(mapping)
+    db_session.commit()
+
+    client = FakeMarketplacePriceClient()
+    settings = _settings_for_tests(default_currency="USD")
+
+    result = sync_offer_prices(
+        db=db_session,
+        settings=settings,
+        marketplace_clients={"ggsel": client},
+        dry_run=False,
+        refresh_supplier_prices=False,
+    )
+
+    expected_usd = calculate_compounded_price(
+        Decimal("1.00"),
+        markup_percent=Decimal("0.15"),
+        fee_percent=Decimal("0.06"),
+        fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
+    )
+
+    assert result["prices_updated"] == 1
+    assert offer.price == expected_usd
+    assert client.calls == [("5850465", float(expected_usd), "USD", None)]
+    assert result["details"][0]["marketplace_commission_percent"] == "0.09"
+    assert result["details"][0]["payment_system_commission_percent"] == "0.06"
 
 
 def test_price_sync_updates_digiseller_variant_group_with_single_api_call(

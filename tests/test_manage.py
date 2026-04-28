@@ -789,3 +789,77 @@ def test_auto_match_option_entries_to_products_matches_exact_signatures() -> Non
     assert [item["product"].id for item in matches] == [142, 143]
     assert [item["entry"]["variant_value"] for item in unmatched] == ["750 TRY"]
     assert ambiguous == []
+
+
+def test_suggest_price_for_marketplace_quantity_recharge_uses_compounded_rub_formula(
+    monkeypatch,
+) -> None:
+    from app.config import Settings
+
+    monkeypatch.setattr(
+        "app.services.fx.resolve_usd_rub_rate",
+        lambda _settings: Decimal("75.5273"),
+    )
+    monkeypatch.setattr(
+        "app.config.get_settings",
+        lambda: Settings(
+            _env_file=None,
+            default_currency="RUB",
+            scheduler_enabled=False,
+            platform_fee_percent=0.06,
+            fx_buffer_percent=0.03,
+        ),
+    )
+
+    product = SimpleNamespace(
+        cost_usd=Decimal("0.0132"),
+        raw_payload_json=(
+            '{"source_type":"recharge","recharge_product_id":"1",'
+            '"recharge_quantity_source":"marketplace_quantity"}'
+        ),
+    )
+    suggested_price = manage._suggest_price(
+        product,
+        "RUB",
+        marketplace="ggsel",
+        markup_percent=Decimal("0.15"),
+        marketplace_commission_percent=Decimal("0.09"),
+        payment_system_commission_percent=Decimal("0.06"),
+    )
+
+    assert suggested_price == Decimal("1.25")
+
+
+def test_suggest_price_for_marketplace_quantity_recharge_uses_compounded_usd_formula(
+    monkeypatch,
+) -> None:
+    from app.config import Settings
+
+    monkeypatch.setattr(
+        "app.config.get_settings",
+        lambda: Settings(
+            _env_file=None,
+            default_currency="USD",
+            scheduler_enabled=False,
+            platform_fee_percent=0.06,
+            fx_buffer_percent=0.03,
+        ),
+    )
+
+    product = SimpleNamespace(
+        cost_usd=Decimal("1.00"),
+        raw_payload_json=(
+            '{"source_type":"recharge","recharge_product_id":"1",'
+            '"recharge_quantity_source":"marketplace_quantity"}'
+        ),
+    )
+    suggested_price = manage._suggest_price(
+        product,
+        "USD",
+        marketplace="ggsel",
+        markup_percent=Decimal("0.15"),
+        marketplace_commission_percent=Decimal("0.09"),
+        payment_system_commission_percent=Decimal("0.06"),
+    )
+
+    assert suggested_price == Decimal("1.25")

@@ -6,6 +6,7 @@ import pytest
 
 from app.pricing import (
     PricingConfigError,
+    calculate_compounded_price,
     calculate_final_price_usd,
     convert_usd_to_currency,
     get_markup_percent,
@@ -129,3 +130,13 @@ def test_usd_to_rub_requires_manual_rate() -> None:
 def test_usd_to_rub_conversion_with_manual_rate() -> None:
     rub_price = convert_usd_to_currency(Decimal("10.00"), "RUB", Decimal("95.0"))
     assert rub_price == Decimal("950.00")
+
+
+def test_calculate_compounded_price_uses_compound_multipliers_and_rounds_down() -> None:
+    price = calculate_compounded_price(
+        Decimal("1.00"),
+        markup_percent=Decimal("0.15"),
+        fee_percent=Decimal("0.06"),
+        fx_buffer_percent=Decimal("0.03"),
+    )
+    assert price == Decimal("1.25")

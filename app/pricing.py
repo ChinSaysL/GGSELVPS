@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_UP
+from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP, ROUND_UP
 from typing import Literal
 
 
@@ -147,6 +147,30 @@ def calculate_final_price_usd(
         markup_percent=_quantize_four_dec(effective_markup),
         min_profit_usd=_quantize_money(effective_min_profit),
     )
+
+
+def calculate_compounded_price(
+    base_amount: Decimal | int | float | str,
+    *,
+    markup_percent: Decimal | int | float | str,
+    fee_percent: Decimal | int | float | str,
+    fx_buffer_percent: Decimal | int | float | str = Decimal("0"),
+) -> Decimal:
+    base = _to_decimal(base_amount)
+    markup = _to_decimal(markup_percent)
+    fee = _to_decimal(fee_percent)
+    fx_buffer = _to_decimal(fx_buffer_percent)
+
+    if base <= 0:
+        raise PricingConfigError("base_amount must be greater than 0.")
+    if markup < 0 or fee < 0 or fx_buffer < 0:
+        raise PricingConfigError("markup_percent, fee_percent, and fx_buffer_percent must be >= 0.")
+
+    compounded = base
+    compounded *= Decimal("1") + markup
+    compounded *= Decimal("1") + fee
+    compounded *= Decimal("1") + fx_buffer
+    return compounded.quantize(MONEY_QUANT, rounding=ROUND_DOWN)
 
 
 def convert_usd_to_currency(
