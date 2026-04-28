@@ -548,6 +548,29 @@ def _extract_runtime_quantity_variants_from_offer(
     return sorted(chosen, key=lambda item: (item.quantity, item.variant_id))
 
 
+def _resolve_runtime_quantity_variants(
+    *,
+    client: Any,
+    offer_id: str,
+    offer_payload: dict[str, Any],
+) -> tuple[list[_RuntimeQuantityVariant], str | None]:
+    runtime_variants = _extract_runtime_quantity_variants_from_offer(offer_payload)
+    if runtime_variants:
+        return runtime_variants, None
+    if not hasattr(client, "list_offer_options"):
+        return [], None
+    try:
+        options = cast(Any, client).list_offer_options(offer_id)
+    except Exception as exc:  # noqa: BLE001
+        return [], f"runtime_variant_option_lookup_failed:{exc}"
+    if not isinstance(options, list) or not options:
+        return [], None
+    runtime_variants = _extract_runtime_quantity_variants_from_offer({"options": options})
+    if runtime_variants:
+        return runtime_variants, None
+    return [], None
+
+
 def _is_marketplace_quantity_recharge_mapping(
     mapping: ProductMapping,
     supplier_product: SupplierProduct,
@@ -724,7 +747,14 @@ def sync_offer_prices(
                 _skip_detail(stats, detail, reason="runtime_variant_lookup_empty")
                 continue
 
-            runtime_variants = _extract_runtime_quantity_variants_from_offer(raw_offer)
+            runtime_variants, option_error = _resolve_runtime_quantity_variants(
+                client=client,
+                offer_id=offer.marketplace_offer_id,
+                offer_payload=raw_offer,
+            )
+            if option_error:
+                _error_detail(stats, detail, reason=option_error)
+                continue
             if not runtime_variants:
                 _skip_detail(stats, detail, reason="runtime_quantity_variants_not_found")
                 continue

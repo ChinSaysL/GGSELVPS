@@ -34,6 +34,7 @@ class FakeDigisellerStockClient:
     variant_state_error_ids: set[int] = field(default_factory=set)
     offer_error: Exception | None = None
     offer_payload_by_id: dict[str, dict[str, Any]] = field(default_factory=dict)
+    offer_options_by_id: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
     def set_offer_enabled(self, offer_id: str, enabled: bool) -> dict[str, Any]:
         self.offer_calls.append((offer_id, enabled))
@@ -68,6 +69,9 @@ class FakeDigisellerStockClient:
 
     def get_offer_by_id(self, offer_id: str) -> dict[str, Any] | None:
         return self.offer_payload_by_id.get(str(offer_id))
+
+    def list_offer_options(self, offer_id: str) -> list[dict[str, Any]]:
+        return list(self.offer_options_by_id.get(str(offer_id), []))
 
 
 def _db_session() -> Generator[Session, None, None]:
@@ -806,6 +810,85 @@ def test_stock_sync_controls_digiseller_runtime_quantity_variants(
                 ],
             }
         }
+    )
+    stats = sync_offer_stock(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_balance_client=FakeSupplierBalanceClient({"balance": "50.00"}),
+        marketplace_clients={"digiseller": client},
+    )
+
+    assert stats["errors"] == 0
+    assert client.variant_state_calls == [
+        ("5856532", 19472011, True, True),
+        ("5856532", 19472012, True, False),
+        ("5856532", 19472013, False, False),
+    ]
+    assert client.offer_calls == [("5856532", True)]
+    assert offer.is_enabled is True
+
+
+def test_stock_sync_runtime_quantity_falls_back_to_option_api(
+    db_session: Session,
+) -> None:
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="recharge:1",
+        title="Steam RUB",
+        category="Recharge",
+        denomination="Variable RUB | Marketplace quantity x 1",
+        region=None,
+        cost_usd=Decimal("0.0132"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json=(
+            '{"source_type":"recharge","recharge_product_id":"1",'
+            '"recharge_quantity_source":"marketplace_quantity","recharge_quantity_multiplier":"1"}'
+        ),
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="digiseller",
+        marketplace_offer_id="5856532",
+        supplier_product_id=supplier.id,
+        title="Steam RUB",
+        price=Decimal("0.29"),
+        currency="USD",
+        is_enabled=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+
+    mapping = ProductMapping(
+        supplier_product_id=supplier.id,
+        marketplace_offer_id=offer.id,
+        enabled=True,
+        marketplace_variant_id=None,
+    )
+    db_session.add(mapping)
+    db_session.commit()
+
+    client = FakeDigisellerStockClient(
+        offer_payload_by_id={
+            "5856532": {
+                "id": 5856532,
+                "name": "Steam RUB",
+            }
+        },
+        offer_options_by_id={
+            "5856532": [
+                {
+                    "label": "Количество",
+                    "variants": [
+                        {"id": 19472011, "text": "100 RUB"},
+                        {"id": 19472012, "text": "200 RUB"},
+                        {"id": 19472013, "text": "5000 RUB"},
+                    ],
+                }
+            ]
+        },
     )
     stats = sync_offer_stock(
         db=db_session,

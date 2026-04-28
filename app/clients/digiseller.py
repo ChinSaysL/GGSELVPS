@@ -706,6 +706,16 @@ class DigisellerClient(BaseAPIClient):
             raise APIRequestError("Digiseller option details missing content object.")
         return content
 
+    def list_offer_options(self, offer_id: str) -> list[dict[str, Any]]:
+        token = self._get_access_token()
+        option_ids = self._list_product_option_ids(offer_id, token=token)
+        options: list[dict[str, Any]] = []
+        for option_id in option_ids:
+            option = self._get_product_option(option_id, token=token)
+            if isinstance(option, dict):
+                options.append(option)
+        return options
+
     def _find_variant_payload(
         self,
         *,
