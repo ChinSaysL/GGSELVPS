@@ -3028,7 +3028,11 @@ def action_manual_link() -> int:
         try:
             from app.services.price_sync import run_price_sync
 
-            sync_result = run_price_sync(dry_run=False, refresh_supplier_prices=False)
+            sync_result = run_price_sync(
+                dry_run=False,
+                refresh_supplier_prices=False,
+                force_marketplace_offer_ids={str(marketplace_offer_id).strip()},
+            )
             print("Price sync result:")
             print(
                 f"- prices_updated: {sync_result.get('prices_updated')} | "

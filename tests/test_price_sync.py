@@ -299,6 +299,73 @@ def test_price_sync_uses_mapping_commission_override_for_ggsel(
     assert result["details"][0]["payment_system_commission_percent"] == "0.01"
 
 
+def test_price_sync_skips_when_price_already_matches_recommended(
+    db_session: Session,
+) -> None:
+    expected_price = calculate_compounded_price(
+        Decimal("1.00"),
+        markup_percent=get_markup_percent(Decimal("1.00")),
+        fee_percent=Decimal("0.06"),
+        fx_buffer_percent=Decimal("0.03"),
+    )
+    _supplier, offer, _mapping = _linked_offer(
+        db_session,
+        marketplace="digiseller",
+        offer_price=expected_price,
+        offer_currency="USD",
+        supplier_cost_usd=Decimal("1.00"),
+    )
+    client = FakeMarketplacePriceClient()
+
+    result = sync_offer_prices(
+        db=db_session,
+        settings=_settings_for_tests(default_currency="USD"),
+        marketplace_clients={"digiseller": client},
+        dry_run=False,
+        refresh_supplier_prices=False,
+    )
+
+    assert result["prices_updated"] == 0
+    assert result["skipped"] == 1
+    assert client.calls == []
+    assert offer.price == expected_price
+    assert result["details"][0]["reason"] == "price_unchanged"
+
+
+def test_price_sync_force_pushes_when_price_matches_recommended(
+    db_session: Session,
+) -> None:
+    expected_price = calculate_compounded_price(
+        Decimal("1.00"),
+        markup_percent=get_markup_percent(Decimal("1.00")),
+        fee_percent=Decimal("0.06"),
+        fx_buffer_percent=Decimal("0.03"),
+    )
+    _supplier, offer, _mapping = _linked_offer(
+        db_session,
+        marketplace="digiseller",
+        offer_price=expected_price,
+        offer_currency="USD",
+        supplier_cost_usd=Decimal("1.00"),
+    )
+    client = FakeMarketplacePriceClient()
+
+    result = sync_offer_prices(
+        db=db_session,
+        settings=_settings_for_tests(default_currency="USD"),
+        marketplace_clients={"digiseller": client},
+        dry_run=False,
+        refresh_supplier_prices=False,
+        force_marketplace_offer_ids={"5850465"},
+    )
+
+    assert result["prices_updated"] == 1
+    assert result["skipped"] == 0
+    assert client.calls == [("5850465", float(expected_price), "USD", None)]
+    assert offer.price == expected_price
+    assert result["details"][0]["action"] == "updated"
+
+
 def test_price_sync_skips_when_marketplace_async_task_is_pending(
     db_session: Session,
 ) -> None:

@@ -470,6 +470,7 @@ def sync_offer_prices(
     supplier_client: SupplierRefreshClientProtocol | None = None,
     dry_run: bool = False,
     refresh_supplier_prices: bool = True,
+    force_marketplace_offer_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     stats: dict[str, Any] = {
         "status": "ok",
@@ -484,6 +485,12 @@ def sync_offer_prices(
         "supplier_refresh_skipped": 0,
         "supplier_refresh_errors": 0,
         "details": [],
+    }
+
+    forced_offer_ids = {
+        str(offer_id).strip()
+        for offer_id in (force_marketplace_offer_ids or set())
+        if str(offer_id).strip()
     }
 
     mappings = _load_enabled_mappings(db)
@@ -839,7 +846,12 @@ def sync_offer_prices(
             stats["details"].append(detail)
             continue
 
-        if offer.price == plan.recommended_price and offer.currency.upper() == plan.currency:
+        force_push = str(offer.marketplace_offer_id).strip() in forced_offer_ids
+        if (
+            not force_push
+            and offer.price == plan.recommended_price
+            and offer.currency.upper() == plan.currency
+        ):
             _skip_detail(stats, detail, reason="price_unchanged")
             continue
 
@@ -923,6 +935,7 @@ def run_price_sync(
     *,
     dry_run: bool = False,
     refresh_supplier_prices: bool = True,
+    force_marketplace_offer_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     settings = get_settings()
     sync_run: SyncRun | None = None
@@ -948,6 +961,7 @@ def run_price_sync(
                 supplier_client=supplier_client,
                 dry_run=dry_run,
                 refresh_supplier_prices=refresh_supplier_prices,
+                force_marketplace_offer_ids=force_marketplace_offer_ids,
             )
 
             sync_run.status = "success" if stats["status"] == "ok" else str(stats["status"])
