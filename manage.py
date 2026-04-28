@@ -925,7 +925,7 @@ def _friendly_gengine_import_error(reference: GEngineProductReference, error: Ex
 
 
 def _import_gengine_reference(reference: GEngineProductReference) -> GEngineImportResult:
-    if reference.kind not in {"shop", "recharge", "unknown"}:
+    if reference.kind not in {"shop", "recharge", "gifts", "unknown"}:
         return GEngineImportResult(
             imported_rows=0,
             error_message=(
@@ -2428,7 +2428,7 @@ def _choose_reference_products_interactively() -> tuple[GEngineProductReference,
                 "Slug-only fallback is disabled for recharge/gift links because it can pull in "
                 "unrelated imported rows that merely share the same brand name."
             )
-        if reference.kind in {"shop", "recharge", "unknown"} and _ask_bool(
+        if reference.kind in {"shop", "recharge", "gifts", "unknown"} and _ask_bool(
             "Try importing this G-Engine product ID now?",
             default=True,
         ):
