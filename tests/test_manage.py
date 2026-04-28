@@ -969,7 +969,7 @@ def test_auto_match_option_entries_to_products_combines_plain_amount_with_region
     assert ambiguous == []
 
 
-def test_suggest_price_for_marketplace_quantity_recharge_uses_compounded_rub_formula(
+def test_suggest_price_for_marketplace_quantity_recharge_uses_simple_rub_formula(
     monkeypatch,
 ) -> None:
     from app.config import Settings
@@ -1005,10 +1005,10 @@ def test_suggest_price_for_marketplace_quantity_recharge_uses_compounded_rub_for
         payment_system_commission_percent=Decimal("0.06"),
     )
 
-    assert suggested_price == Decimal("1.25")
+    assert suggested_price == Decimal("1.236")
 
 
-def test_suggest_price_for_marketplace_quantity_recharge_uses_compounded_usd_formula(
+def test_suggest_price_for_marketplace_quantity_recharge_uses_simple_usd_formula(
     monkeypatch,
 ) -> None:
     from app.config import Settings
@@ -1040,10 +1040,10 @@ def test_suggest_price_for_marketplace_quantity_recharge_uses_compounded_usd_for
         payment_system_commission_percent=Decimal("0.06"),
     )
 
-    assert suggested_price == Decimal("1.25")
+    assert suggested_price == Decimal("1.240")
 
 
-def test_suggest_price_for_standard_product_uses_compounded_formula(
+def test_suggest_price_for_standard_product_uses_simple_markup_formula(
     monkeypatch,
 ) -> None:
     from app.config import Settings
@@ -1072,4 +1072,4 @@ def test_suggest_price_for_standard_product_uses_compounded_formula(
         payment_system_commission_percent=None,
     )
 
-    assert suggested_price == Decimal("1.25")
+    assert suggested_price == Decimal("1.150")

@@ -190,8 +190,7 @@ def test_price_preview_calculates_recommended_price_without_marketplace_update(
     expected_price = calculate_compounded_price(
         supplier.cost_usd,
         markup_percent=get_markup_percent(supplier.cost_usd),
-        fee_percent=Decimal("0.06"),
-        fx_buffer_percent=Decimal("0.03"),
+        fee_percent=Decimal("0"),
     )
     assert Decimal(result["details"][0]["recommended_price"]) == expected_price
 
@@ -218,8 +217,7 @@ def test_price_sync_updates_digiseller_rub_price_for_linked_offer(
     expected_rub = calculate_compounded_price(
         supplier.cost_usd * Decimal("100"),
         markup_percent=get_markup_percent(supplier.cost_usd),
-        fee_percent=Decimal(str(settings.platform_fee_percent)),
-        fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
+        fee_percent=Decimal("0"),
     )
 
     assert result["prices_updated"] == 1
@@ -228,7 +226,7 @@ def test_price_sync_updates_digiseller_rub_price_for_linked_offer(
     assert result["details"][0]["action"] == "updated"
 
 
-def test_price_sync_uses_ggsel_payment_system_fee_in_compounded_formula(
+def test_price_sync_uses_zero_default_commission_when_mapping_has_none(
     db_session: Session,
 ) -> None:
     supplier, offer, _mapping = _linked_offer(
@@ -252,8 +250,7 @@ def test_price_sync_uses_ggsel_payment_system_fee_in_compounded_formula(
     expected_listed = calculate_compounded_price(
         supplier.cost_usd,
         markup_percent=get_markup_percent(supplier.cost_usd),
-        fee_percent=Decimal(str(settings.ggsel_default_payment_system_commission_percent)),
-        fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
+        fee_percent=Decimal("0"),
     )
 
     assert result["prices_updated"] == 1
@@ -262,7 +259,7 @@ def test_price_sync_uses_ggsel_payment_system_fee_in_compounded_formula(
     assert Decimal(result["details"][0]["target_net_price"]) == expected_listed
 
 
-def test_price_sync_uses_mapping_commission_override_for_ggsel(
+def test_price_sync_uses_mapping_marketplace_commission_for_ggsel(
     db_session: Session,
 ) -> None:
     supplier, offer, _mapping = _linked_offer(
@@ -288,15 +285,14 @@ def test_price_sync_uses_mapping_commission_override_for_ggsel(
     expected_listed = calculate_compounded_price(
         supplier.cost_usd,
         markup_percent=get_markup_percent(supplier.cost_usd),
-        fee_percent=Decimal("0.01"),
-        fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
+        fee_percent=Decimal("0.02"),
     )
 
     assert result["prices_updated"] == 1
     assert offer.price == expected_listed
     assert client.calls == [("5850465", float(expected_listed), "USD", None)]
     assert result["details"][0]["marketplace_commission_percent"] == "0.02"
-    assert result["details"][0]["payment_system_commission_percent"] == "0.01"
+    assert result["details"][0]["payment_system_commission_percent"] == "0"
 
 
 def test_price_sync_skips_when_price_already_matches_recommended(
@@ -305,8 +301,7 @@ def test_price_sync_skips_when_price_already_matches_recommended(
     expected_price = calculate_compounded_price(
         Decimal("1.00"),
         markup_percent=get_markup_percent(Decimal("1.00")),
-        fee_percent=Decimal("0.06"),
-        fx_buffer_percent=Decimal("0.03"),
+        fee_percent=Decimal("0"),
     )
     _supplier, offer, _mapping = _linked_offer(
         db_session,
@@ -338,8 +333,7 @@ def test_price_sync_force_pushes_when_price_matches_recommended(
     expected_price = calculate_compounded_price(
         Decimal("1.00"),
         markup_percent=get_markup_percent(Decimal("1.00")),
-        fee_percent=Decimal("0.06"),
-        fx_buffer_percent=Decimal("0.03"),
+        fee_percent=Decimal("0"),
     )
     _supplier, offer, _mapping = _linked_offer(
         db_session,
@@ -473,8 +467,7 @@ def test_price_sync_uses_auto_resolved_fx_rate_when_manual_rate_missing(
     expected_rub = calculate_compounded_price(
         supplier.cost_usd * Decimal("95"),
         markup_percent=get_markup_percent(supplier.cost_usd),
-        fee_percent=Decimal(str(settings.platform_fee_percent)),
-        fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
+        fee_percent=Decimal("0"),
     )
 
     assert result["prices_updated"] == 1
@@ -635,7 +628,7 @@ def test_price_sync_keeps_manual_recharge_cost_when_service_has_no_priced_rows(
     )
 
 
-def test_price_sync_uses_compounded_rub_formula_for_marketplace_quantity_recharge(
+def test_price_sync_uses_simple_rub_formula_for_marketplace_quantity_recharge(
     db_session: Session,
 ) -> None:
     supplier, offer, mapping = _linked_offer(
@@ -670,18 +663,17 @@ def test_price_sync_uses_compounded_rub_formula_for_marketplace_quantity_recharg
     expected_rub = calculate_compounded_price(
         supplier.cost_usd * Decimal("75.5273"),
         markup_percent=Decimal("0.15"),
-        fee_percent=Decimal("0.06"),
-        fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
+        fee_percent=Decimal("0.09"),
     )
 
     assert result["prices_updated"] == 1
     assert offer.price == expected_rub
     assert client.calls == [("5850465", float(expected_rub), "RUB", None)]
     assert result["details"][0]["marketplace_commission_percent"] == "0.09"
-    assert result["details"][0]["payment_system_commission_percent"] == "0.06"
+    assert result["details"][0]["payment_system_commission_percent"] == "0"
 
 
-def test_price_sync_uses_compounded_usd_formula_for_marketplace_quantity_recharge(
+def test_price_sync_uses_simple_usd_formula_for_marketplace_quantity_recharge(
     db_session: Session,
 ) -> None:
     _supplier, offer, mapping = _linked_offer(
@@ -716,15 +708,14 @@ def test_price_sync_uses_compounded_usd_formula_for_marketplace_quantity_recharg
     expected_usd = calculate_compounded_price(
         Decimal("1.00"),
         markup_percent=Decimal("0.15"),
-        fee_percent=Decimal("0.06"),
-        fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
+        fee_percent=Decimal("0.09"),
     )
 
     assert result["prices_updated"] == 1
     assert offer.price == expected_usd
     assert client.calls == [("5850465", float(expected_usd), "USD", None)]
     assert result["details"][0]["marketplace_commission_percent"] == "0.09"
-    assert result["details"][0]["payment_system_commission_percent"] == "0.06"
+    assert result["details"][0]["payment_system_commission_percent"] == "0"
 
 
 def test_price_sync_updates_digiseller_variant_group_with_single_api_call(

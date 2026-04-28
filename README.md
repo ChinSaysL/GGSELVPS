@@ -106,7 +106,6 @@ python manage.py manual-link-example
 - showing unmatched/ambiguous option values that were skipped
 - entering/confirming marketplace price and currency (prefilled when fetched)
 - entering marketplace commission percent (manual override per mapping)
-- for GGSEL: entering payment-system commission percent (defaults are configurable in `.env`)
 - auto-detecting required buyer text fields (such as Steam friend code), with optional manual override
 
 `python manage.py auto-link` walks through:
@@ -121,8 +120,11 @@ For marketplace pages with option values like `250 TRY` and `500 TRY`, keep thos
 After `python manage.py manual-link`, run the offered live stock sync prompt if the listing is already public. Price sync only updates prices; stock sync is what hides/disables denominations when G-Engine balance is too low.
 
 `python manage.py price-preview` refreshes linked G-Engine costs when possible and shows the recommended cost-based price. `python manage.py sync-prices` applies those prices to linked marketplaces.
-- Digiseller: compound pricing based on supplier cost and configured percentages, with optional variant price modifiers.
-- GGSEL: uses the same compound pricing model; payment-system commission is used as the fee component in the formula. Multi-denomination GGSEL offers with linked variant IDs are updated in one bulk price call using variant modifiers.
+- Digiseller and GGSEL use the same simplified formula:
+  - `base = supplier_cost` (USD) or `supplier_cost * usd_rub_rate` (RUB)
+  - `price = base + (base * markup_percent) + (base * marketplace_commission_percent)`
+  - resulting price is rounded to 3 decimals
+- Multi-denomination offers with linked variant IDs are updated in one bulk price call using variant modifiers.
 
 For GGSEL live writes, set `GGSEL_API_KEY` to the seller API key/token accepted by GGSEL write endpoints. If you have the long-lived seller API key plus seller ID, also set `GGSEL_SELLER_ID` so the app can call `/api_sellers/api/apilogin` and refresh the short-lived token automatically. A browser/session JWT may work for public item lookup but can still return `401` for price updates.
 
@@ -293,14 +295,10 @@ docker compose logs -f
 
 - No competitor pricing data is used.
 - No competitor scraping is implemented.
-- Price sync uses a compound markup model from supplier cost:
+- Price sync uses a simplified markup model from supplier cost:
   - `base = supplier_cost` (USD) or `supplier_cost * usd_rub_rate` (RUB)
-  - `price = base * (1 + markup) * (1 + fee) * (1 + fx_buffer)`
-  - final listing price is rounded to 2 decimals
-- GGSEL commission defaults are configurable:
-  - `GGSEL_DEFAULT_MARKETPLACE_COMMISSION_PERCENT` (gift-card default `0.09`)
-  - `GGSEL_DEFAULT_PAYMENT_SYSTEM_COMMISSION_PERCENT` (example default `0.029`)
-- In this compound model, GGSEL uses `payment_system_commission` as the fee term.
+  - `price = base + (base * markup_percent) + (base * marketplace_commission_percent)`
+  - final listing price is rounded to 3 decimals
 - No browser automation is used.
 - No automatic marketplace listing creation is implemented.
 - Automatic listing creation is disabled in client code.

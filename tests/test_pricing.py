@@ -132,11 +132,17 @@ def test_usd_to_rub_conversion_with_manual_rate() -> None:
     assert rub_price == Decimal("950.00")
 
 
-def test_calculate_compounded_price_uses_compound_multipliers_and_rounds_down() -> None:
-    price = calculate_compounded_price(
+def test_calculate_compounded_price_uses_markup_plus_commission_percent_of_base() -> None:
+    unit_price = calculate_compounded_price(
         Decimal("1.00"),
         markup_percent=Decimal("0.15"),
         fee_percent=Decimal("0.06"),
         fx_buffer_percent=Decimal("0.03"),
     )
-    assert price == Decimal("1.25")
+    larger_base_price = calculate_compounded_price(
+        Decimal("5.50"),
+        markup_percent=Decimal("0.25"),
+        fee_percent=Decimal("0.03"),
+    )
+    assert unit_price == Decimal("1.210")
+    assert larger_base_price == Decimal("7.040")

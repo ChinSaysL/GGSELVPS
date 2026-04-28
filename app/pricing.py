@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from decimal import Decimal, InvalidOperation, ROUND_DOWN, ROUND_HALF_UP, ROUND_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, ROUND_UP
 from typing import Literal
 
 
 MONEY_QUANT = Decimal("0.01")
 FOUR_DEC_QUANT = Decimal("0.0001")
+THREE_DEC_QUANT = Decimal("0.001")
 
 
 class PricingConfigError(ValueError):
@@ -26,6 +27,10 @@ def _quantize_money(value: Decimal) -> Decimal:
 
 def _quantize_four_dec(value: Decimal) -> Decimal:
     return value.quantize(FOUR_DEC_QUANT, rounding=ROUND_HALF_UP)
+
+
+def _quantize_three_dec(value: Decimal) -> Decimal:
+    return value.quantize(THREE_DEC_QUANT, rounding=ROUND_HALF_UP)
 
 
 def get_markup_percent(supplier_cost_usd: Decimal | int | float | str) -> Decimal:
@@ -159,18 +164,20 @@ def calculate_compounded_price(
     base = _to_decimal(base_amount)
     markup = _to_decimal(markup_percent)
     fee = _to_decimal(fee_percent)
-    fx_buffer = _to_decimal(fx_buffer_percent)
+    _legacy_fx_buffer = _to_decimal(fx_buffer_percent)
 
     if base <= 0:
         raise PricingConfigError("base_amount must be greater than 0.")
-    if markup < 0 or fee < 0 or fx_buffer < 0:
-        raise PricingConfigError("markup_percent, fee_percent, and fx_buffer_percent must be >= 0.")
+    if markup < 0 or fee < 0:
+        raise PricingConfigError("markup_percent and fee_percent must be >= 0.")
+    if _legacy_fx_buffer < 0:
+        raise PricingConfigError("fx_buffer_percent must be >= 0.")
 
-    compounded = base
-    compounded *= Decimal("1") + markup
-    compounded *= Decimal("1") + fee
-    compounded *= Decimal("1") + fx_buffer
-    return compounded.quantize(MONEY_QUANT, rounding=ROUND_DOWN)
+    # Simplified listing formula used by link/sync flows:
+    # listed_price = supplier_cost + (supplier_cost * markup_percent)
+    #              + (supplier_cost * marketplace_commission_percent)
+    listed = base + (base * markup) + (base * fee)
+    return _quantize_three_dec(listed)
 
 
 def convert_usd_to_currency(

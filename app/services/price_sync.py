@@ -16,7 +16,6 @@ from app.models import MarketplaceOffer, ProductMapping, SupplierProduct, SyncRu
 from app.pricing import (
     PricingConfigError,
     calculate_compounded_price,
-    calculate_final_price_usd,
     get_markup_percent,
 )
 from app.services.fx import resolve_usd_rub_rate
@@ -286,40 +285,17 @@ def _calculate_price_plan(
     offer: MarketplaceOffer,
     supplier_product: SupplierProduct,
 ) -> _PricePlan:
-    calculation = calculate_final_price_usd(
-        supplier_product.cost_usd,
-        pricing_mode=settings.pricing_mode,
-        platform_fee_percent=Decimal(str(settings.platform_fee_percent)),
-        fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
-        risk_buffer_percent=Decimal(str(settings.risk_buffer_percent)),
-        markup_percent=mapping.min_margin_percent,
-        min_profit_usd=mapping.min_profit_usd,
-    )
-
     currency = (offer.currency or settings.default_currency).upper()
     usd_rub_rate: Decimal | None = None
     if currency == "RUB":
         usd_rub_rate = resolve_usd_rub_rate(settings)
 
-    marketplace_commission_percent = Decimal("0")
+    marketplace_commission_percent = _to_decimal(mapping.marketplace_commission_percent)
+    if marketplace_commission_percent is None:
+        marketplace_commission_percent = Decimal("0")
     payment_system_commission_percent = Decimal("0")
-    if offer.marketplace.lower() == "ggsel":
-        mapping_marketplace_commission = _to_decimal(mapping.marketplace_commission_percent)
-        mapping_payment_system_commission = _to_decimal(mapping.payment_system_commission_percent)
-        marketplace_commission_percent = (
-            mapping_marketplace_commission
-            if mapping_marketplace_commission is not None
-            else Decimal(str(settings.ggsel_default_marketplace_commission_percent))
-        )
-        payment_system_commission_percent = (
-            mapping_payment_system_commission
-            if mapping_payment_system_commission is not None
-            else Decimal(str(settings.ggsel_default_payment_system_commission_percent))
-        )
-        if marketplace_commission_percent < 0 or payment_system_commission_percent < 0:
-            raise PricingConfigError("GGSEL commission percents must be >= 0.")
-        if marketplace_commission_percent >= Decimal("1") or payment_system_commission_percent >= Decimal("1"):
-            raise PricingConfigError("GGSEL commission percents must be < 1.")
+    if marketplace_commission_percent < 0:
+        raise PricingConfigError("marketplace_commission_percent must be >= 0.")
 
     if currency == "USD":
         base_amount = Decimal(str(supplier_product.cost_usd))
@@ -335,15 +311,11 @@ def _calculate_price_plan(
         if mapping.min_margin_percent is not None
         else get_markup_percent(supplier_product.cost_usd)
     )
-    fee_percent = Decimal(str(settings.platform_fee_percent))
-    if offer.marketplace.lower() == "ggsel":
-        fee_percent = payment_system_commission_percent
 
     target_net_price = calculate_compounded_price(
         base_amount,
         markup_percent=effective_markup,
-        fee_percent=fee_percent,
-        fx_buffer_percent=Decimal(str(settings.fx_buffer_percent)),
+        fee_percent=marketplace_commission_percent,
     )
     recommended_price = target_net_price
 
@@ -351,14 +323,22 @@ def _calculate_price_plan(
     if max_price is not None and recommended_price > max_price:
         raise _PriceSyncSkip("recommended_price_exceeds_mapping_max_price")
 
+    if currency == "USD":
+        final_price_usd = recommended_price
+    else:
+        if usd_rub_rate is None or usd_rub_rate <= 0:
+            raise PricingConfigError("USD/RUB rate is required for RUB price calculation.")
+        final_price_usd = recommended_price / usd_rub_rate
+    profit_usd = final_price_usd - Decimal(str(supplier_product.cost_usd))
+
     return _PricePlan(
         currency=currency,
         recommended_price=recommended_price,
         target_net_price=target_net_price,
-        final_price_usd=calculation.final_price_usd,
-        profit_usd=calculation.profit_usd,
-        markup_percent=calculation.markup_percent,
-        min_profit_usd=calculation.min_profit_usd,
+        final_price_usd=final_price_usd,
+        profit_usd=profit_usd,
+        markup_percent=effective_markup,
+        min_profit_usd=Decimal("0"),
         marketplace_commission_percent=marketplace_commission_percent,
         payment_system_commission_percent=payment_system_commission_percent,
     )
