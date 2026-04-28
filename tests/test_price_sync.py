@@ -118,6 +118,7 @@ def _linked_offer(
     db: Session,
     *,
     marketplace: str = "digiseller",
+    marketplace_offer_id: str = "5850465",
     offer_price: Decimal = Decimal("1.00"),
     offer_currency: str = "USD",
     supplier_cost_usd: Decimal = Decimal("11.00"),
@@ -145,7 +146,7 @@ def _linked_offer(
 
     offer = MarketplaceOffer(
         marketplace=marketplace,
-        marketplace_offer_id="5850465",
+        marketplace_offer_id=marketplace_offer_id,
         supplier_product_id=supplier.id,
         title="Playstation Store Wallet Turkey - 500 TRY",
         price=offer_price,
@@ -358,6 +359,56 @@ def test_price_sync_force_pushes_when_price_matches_recommended(
     assert client.calls == [("5850465", float(expected_price), "USD", None)]
     assert offer.price == expected_price
     assert result["details"][0]["action"] == "updated"
+
+
+def test_price_sync_forced_offer_ids_filters_out_other_marketplaces(
+    db_session: Session,
+) -> None:
+    _supplier_a, offer_a, _mapping_a = _linked_offer(
+        db_session,
+        marketplace="digiseller",
+        marketplace_offer_id="5850465",
+        offer_price=Decimal("1.00"),
+        offer_currency="USD",
+        supplier_cost_usd=Decimal("11.00"),
+        supplier_product_id="500",
+    )
+    _supplier_b, offer_b, _mapping_b = _linked_offer(
+        db_session,
+        marketplace="ggsel",
+        marketplace_offer_id="102251279",
+        offer_price=Decimal("1.00"),
+        offer_currency="USD",
+        supplier_cost_usd=Decimal("11.00"),
+        supplier_product_id="501",
+    )
+    digiseller_client = FakeMarketplacePriceClient()
+    ggsel_client = FakeMarketplacePriceClient(error=RuntimeError("should not be called"))
+
+    result = sync_offer_prices(
+        db=db_session,
+        settings=_settings_for_tests(default_currency="USD"),
+        marketplace_clients={
+            "digiseller": digiseller_client,
+            "ggsel": ggsel_client,
+        },
+        dry_run=False,
+        refresh_supplier_prices=False,
+        force_marketplace_offer_ids={"5850465"},
+    )
+
+    expected_price = calculate_compounded_price(
+        Decimal("11.00"),
+        markup_percent=get_markup_percent(Decimal("11.00")),
+        fee_percent=Decimal("0"),
+    )
+    assert result["offers_checked"] == 1
+    assert result["prices_updated"] == 1
+    assert result["errors"] == 0
+    assert digiseller_client.calls == [("5850465", float(expected_price), "USD", None)]
+    assert offer_a.price == expected_price
+    assert ggsel_client.calls == []
+    assert offer_b.price == Decimal("1.00")
 
 
 def test_price_sync_skips_when_marketplace_async_task_is_pending(

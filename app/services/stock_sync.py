@@ -123,6 +123,23 @@ def _group_mappings_by_offer(mappings: list[ProductMapping]) -> dict[int, list[P
     return grouped
 
 
+def _filter_mappings_by_marketplace_offer_ids(
+    mappings: list[ProductMapping],
+    offer_ids: set[str],
+) -> list[ProductMapping]:
+    if not offer_ids:
+        return mappings
+    filtered: list[ProductMapping] = []
+    for mapping in mappings:
+        offer = mapping.marketplace_offer
+        if offer is None:
+            continue
+        offer_id = str(offer.marketplace_offer_id or "").strip()
+        if offer_id in offer_ids:
+            filtered.append(mapping)
+    return filtered
+
+
 def _base_detail(
     *,
     mapping: ProductMapping,
@@ -250,6 +267,7 @@ def sync_offer_stock(
     settings: Settings,
     supplier_balance_client: SupplierBalanceClientProtocol,
     marketplace_clients: dict[str, MarketplaceStockClientProtocol],
+    force_marketplace_offer_ids: set[str] | None = None,
 ) -> dict[str, Any]:
     balance_payload = supplier_balance_client.get_balance()
     balance_usd = _extract_balance_usd(balance_payload)
@@ -275,7 +293,13 @@ def sync_offer_stock(
         "details": [],
     }
 
+    forced_offer_ids = {
+        str(offer_id).strip()
+        for offer_id in (force_marketplace_offer_ids or set())
+        if str(offer_id).strip()
+    }
     mappings = _load_mappings(db)
+    mappings = _filter_mappings_by_marketplace_offer_ids(mappings, forced_offer_ids)
     stats["offers_checked"] = len(mappings)
     if not mappings:
         return stats
@@ -630,7 +654,10 @@ def _build_marketplace_clients(settings: Settings) -> dict[str, MarketplaceStock
     return clients
 
 
-def run_stock_sync() -> dict[str, Any]:
+def run_stock_sync(
+    *,
+    force_marketplace_offer_ids: set[str] | None = None,
+) -> dict[str, Any]:
     settings = get_settings()
     sync_run: SyncRun | None = None
 
@@ -667,6 +694,7 @@ def run_stock_sync() -> dict[str, Any]:
                 settings=settings,
                 supplier_balance_client=supplier_client,
                 marketplace_clients=marketplace_clients,
+                force_marketplace_offer_ids=force_marketplace_offer_ids,
             )
 
             sync_run.status = "success" if stats["status"] == "ok" else str(stats["status"])

@@ -414,6 +414,23 @@ def _group_mappings_by_offer(mappings: list[ProductMapping]) -> dict[int, list[P
     return grouped
 
 
+def _filter_mappings_by_marketplace_offer_ids(
+    mappings: list[ProductMapping],
+    offer_ids: set[str],
+) -> list[ProductMapping]:
+    if not offer_ids:
+        return mappings
+    filtered: list[ProductMapping] = []
+    for mapping in mappings:
+        offer = mapping.marketplace_offer
+        if offer is None:
+            continue
+        offer_id = str(offer.marketplace_offer_id or "").strip()
+        if offer_id in offer_ids:
+            filtered.append(mapping)
+    return filtered
+
+
 def _marketplace_variant_payload(
     plans: list[tuple[ProductMapping, MarketplaceOffer, _PricePlan]],
 ) -> tuple[Decimal, list[dict[str, Any]]]:
@@ -487,6 +504,7 @@ def sync_offer_prices(
         db.expire_all()
         mappings = _load_enabled_mappings(db)
 
+    mappings = _filter_mappings_by_marketplace_offer_ids(mappings, forced_offer_ids)
     stats["offers_checked"] = len(mappings)
     now = datetime.now(timezone.utc)
     mappings_by_offer = _group_mappings_by_offer(mappings)

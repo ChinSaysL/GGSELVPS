@@ -227,6 +227,90 @@ def test_stock_sync_disables_single_offer_when_unfulfillable(db_session: Session
     assert offer.is_enabled is False
 
 
+def test_stock_sync_forced_offer_ids_filters_out_other_marketplaces(db_session: Session) -> None:
+    supplier_a = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="5",
+        title="Playstation Store Wallet Turkey",
+        category="Gift Card, PlayStation",
+        denomination="250 TRY",
+        region=None,
+        cost_usd=Decimal("5.50"),
+        supplier_stock="10",
+        is_available=True,
+        raw_payload_json="{}",
+    )
+    supplier_b = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="6",
+        title="Playstation Store Wallet Turkey",
+        category="Gift Card, PlayStation",
+        denomination="500 TRY",
+        region=None,
+        cost_usd=Decimal("11.00"),
+        supplier_stock="10",
+        is_available=True,
+        raw_payload_json="{}",
+    )
+    db_session.add_all([supplier_a, supplier_b])
+    db_session.flush()
+
+    offer_a = MarketplaceOffer(
+        marketplace="digiseller",
+        marketplace_offer_id="5850465",
+        supplier_product_id=supplier_a.id,
+        title="Playstation testing",
+        price=Decimal("7.00"),
+        currency="USD",
+        is_enabled=False,
+    )
+    offer_b = MarketplaceOffer(
+        marketplace="ggsel",
+        marketplace_offer_id="102251279",
+        supplier_product_id=supplier_b.id,
+        title="Playstation other",
+        price=Decimal("14.00"),
+        currency="USD",
+        is_enabled=False,
+    )
+    db_session.add_all([offer_a, offer_b])
+    db_session.flush()
+
+    db_session.add_all(
+        [
+            ProductMapping(
+                supplier_product_id=supplier_a.id,
+                marketplace_offer_id=offer_a.id,
+                enabled=True,
+            ),
+            ProductMapping(
+                supplier_product_id=supplier_b.id,
+                marketplace_offer_id=offer_b.id,
+                enabled=True,
+            ),
+        ]
+    )
+    db_session.commit()
+
+    digiseller_client = FakeDigisellerStockClient()
+    ggsel_client = FakeDigisellerStockClient(offer_error=RuntimeError("should not be called"))
+    stats = sync_offer_stock(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_balance_client=FakeSupplierBalanceClient({"balance": "200.00"}),
+        marketplace_clients={
+            "digiseller": digiseller_client,
+            "ggsel": ggsel_client,
+        },
+        force_marketplace_offer_ids={"5850465"},
+    )
+
+    assert stats["offers_checked"] == 1
+    assert stats["errors"] == 0
+    assert digiseller_client.offer_calls == [("5850465", True)]
+    assert ggsel_client.offer_calls == []
+
+
 def test_stock_sync_disables_digiseller_variant_parent_when_no_variant_is_fulfillable(
     db_session: Session,
 ) -> None:

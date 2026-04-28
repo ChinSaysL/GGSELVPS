@@ -3339,7 +3339,9 @@ def action_manual_link() -> int:
             try:
                 from app.services.stock_sync import run_stock_sync
 
-                stock_result = run_stock_sync()
+                stock_result = run_stock_sync(
+                    force_marketplace_offer_ids={str(marketplace_offer_id).strip()},
+                )
                 print("Stock sync result:")
                 _print_stock_sync_result(stock_result)
             except Exception as exc:  # noqa: BLE001 - keep manual link successful even if sync fails.
