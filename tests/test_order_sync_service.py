@@ -224,8 +224,17 @@ def test_ggsel_paid_order_buys_from_gengine_and_delivers_once(db_session: Sessio
             "product_payload": {},
         }
     ]
-    assert len(marketplace_client.messages) == 1
-    assert "ABCD-EFGH-1234" in marketplace_client.messages[0][1]
+    assert len(marketplace_client.messages) == 2
+    purchase_message = marketplace_client.messages[0][1]
+    delivery_message = marketplace_client.messages[1][1]
+    assert "Thank you for your purchase!" in purchase_message
+    assert "Спасибо за вашу покупку!" in purchase_message
+    assert "Product: Steam top up - 250 TRY" in purchase_message
+    assert "Your gift card has been delivered." in delivery_message
+    assert "Ваша подарочная карта доставлена." in delivery_message
+    assert "Product: Steam top up - 250 TRY" in delivery_message
+    assert "Товар: Steam top up - 250 TRY" in delivery_message
+    assert "ABCD-EFGH-1234" in delivery_message
 
 
 def test_ggsel_paid_recharge_order_delivers_after_shipped_without_code(
@@ -312,8 +321,93 @@ def test_ggsel_paid_recharge_order_delivers_after_shipped_without_code(
             },
         }
     ]
-    assert len(marketplace_client.messages) == 1
-    assert "has been fulfilled" in marketplace_client.messages[0][1]
+    assert len(marketplace_client.messages) == 2
+    purchase_message = marketplace_client.messages[0][1]
+    delivery_message = marketplace_client.messages[1][1]
+    assert "will be delivered shortly" in purchase_message
+    assert "будет доставлен в ближайшее время" in purchase_message
+    assert "Product: Steam Wallet RUB 1000" in purchase_message
+    assert "Your product has been delivered successfully." in delivery_message
+    assert "Ваш товар был успешно доставлен." in delivery_message
+    assert "Product: Steam Wallet RUB 1000" in delivery_message
+    assert "Товар: Steam Wallet RUB 1000" in delivery_message
+
+
+def test_ggsel_steam_game_gift_delivery_instructs_friend_request(
+    db_session: Session,
+) -> None:
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="900",
+        title="Helldivers 2 Steam Gift",
+        category="Games, Steam",
+        denomination="Steam Gift",
+        region=None,
+        cost_usd=Decimal("20.00"),
+        supplier_stock="10",
+        is_available=True,
+        raw_payload_json="{}",
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="ggsel",
+        marketplace_offer_id="102299999",
+        supplier_product_id=supplier.id,
+        title="Helldivers 2 Steam",
+        price=Decimal("25.00"),
+        currency="USD",
+        is_enabled=True,
+        requires_buyer_input=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+    db_session.add(
+        ProductMapping(
+            supplier_product_id=supplier.id,
+            marketplace_offer_id=offer.id,
+            enabled=True,
+        )
+    )
+    db_session.commit()
+
+    sale = {
+        "invoice_id": "9004",
+        "id_goods": "102299999",
+        "date_pay": "2026-04-27 10:00:00",
+        "amount": "25.00",
+        "options": [
+            {"name": "Steam friend code", "user_data": "123456789", "user_data_id": None}
+        ],
+    }
+    supplier_client = FakeSupplierOrderClient(
+        create_response={"order_id": "ge-gift-1", "status": "completed"}
+    )
+    marketplace_client = FakeMarketplaceOrderClient(sales=[sale], order_payloads={"9004": sale})
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"ggsel": marketplace_client},
+    )
+
+    order = db_session.execute(select(Order)).scalars().one()
+    assert stats["orders_delivered"] == 1
+    assert order.status == "delivered"
+    assert order.delivered_code_encrypted_or_masked == "fulfilled_without_code"
+    assert len(marketplace_client.messages) == 2
+    purchase_message = marketplace_client.messages[0][1]
+    delivery_message = marketplace_client.messages[1][1]
+    assert "Please wait while we prepare the delivery." in purchase_message
+    assert "пока мы подготовим доставку" in purchase_message
+    assert "Your game is ready to be delivered!" in delivery_message
+    assert "Ваша игра готова к отправке!" in delivery_message
+    assert "accept the friend request from our Steam account" in delivery_message
+    assert "примите запрос в друзья от нашего аккаунта Steam" in delivery_message
+    assert "Product: Helldivers 2 Steam" in delivery_message
+    assert "Товар: Helldivers 2 Steam" in delivery_message
 
 
 def test_ggsel_quantity_based_recharge_order_scales_cost_and_supplier_quantity(
@@ -434,4 +528,8 @@ def test_digiseller_order_waits_for_unique_code_then_delivers(db_session: Sessio
     assert delivered_order.status == "delivered"
     assert len(supplier_client.create_calls) == 1
     assert marketplace_client.delivered_unique_codes == ["UNIQUE-CODE-0001"]
-    assert len(marketplace_client.messages) == 1
+    assert len(marketplace_client.messages) == 2
+    assert "Thank you for your purchase!" in marketplace_client.messages[0][1]
+    assert "Спасибо за вашу покупку!" in marketplace_client.messages[0][1]
+    assert "ABCD-EFGH-1234" in marketplace_client.messages[1][1]
+    assert "Ваша подарочная карта доставлена." in marketplace_client.messages[1][1]

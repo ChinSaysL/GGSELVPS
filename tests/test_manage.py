@@ -302,6 +302,11 @@ def test_extract_denomination_signature_normalizes_tl_to_try() -> None:
     assert manage._extract_denomination_signature("Playstation 500 TL") == "500 TRY"
 
 
+def test_extract_denomination_signature_handles_confusable_letters() -> None:
+    # First letter is Cyrillic "Т" (U+0422), not Latin "T".
+    assert manage._extract_denomination_signature("Playstation 500 \u0422RY") == "500 TRY"
+
+
 def test_auto_match_products_and_snapshots_by_signature() -> None:
     products = [
         SimpleNamespace(
@@ -803,6 +808,33 @@ def test_auto_match_option_entries_to_products_matches_exact_signatures() -> Non
 
     assert [item["product"].id for item in matches] == [142, 143]
     assert [item["entry"]["variant_value"] for item in unmatched] == ["750 TRY"]
+    assert ambiguous == []
+
+
+def test_auto_match_option_entries_to_products_matches_hidden_spaces_and_confusables() -> None:
+    products = [
+        SimpleNamespace(
+            id=142,
+            title="Playstation Store Wallet Turkey",
+            category="Gift Card, PlayStation",
+            denomination="250 \u0422RY",
+        ),
+        SimpleNamespace(
+            id=143,
+            title="Playstation Store Wallet Turkey",
+            category="Gift Card, PlayStation",
+            denomination="1\u202f000 TRY",
+        ),
+    ]
+    entries = [
+        {"option_label": "Gift Card Amount", "variant_value": "250 TRY"},
+        {"option_label": "Gift Card Amount", "variant_value": "1000 TRY"},
+    ]
+
+    matches, unmatched, ambiguous = manage._auto_match_option_entries_to_products(products, entries)
+
+    assert [item["product"].id for item in matches] == [142, 143]
+    assert unmatched == []
     assert ambiguous == []
 
 

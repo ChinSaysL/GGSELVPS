@@ -15,7 +15,13 @@ from app.clients import DigisellerClient, GEngineClient, GGSELClient
 from app.config import Settings, get_settings
 from app.db import SessionLocal
 from app.models import MarketplaceOffer, Order, ProductMapping, SyncRun
-from app.services.delivery import build_delivery_message, masked_code_for_logs
+from app.services.delivery import (
+    DeliveryProductKind,
+    build_delivery_message,
+    build_purchase_message,
+    detect_delivery_product_kind,
+    masked_code_for_logs,
+)
 from app.utils.logging import get_logger, log_event
 
 logger = get_logger(__name__)
@@ -516,6 +522,54 @@ def _supplier_raw_payload(supplier: Any) -> dict[str, Any]:
     return payload if isinstance(payload, dict) else {}
 
 
+def _delivery_product_title(
+    offer: MarketplaceOffer,
+    mapping: ProductMapping,
+    sale: NormalizedMarketplaceSale,
+) -> str:
+    supplier = mapping.supplier_product
+    title = str(offer.title or supplier.title or "your product").strip()
+    variant = str(sale.variant_text or mapping.marketplace_variant_name or "").strip()
+    if variant and _normalized_text(variant) not in _normalized_text(title):
+        return f"{title} - {variant}"
+    return title
+
+
+def _delivery_message_context(
+    offer: MarketplaceOffer,
+    mapping: ProductMapping,
+    sale: NormalizedMarketplaceSale,
+) -> tuple[str, DeliveryProductKind]:
+    supplier = mapping.supplier_product
+    product_title = _delivery_product_title(offer, mapping, sale)
+    kind = detect_delivery_product_kind(
+        supplier_product_id=supplier.supplier_product_id,
+        product_title=f"{product_title} {supplier.title}",
+        product_category=supplier.category,
+        product_payload=_supplier_raw_payload(supplier),
+    )
+    return product_title, kind
+
+
+def _send_purchase_acknowledgement(
+    *,
+    order: Order,
+    sale: NormalizedMarketplaceSale,
+    marketplace_client: MarketplaceOrderClientProtocol,
+    product_title: str,
+    product_kind: DeliveryProductKind,
+    stats: dict[str, Any],
+) -> None:
+    buyer_id = sale.buyer_id or order.buyer_id or ""
+    message = build_purchase_message(product_title=product_title, product_kind=product_kind)
+    try:
+        marketplace_client.send_buyer_message(order.marketplace_order_id, buyer_id, message)
+    except Exception as exc:  # noqa: BLE001 - acknowledgement must not block fulfillment.
+        stats["details"].append(
+            {"action": "purchase_message_failed", "order_id": order.id, "reason": str(exc)}
+        )
+
+
 def _create_supplier_purchase(
     *,
     order: Order,
@@ -592,11 +646,17 @@ def _deliver_to_marketplace(
     *,
     order: Order,
     offer: MarketplaceOffer,
+    mapping: ProductMapping,
     sale: NormalizedMarketplaceSale,
     marketplace_client: MarketplaceOrderClientProtocol,
     codes: list[str],
 ) -> None:
-    message = build_delivery_message(codes, product_title=offer.title)
+    product_title, product_kind = _delivery_message_context(offer, mapping, sale)
+    message = build_delivery_message(
+        codes,
+        product_title=product_title,
+        product_kind=product_kind,
+    )
     buyer_id = sale.buyer_id or order.buyer_id or ""
 
     if sale.marketplace == "digiseller":
@@ -715,6 +775,15 @@ def _process_normalized_sale(
         db.add(order)
         db.commit()
         stats["supplier_orders_created"] += 1
+        product_title, product_kind = _delivery_message_context(offer, mapping, sale)
+        _send_purchase_acknowledgement(
+            order=order,
+            sale=sale,
+            marketplace_client=marketplace_client,
+            product_title=product_title,
+            product_kind=product_kind,
+            stats=stats,
+        )
 
     try:
         _payload, codes, fulfilled = _load_supplier_delivery_payload(
@@ -736,6 +805,7 @@ def _process_normalized_sale(
         _deliver_to_marketplace(
             order=order,
             offer=offer,
+            mapping=mapping,
             sale=sale,
             marketplace_client=marketplace_client,
             codes=codes,

@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import sys
+import unicodedata
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -60,6 +61,38 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
 VALID_MARKETPLACES = ("digiseller", "ggsel")
 VALID_CURRENCIES = ("RUB", "USD")
 GENGINE_LINK_KINDS = ("shop", "recharge", "gifts")
+
+
+_CONFUSABLE_LATIN_TRANSLATION = str.maketrans(
+    {
+        # Cyrillic uppercase lookalikes.
+        "А": "A",
+        "В": "B",
+        "Е": "E",
+        "К": "K",
+        "М": "M",
+        "Н": "H",
+        "О": "O",
+        "Р": "P",
+        "С": "C",
+        "Т": "T",
+        "У": "Y",
+        "Х": "X",
+        # Cyrillic lowercase lookalikes.
+        "а": "a",
+        "в": "b",
+        "е": "e",
+        "к": "k",
+        "м": "m",
+        "н": "h",
+        "о": "o",
+        "р": "p",
+        "с": "c",
+        "т": "t",
+        "у": "y",
+        "х": "x",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -483,8 +516,15 @@ def _product_search_blob(product: Any) -> str:
     return _normalize_search_text(" ".join("" if part is None else str(part) for part in parts))
 
 
+def _normalize_text_for_matching(value: object) -> str:
+    normalized = unicodedata.normalize("NFKC", str(value))
+    normalized = normalized.translate(_CONFUSABLE_LATIN_TRANSLATION)
+    return re.sub(r"\s+", " ", normalized).strip()
+
+
 def _normalize_search_text(value: object) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", str(value).lower()).strip()
+    normalized = _normalize_text_for_matching(value).lower()
+    return re.sub(r"[^a-z0-9]+", " ", normalized).strip()
 
 
 def _title_from_slug(slug: str | None) -> str | None:
@@ -1709,7 +1749,19 @@ def _print_linked_rows_for_offer(marketplace: str, marketplace_offer_id: str) ->
 def _normalize_currency_code(value: str | None) -> str | None:
     if not value:
         return None
-    raw = re.sub(r"[^A-Z]", "", value.upper())
+    normalized = _normalize_text_for_matching(value).upper()
+    symbol_aliases = {
+        "₺": "TRY",
+        "₽": "RUB",
+        "€": "EUR",
+        "$": "USD",
+        "₱": "PHP",
+    }
+    for symbol, code in symbol_aliases.items():
+        if symbol in normalized:
+            return code
+
+    raw = re.sub(r"[^A-Z]", "", normalized)
     if not raw:
         return None
     aliases = {
@@ -1721,18 +1773,20 @@ def _normalize_currency_code(value: str | None) -> str | None:
 
 
 def _normalize_amount_text(value: str) -> str:
-    text = value.replace(",", ".").strip()
+    text = _normalize_text_for_matching(value).replace(" ", "")
+    text = text.replace(",", ".").strip()
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return text
 
 
 def _extract_denomination_signature(*texts: str | None) -> str | None:
-    pattern = re.compile(r"(\d+(?:[.,]\d+)?)\s*([A-Za-z]{2,5})")
+    pattern = re.compile(r"(\d(?:[\d\s.,]*\d)?)\s*([^\W\d_]{2,8}|[$€₺₽₱])")
     for text in texts:
         if not text:
             continue
-        for match in pattern.finditer(text):
+        normalized_text = _normalize_text_for_matching(text)
+        for match in pattern.finditer(normalized_text):
             amount = _normalize_amount_text(match.group(1))
             currency = _normalize_currency_code(match.group(2))
             if amount and currency:
