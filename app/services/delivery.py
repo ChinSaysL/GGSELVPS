@@ -89,6 +89,15 @@ def build_purchase_message(
     )
 
 
+def build_unique_code_request_message() -> str:
+    return (
+        "EN: Thank you for your purchase! To complete delivery, please paste your unique code "
+        "(shown on your purchase page) in this chat.\n\n"
+        "RU: Спасибо за вашу покупку! Для завершения доставки, пожалуйста, вставьте ваш уникальный код "
+        "(указан на странице вашей покупки) в этот чат."
+    )
+
+
 def build_provider_unavailable_message(
     *,
     product_title: str | None = None,

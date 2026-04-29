@@ -21,6 +21,7 @@ from app.services.delivery import (
     build_delivery_message,
     build_provider_unavailable_message,
     build_purchase_message,
+    build_unique_code_request_message,
     detect_delivery_product_kind,
     masked_code_for_logs,
 )
@@ -1037,6 +1038,7 @@ def _process_normalized_sale(
         )
         return
 
+    prev_error_message = order.error_message
     verified_sale, verification_error = _preverify_digiseller_unique_code(
         sale=sale,
         marketplace_client=marketplace_client,
@@ -1046,6 +1048,25 @@ def _process_normalized_sale(
         order.error_message = verification_error
         db.add(order)
         db.commit()
+        if (
+            verification_error == "awaiting_digiseller_unique_code"
+            and not str(prev_error_message or "").startswith("awaiting_digiseller_unique_code")
+        ):
+            buyer_id = sale.buyer_id or order.buyer_id or ""
+            try:
+                marketplace_client.send_buyer_message(
+                    order.marketplace_order_id,
+                    buyer_id,
+                    build_unique_code_request_message(),
+                )
+            except Exception as exc:  # noqa: BLE001 - prompt must not block the pending state.
+                stats["details"].append(
+                    {
+                        "action": "unique_code_prompt_failed",
+                        "order_id": order.id,
+                        "reason": str(exc),
+                    }
+                )
         stats["skipped"] += 1
         stats["details"].append(
             {
