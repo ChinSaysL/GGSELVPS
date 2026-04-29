@@ -526,20 +526,18 @@ class GGSELClient(BaseAPIClient):
 
     @classmethod
     def _normalize_price_update_variant(cls, variant: dict[str, Any]) -> dict[str, Any]:
+        # GGSEL schema uses `value` for variant ID, `modify_type` (string) and
+        # `modify_value` (string) for the price modifier — inserting extra keys
+        # like `variant_id`, `type`, or `rate` causes an HTTP 500 error!
         variant_id = cls._extract_variant_id(variant)
         type_value = variant.get("type", 2)
         rate = variant.get("rate", 0)
         out: dict[str, Any] = {
-            "type": type_value,
-            "rate": rate,
-            "modify": variant.get("modify", 1),
             "modify_type": cls._variant_type_name(type_value),
             "modify_value": str(rate),
         }
         if variant_id is not None:
-            variant_value = int(variant_id)
-            out["variant_id"] = variant_value
-            out["value"] = variant_value
+            out["value"] = int(variant_id)
         return out
 
     @classmethod

@@ -1985,11 +1985,7 @@ def test_ggsel_set_offer_price_supports_variants_payload() -> None:
             "price": 7.15,
             "variants": [
                 {
-                    "variant_id": 19472020,
                     "value": 19472020,
-                    "type": 2,
-                    "rate": 6.6,
-                    "modify": 1,
                     "modify_type": "priceplus",
                     "modify_value": "6.6",
                 }
@@ -2046,11 +2042,7 @@ def test_ggsel_set_offer_price_uses_apilogin_token_when_seller_id_is_configured(
             "price": 610.55,
             "variants": [
                 {
-                    "variant_id": 18944509,
                     "value": 18944509,
-                    "type": 2,
-                    "rate": 0.0,
-                    "modify": 1,
                     "modify_type": "priceplus",
                     "modify_value": "0.0",
                 }
