@@ -1698,6 +1698,10 @@ def _gift_region_match_key(value: object) -> str | None:
     if not normalized:
         return None
     compact = normalized.replace(" ", "")
+    if compact in {"rucis", "rucountries", "rucountry"}:
+        return "cis"
+    if "cis" in normalized.split():
+        return "cis"
     if re.fullmatch(r"[a-z]{2,5}", compact):
         return compact
     return None
