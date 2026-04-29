@@ -72,7 +72,7 @@ def test_gengine_create_order_includes_buyer_inputs_for_direct_fulfillment() -> 
     )
     client.close()
 
-    assert response == {"order_id": "ge-1"}
+    assert response == {"order_id": "ge-1", "supplier_order_id": "ge-1"}
     assert captured["body"] == {
         "items": [
             {
@@ -84,6 +84,99 @@ def test_gengine_create_order_includes_buyer_inputs_for_direct_fulfillment() -> 
         ],
         "external_id": "ggsel:9001",
     }
+
+
+def test_gengine_create_shop_order_pays_pending_order() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8") or "{}") if request.content else None
+        captured.append({"method": request.method, "path": request.url.path, "body": body})
+        if request.url.path.endswith("/shop/orders"):
+            return httpx.Response(
+                status_code=200,
+                json={"success": True, "data": {"id": 7473, "status": "pending"}},
+            )
+        if request.url.path.endswith("/shop/orders/7473/pay"):
+            return httpx.Response(
+                status_code=200,
+                json={"success": True, "data": {"id": 7473, "status": "paid"}},
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    response = client.create_order(product_id="123", quantity=1)
+    client.close()
+
+    assert response == {
+        "success": True,
+        "data": {"id": 7473, "status": "paid"},
+        "supplier_order_id": "7473",
+    }
+    assert captured == [
+        {"method": "POST", "path": "/v2.1/shop/orders", "body": {"items": [{"id": 123, "quantity": 1}]}},
+        {"method": "POST", "path": "/v2.1/shop/orders/7473/pay", "body": None},
+    ]
+
+
+def test_gengine_shop_status_pays_existing_pending_order() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append({"method": request.method, "path": request.url.path})
+        if request.url.path.endswith("/shop/orders/7473") and request.method == "GET":
+            return httpx.Response(
+                status_code=200,
+                json={"success": True, "data": {"id": 7473, "status": "pending"}},
+            )
+        if request.url.path.endswith("/shop/orders/7473/pay"):
+            return httpx.Response(
+                status_code=200,
+                json={"success": True, "data": {"id": 7473, "status": "paid"}},
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    response = client.get_order_status("7473")
+    client.close()
+
+    assert response == {
+        "success": True,
+        "data": {"id": 7473, "status": "paid"},
+        "supplier_order_id": "7473",
+    }
+    assert captured == [
+        {"method": "GET", "path": "/v2.1/shop/orders/7473"},
+        {"method": "POST", "path": "/v2.1/shop/orders/7473/pay"},
+    ]
+
+
+def test_gengine_shop_status_does_not_pay_cancelled_order() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append({"method": request.method, "path": request.url.path})
+        return httpx.Response(
+            status_code=200,
+            json={"success": True, "data": {"id": 7473, "status": "canceled"}},
+        )
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    response = client.get_order_status("7473")
+    client.close()
+
+    assert response == {
+        "success": True,
+        "data": {"id": 7473, "status": "canceled"},
+        "supplier_order_id": "7473",
+    }
+    assert captured == [{"method": "GET", "path": "/v2.1/shop/orders/7473"}]
 
 
 def test_gengine_create_recharge_order_posts_params_and_pays_when_verified() -> None:

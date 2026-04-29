@@ -162,6 +162,7 @@ treat `shipped` as fulfilled without a gift-card code.
 - matches the marketplace product and option/variant to a local `ProductMapping`
 - polls incrementally from the last successful order-sync run, with a small overlap, instead of re-scanning all historical marketplace sales every time
 - creates one G-Engine order for the mapped supplier row, including buyer input fields when the marketplace order provides them
+- immediately pays G-Engine shop orders through `/shop/orders/{order_id}/pay`; if the pay response is still processing, later order sync runs poll `/shop/orders/{order_id}` until codes are available
 - stores the supplier order ID before delivery so retries do not buy the same marketplace order twice
 - delivers returned codes through the marketplace order correspondence and stores only masked codes locally
 

@@ -16,6 +16,7 @@ class GEngineClient(BaseAPIClient):
     - GET /v2.1/shop/products
     - GET /v2.1/shop/denominations/{product_id}
     - POST /v2.1/shop/orders
+    - POST /v2.1/shop/orders/{order_id}/pay
     - GET /v2.1/shop/orders/{order_id}
     - GET /v2.1/recharge/services
     - POST /v2.1/recharge/orders/{service_id}
@@ -24,6 +25,34 @@ class GEngineClient(BaseAPIClient):
     """
 
     API_PREFIX = "/v2.1"
+    _SHOP_PAYABLE_STATUSES = {
+        "pending",
+        "new",
+        "created",
+        "waiting_payment",
+        "pending_payment",
+        "unpaid",
+    }
+    _SHOP_NON_PAYABLE_STATUSES = {
+        "paid",
+        "payed",
+        "processing",
+        "in_process",
+        "completed",
+        "complete",
+        "fulfilled",
+        "delivered",
+        "success",
+        "successful",
+        "shipped",
+        "cancelled",
+        "canceled",
+        "expired",
+        "refunded",
+        "returned",
+        "failed",
+        "error",
+    }
 
     def __init__(self, base_url: str, api_key: str | None, timeout: float = 20.0) -> None:
         super().__init__(
@@ -692,13 +721,39 @@ class GEngineClient(BaseAPIClient):
         return uuid.uuid5(uuid.NAMESPACE_URL, external_order_id).hex
 
     @staticmethod
-    def _extract_recharge_order_id(payload: dict[str, Any]) -> str | None:
-        for key in ("id", "order_id", "orderId", "supplier_order_id"):
-            value = payload.get(key)
-            if value is not None and str(value).strip():
+    def _order_payload_sources(payload: dict[str, Any]) -> list[dict[str, Any]]:
+        sources = [payload]
+        for key in ("data", "content", "order", "result"):
+            nested = payload.get(key)
+            if isinstance(nested, dict):
+                sources.append(nested)
+        return sources
+
+    @classmethod
+    def _extract_order_id(cls, payload: dict[str, Any], *, prefix: str | None = None) -> str | None:
+        for source in cls._order_payload_sources(payload):
+            for key in ("id", "order_id", "orderId", "id_order", "supplier_order_id"):
+                value = source.get(key)
+                if value is None or not str(value).strip():
+                    continue
                 text = str(value).strip()
-                return text.split(":", maxsplit=1)[1] if text.startswith("recharge:") else text
+                if prefix and text.startswith(f"{prefix}:"):
+                    return text.split(":", maxsplit=1)[1]
+                return text
         return None
+
+    @classmethod
+    def _payload_status(cls, payload: dict[str, Any]) -> str:
+        for source in cls._order_payload_sources(payload):
+            for key in ("status", "state"):
+                value = source.get(key)
+                if value is not None and str(value).strip():
+                    return str(value).strip().lower()
+        return ""
+
+    @classmethod
+    def _extract_recharge_order_id(cls, payload: dict[str, Any]) -> str | None:
+        return cls._extract_order_id(payload, prefix="recharge")
 
     @classmethod
     def _mark_recharge_order_payload(cls, payload: dict[str, Any]) -> dict[str, Any]:
@@ -767,6 +822,72 @@ class GEngineClient(BaseAPIClient):
             return self._pay_recharge_order(order_id)
         return marked_response
 
+    @classmethod
+    def _mark_shop_order_payload(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        order_id = cls._extract_order_id(payload)
+        if order_id:
+            payload = dict(payload)
+            payload.setdefault("supplier_order_id", order_id)
+        return payload
+
+    @classmethod
+    def _shop_order_should_pay(cls, payload: dict[str, Any]) -> bool:
+        status = cls._payload_status(payload)
+        if not status:
+            return False
+        if status in cls._SHOP_PAYABLE_STATUSES:
+            return True
+        if status in cls._SHOP_NON_PAYABLE_STATUSES:
+            return False
+        return False
+
+    def _pay_shop_order(self, order_id: str) -> dict[str, Any]:
+        response = self._request_json(
+            method="POST",
+            path=self._build_path(f"/shop/orders/{order_id}/pay"),
+            headers=self._auth_headers(),
+        )
+        if not isinstance(response, dict):
+            raise TypeError("Unexpected G-Engine shop pay response format.")
+        return self._mark_shop_order_payload(response)
+
+    def _create_shop_order(
+        self,
+        product_id: str,
+        quantity: int,
+        *,
+        buyer_inputs: dict[str, str] | None,
+        external_order_id: str | None,
+    ) -> dict[str, Any]:
+        item: dict[str, Any] = {
+            "id": self._coerce_item_id(product_id),
+            "quantity": quantity,
+        }
+        cleaned_inputs = self._clean_buyer_inputs(buyer_inputs)
+        if cleaned_inputs:
+            item["fields"] = cleaned_inputs
+            first_value = next(iter(cleaned_inputs.values()))
+            item["account"] = first_value
+
+        order_payload: dict[str, Any] = {"items": [item]}
+        if external_order_id:
+            order_payload["external_id"] = external_order_id
+
+        response = self._request_json(
+            method="POST",
+            path=self._build_path("/shop/orders"),
+            headers=self._auth_headers(),
+            json_body=order_payload,
+        )
+        if not isinstance(response, dict):
+            raise TypeError("Unexpected G-Engine order response format.")
+
+        marked_response = self._mark_shop_order_payload(response)
+        order_id = self._extract_order_id(marked_response)
+        if order_id and self._shop_order_should_pay(marked_response):
+            return self._pay_shop_order(order_id)
+        return marked_response
+
     def create_order(
         self,
         product_id: str,
@@ -785,33 +906,12 @@ class GEngineClient(BaseAPIClient):
                 product_payload=product_payload,
             )
 
-        item: dict[str, Any] = {
-            "id": self._coerce_item_id(product_id),
-            "quantity": quantity,
-        }
-        cleaned_inputs = self._clean_buyer_inputs(buyer_inputs)
-        if cleaned_inputs:
-            item["fields"] = cleaned_inputs
-            first_value = next(iter(cleaned_inputs.values()))
-            item["account"] = first_value
-
-        order_payload: dict[str, Any] = {
-            "items": [
-                item
-            ]
-        }
-        if external_order_id:
-            order_payload["external_id"] = external_order_id
-
-        response = self._request_json(
-            method="POST",
-            path=self._build_path("/shop/orders"),
-            headers=self._auth_headers(),
-            json_body=order_payload,
+        return self._create_shop_order(
+            product_id,
+            quantity,
+            buyer_inputs=buyer_inputs,
+            external_order_id=external_order_id,
         )
-        if not isinstance(response, dict):
-            raise TypeError("Unexpected G-Engine order response format.")
-        return response
 
     def get_order_status(self, order_id: str) -> dict[str, Any]:
         if self._is_recharge_product_id(order_id):
@@ -836,4 +936,8 @@ class GEngineClient(BaseAPIClient):
         )
         if not isinstance(response, dict):
             raise TypeError("Unexpected G-Engine order status response format.")
-        return response
+        marked_response = self._mark_shop_order_payload(response)
+        shop_order_id = self._extract_order_id(marked_response) or str(order_id)
+        if shop_order_id and self._shop_order_should_pay(marked_response):
+            return self._pay_shop_order(shop_order_id)
+        return marked_response

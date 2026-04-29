@@ -8,7 +8,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, Protocol, cast
 from urllib.parse import parse_qs
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -110,6 +110,10 @@ def get_retry_action(status: str, supplier_order_id: str | None) -> RetryAction:
     if supplier_order_id:
         return "retry_delivery"
     return "retry_processing"
+
+
+def _supplier_order_can_be_recreated(error_message: str | None) -> bool:
+    return str(error_message or "").startswith("supplier_order_terminal:")
 
 
 def _to_decimal(value: object) -> Decimal | None:
@@ -622,8 +626,27 @@ def _extract_delivery_codes(payload: dict[str, Any]) -> list[str]:
     return codes
 
 
+def _supplier_payload_status(payload: dict[str, Any]) -> str:
+    value = _first_path_value(
+        payload,
+        (
+            ("status",),
+            ("state",),
+            ("data", "status"),
+            ("data", "state"),
+            ("content", "status"),
+            ("content", "state"),
+            ("order", "status"),
+            ("order", "state"),
+            ("result", "status"),
+            ("result", "state"),
+        ),
+    )
+    return str(value or "").strip().lower()
+
+
 def _supplier_payload_is_fulfilled(payload: dict[str, Any]) -> bool:
-    status = str(payload.get("status") or payload.get("state") or "").strip().lower()
+    status = _supplier_payload_status(payload)
     return status in {
         "completed",
         "complete",
@@ -633,6 +656,13 @@ def _supplier_payload_is_fulfilled(payload: dict[str, Any]) -> bool:
         "successful",
         "shipped",
     }
+
+
+def _supplier_payload_terminal_failure(payload: dict[str, Any]) -> str | None:
+    status = _supplier_payload_status(payload)
+    if status in {"cancelled", "canceled", "expired", "failed", "error", "refunded", "returned"}:
+        return f"supplier_order_terminal:{status}"
+    return None
 
 
 def _supplier_raw_payload(supplier: Any) -> dict[str, Any]:
@@ -727,17 +757,19 @@ def _load_supplier_delivery_payload(
     order: Order,
     supplier_client: SupplierOrderClientProtocol,
     create_response: dict[str, Any] | None,
-) -> tuple[dict[str, Any], list[str], bool]:
+) -> tuple[dict[str, Any], list[str], bool, str | None]:
     payload = create_response if isinstance(create_response, dict) else {}
     codes = _extract_delivery_codes(payload)
     fulfilled = bool(codes) or _supplier_payload_is_fulfilled(payload)
-    if fulfilled or not order.supplier_order_id:
-        return payload, codes, fulfilled
+    terminal_failure = _supplier_payload_terminal_failure(payload)
+    if fulfilled or terminal_failure is not None or not order.supplier_order_id:
+        return payload, codes, fulfilled, terminal_failure
 
     status_payload = supplier_client.get_order_status(order.supplier_order_id)
     codes = _extract_delivery_codes(status_payload)
     fulfilled = bool(codes) or _supplier_payload_is_fulfilled(status_payload)
-    return status_payload, codes, fulfilled
+    terminal_failure = _supplier_payload_terminal_failure(status_payload)
+    return status_payload, codes, fulfilled, terminal_failure
 
 
 def _digiseller_unique_code_state(payload: dict[str, Any]) -> int | None:
@@ -993,11 +1025,27 @@ def _process_normalized_sale(
         )
 
     try:
-        _payload, codes, fulfilled = _load_supplier_delivery_payload(
+        _payload, codes, fulfilled, terminal_failure = _load_supplier_delivery_payload(
             order=order,
             supplier_client=supplier_client,
             create_response=create_response,
         )
+        if terminal_failure is not None:
+            order.status = "needs_manual_review"
+            order.error_message = terminal_failure
+            db.add(order)
+            db.commit()
+            stats["errors"] += 1
+            stats["details"].append(
+                {
+                    "action": "error",
+                    "order_id": order.id,
+                    "marketplace_order_id": order.marketplace_order_id,
+                    "reason": terminal_failure,
+                }
+            )
+            return
+
         if not fulfilled:
             order.status = "supplier_order_created"
             order.error_message = "supplier_order_not_ready"
@@ -1130,7 +1178,12 @@ def _load_retryable_pending_order_ids(
             Order.marketplace == marketplace,
             Order.marketplace_order_id.not_in(exclude_order_ids),
             Order.status.in_(("pending", "supplier_order_created")),
-            Order.error_message.in_(("awaiting_digiseller_unique_code", "supplier_order_not_ready")),
+            or_(
+                Order.error_message.in_(
+                    ("awaiting_digiseller_unique_code", "supplier_order_not_ready")
+                ),
+                and_(Order.status == "pending", Order.supplier_order_id.is_(None)),
+            ),
         )
         .order_by(Order.created_at)
         .limit(200)
@@ -1348,6 +1401,17 @@ def retry_order(order: Order, db: Session) -> dict[str, str]:
         }
 
     if action == "retry_delivery":
+        if _supplier_order_can_be_recreated(order.error_message):
+            order.supplier_order_id = None
+            order.status = "pending"
+            order.error_message = None
+            db.add(order)
+            db.commit()
+            return {
+                "status": "queued",
+                "action": "retry_processing",
+            }
+
         order.status = "supplier_order_created"
         order.error_message = None
         db.add(order)

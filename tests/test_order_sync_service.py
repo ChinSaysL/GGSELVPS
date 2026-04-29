@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import Settings
 from app.db import Base
 from app.models import MarketplaceOffer, Order, ProductMapping, SupplierProduct
-from app.services.order_sync import process_digiseller_unique_code, sync_orders
+from app.services.order_sync import process_digiseller_unique_code, retry_order, sync_orders
 
 
 def _db_session() -> Generator[Session, None, None]:
@@ -575,6 +575,64 @@ def test_ggsel_steam_game_gift_delivery_instructs_friend_request(
     assert "примите запрос в друзья от нашего аккаунта Steam" in delivery_message
     assert "Product: Helldivers 2 Steam" in delivery_message
     assert "Товар: Helldivers 2 Steam" in delivery_message
+
+
+def test_supplier_cancelled_order_needs_manual_review_and_retry_can_recreate(
+    db_session: Session,
+) -> None:
+    _add_linked_offer(db_session, marketplace="ggsel", offer_id="102251279")
+    sale = {
+        "invoice_id": "9005",
+        "id_goods": "102251279",
+        "date_pay": "2026-04-27 10:00:00",
+        "amount": "5.00",
+    }
+    supplier_client = FakeSupplierOrderClient(
+        create_response={"id": 7473, "status": "pending"},
+        status_payload={"status": "canceled"},
+    )
+    marketplace_client = FakeMarketplaceOrderClient(sales=[sale], order_payloads={"9005": sale})
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"ggsel": marketplace_client},
+    )
+
+    order = db_session.execute(select(Order)).scalars().one()
+    assert stats["errors"] == 1
+    assert stats["details"][-1]["reason"] == "supplier_order_terminal:canceled"
+    assert order.status == "needs_manual_review"
+    assert order.supplier_order_id == "7473"
+    assert order.error_message == "supplier_order_terminal:canceled"
+
+    retry_result = retry_order(order, db_session)
+
+    assert retry_result == {"status": "queued", "action": "retry_processing"}
+    assert order.status == "pending"
+    assert order.supplier_order_id is None
+    assert order.error_message is None
+
+    marketplace_client.sales = []
+    supplier_client.create_response = {
+        "order_id": "ge-retry-1",
+        "status": "completed",
+        "codes": ["RETRY-CODE-0001"],
+    }
+
+    retry_stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"ggsel": marketplace_client},
+    )
+
+    db_session.refresh(order)
+    assert retry_stats["orders_detected"] == 1
+    assert retry_stats["orders_delivered"] == 1
+    assert order.status == "delivered"
+    assert order.supplier_order_id == "ge-retry-1"
 
 
 def test_ggsel_quantity_based_recharge_order_scales_cost_and_supplier_quantity(
