@@ -1275,14 +1275,11 @@ def _ask_optional_percent_as_ratio(prompt: str, *, default_percent: Decimal | No
         try:
             percent_value = Decimal(value)
         except InvalidOperation:
-            print("Please enter a valid percent number, for example 22 or 15.5.")
+            print("Please enter a valid percent number, for example 40 or 9.0 or 2.9.")
             continue
         if percent_value < 0:
             print("Percent must be >= 0.")
             continue
-        if percent_value < Decimal("1"):
-            print(f"Interpreting {percent_value} as a ratio, i.e. {(percent_value * Decimal('100'))}%")
-            return percent_value
         return percent_value / Decimal("100")
 
 
@@ -3402,7 +3399,7 @@ def action_manual_link() -> int:
 
     mapping_markup_percent_default = None
     if existing_mapping and existing_mapping.min_margin_percent is not None:
-        mapping_markup_percent_default = existing_mapping.min_margin_percent / Decimal("100")
+        mapping_markup_percent_default = existing_mapping.min_margin_percent * Decimal("100")
         
     mapping_markup_percent = _ask_optional_percent_as_ratio(
         "Markup rate percent for mapped rows (blank = automatic tier)",
