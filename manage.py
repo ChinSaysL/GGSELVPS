@@ -1694,12 +1694,12 @@ def _variant_match_key(text: str | None) -> str:
 
 
 def _gift_region_match_key(value: object) -> str | None:
+    if value in {None, ""}:
+        return None
     normalized = _normalize_search_text(value)
     if not normalized:
         return None
     compact = normalized.replace(" ", "")
-    if compact in {"rucis", "rucountries", "rucountry"}:
-        return "cis"
     if "cis" in normalized.split():
         return "cis"
     if re.fullmatch(r"[a-z]{2,5}", compact):
@@ -1715,6 +1715,8 @@ def _product_gift_region_key(product: Any) -> str | None:
         return None
 
     candidates = (
+        payload.get("gift_zone"),
+        payload.get("zone"),
         getattr(product, "denomination", None),
         getattr(product, "region", None),
         payload.get("gift_region"),

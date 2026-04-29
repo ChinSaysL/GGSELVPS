@@ -766,6 +766,32 @@ def test_auto_match_option_entries_matches_gengine_ru_cis_gift_region_alias() ->
     assert ambiguous == []
 
 
+def test_auto_match_option_entries_matches_cis_to_gengine_ge_region_with_cis_zone() -> None:
+    products = [
+        SimpleNamespace(
+            id=12,
+            title="Battlefield 1 Revolution",
+            category="Games, Steam Gifts",
+            denomination="ge",
+            region="ge",
+            supplier_product_id="gift:1238840:432909:ge",
+            raw_payload_json='{"source_type":"gift","gift_region":"ge","zone":"CIS"}',
+        ),
+    ]
+    option_entries = [{"option_label": "Country", "variant_value": "CIS"}]
+
+    matches, unmatched, ambiguous = manage._auto_match_option_entries_to_products(
+        products,
+        option_entries,
+    )
+
+    assert [(item["entry"]["variant_value"], item["product"].id) for item in matches] == [
+        ("CIS", 12),
+    ]
+    assert unmatched == []
+    assert ambiguous == []
+
+
 def test_auto_select_single_offer_uses_snapshot_title() -> None:
     reference = manage.GEngineProductReference(
         kind="recharge",
