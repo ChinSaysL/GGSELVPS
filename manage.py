@@ -589,7 +589,12 @@ def _print_stock_sync_result(result: dict[str, Any]) -> None:
                     f"- {item.get('marketplace')}:{item.get('marketplace_offer_id')} | "
                     f"mapping={item.get('mapping_id')} | reason={item.get('reason')}"
                 )
-        error_details = [item for item in details if isinstance(item, dict) and item.get("action") == "error"]
+        error_details = [
+            item
+            for item in details
+            if isinstance(item, dict)
+            and (item.get("action") == "error" or item.get("status") == "error")
+        ]
         if error_details:
             print("Error reasons (first 10):")
             for item in error_details[:10]:

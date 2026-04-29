@@ -1946,6 +1946,37 @@ def test_ggsel_set_offer_price_supports_variants_payload() -> None:
         if request.url.path.endswith("/api_sellers/api/product/edit/prices"):
             captured["price_json"] = json.loads(request.content.decode("utf-8"))
             return httpx.Response(status_code=200, json={"status": "ok"})
+        if request.url.path.endswith("/api_sellers/api/products/5850465/data"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "retval": 0,
+                    "product": {
+                        "id": 5850465,
+                        "options": [
+                            {
+                                "name": 777,
+                                "label": "Gift Card Amount",
+                                "variants": [
+                                    {
+                                        "value": 19472020,
+                                        "text": "500 TRY",
+                                        "default": 0,
+                                        "modify": 1,
+                                        "modify_type": "priceplus",
+                                        "modify_value": "1.00",
+                                        "visible": 1,
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                },
+            )
+        if request.url.path.endswith("/api_sellers/api/products/options/777/variants/19472020"):
+            captured["variant_query"] = dict(request.url.params)
+            captured["variant_json"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(status_code=200, json={"retval": 0})
         return httpx.Response(status_code=404, json={"error": "unexpected path"})
 
     client = GGSELClient(base_url="https://seller.ggsel.com", api_key="secret")
@@ -1959,24 +1990,15 @@ def test_ggsel_set_offer_price_supports_variants_payload() -> None:
     )
     client.close()
 
-    assert result == {"status": "ok"}
-    assert captured["price_json"] == [
-        {
-            "product_id": 5850465,
-            "price": 7.15,
-            "variants": [
-                {
-                    "variant_id": 19472020,
-                    "value": 19472020,
-                    "rate": 6.60,
-                    "type": 2,
-                    "modify": 1,
-                    "modify_type": "PricePlus",
-                    "modify_value": "6.6",
-                }
-            ],
-        }
-    ]
+    assert result == {"status": "ok", "variant_prices_updated": 1}
+    assert captured["price_json"] == [{"product_id": 5850465, "price": 7.15}]
+    assert captured["variant_query"]["token"] == "secret"
+    assert captured["variant_json"]["text"] == "500 TRY"
+    assert captured["variant_json"]["type"] == 2
+    assert captured["variant_json"]["rate"] == 6.60
+    assert captured["variant_json"]["modify_type"] == "PricePlus"
+    assert captured["variant_json"]["modify_value"] == "6.6"
+    assert captured["variant_json"]["visible"] is True
 
 
 def test_ggsel_set_offer_price_uses_apilogin_token_when_seller_id_is_configured() -> None:
@@ -1999,6 +2021,37 @@ def test_ggsel_set_offer_price_uses_apilogin_token_when_seller_id_is_configured(
             captured["price_query"] = dict(request.url.params)
             captured["price_json"] = json.loads(request.content.decode("utf-8"))
             return httpx.Response(status_code=200, json={"status": "ok"})
+        if request.url.path.endswith("/api_sellers/api/products/102249445/data"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "retval": 0,
+                    "product": {
+                        "id": 102249445,
+                        "options": [
+                            {
+                                "name": 888,
+                                "label": "Amount",
+                                "variants": [
+                                    {
+                                        "value": 18944509,
+                                        "text": "250 TRY",
+                                        "default": 1,
+                                        "modify": 1,
+                                        "modify_type": "priceplus",
+                                        "modify_value": "5.00",
+                                        "visible": 1,
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                },
+            )
+        if request.url.path.endswith("/api_sellers/api/products/options/888/variants/18944509"):
+            captured["variant_query"] = dict(request.url.params)
+            captured["variant_json"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(status_code=200, json={"retval": 0})
         return httpx.Response(status_code=404, json={"error": "unexpected path"})
 
     client = GGSELClient(
@@ -2016,28 +2069,17 @@ def test_ggsel_set_offer_price_uses_apilogin_token_when_seller_id_is_configured(
     )
     client.close()
 
-    assert result == {"status": "ok"}
+    assert result == {"status": "ok", "variant_prices_updated": 1}
     assert captured["apilogin_payload"]["seller_id"] == 123456
     assert isinstance(captured["apilogin_payload"]["timestamp"], int)
     assert isinstance(captured["apilogin_payload"]["sign"], str)
     assert captured["price_query"]["token"] == "ggsel-token-from-apilogin"
-    assert captured["price_json"] == [
-        {
-            "product_id": 102249445,
-            "price": 610.55,
-            "variants": [
-                {
-                    "variant_id": 18944509,
-                    "value": 18944509,
-                    "rate": 0.0,
-                    "type": 2,
-                    "modify": 1,
-                    "modify_type": "PricePlus",
-                    "modify_value": "0.0",
-                }
-            ],
-        }
-    ]
+    assert captured["price_json"] == [{"product_id": 102249445, "price": 610.55}]
+    assert captured["variant_query"]["token"] == "ggsel-token-from-apilogin"
+    assert captured["variant_json"]["type"] == 2
+    assert captured["variant_json"]["rate"] == 0.0
+    assert captured["variant_json"]["modify_type"] == "PricePlus"
+    assert captured["variant_json"]["modify_value"] == "0.0"
 
 
 def test_ggsel_set_offer_price_refreshes_apilogin_token_after_401() -> None:
