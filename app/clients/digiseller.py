@@ -27,6 +27,8 @@ class DigisellerClient(BaseAPIClient):
     _TOKEN_REFRESH_MARGIN = timedelta(seconds=60)
     _TASK_POLL_INTERVAL_SECONDS = 0.5
     _TASK_POLL_TIMEOUT_SECONDS = 120.0
+    _SALES_LOOKBACK_DAYS = 30
+    _SALES_PAGE_SIZE = 5000
 
     def __init__(
         self,
@@ -913,11 +915,20 @@ class DigisellerClient(BaseAPIClient):
         return normalized
 
     def get_latest_sales(self) -> list[dict[str, Any]]:
+        now = datetime.now(timezone.utc)
+        date_finish = now + timedelta(days=1)
+        date_start = now - timedelta(days=self._SALES_LOOKBACK_DAYS)
         response = self._request_json(
             method="POST",
             path="/api/seller-sells/v2",
             params=self._auth_query_params(),
-            json_body={"returned": 1, "page": 1, "rows": 1000},
+            json_body={
+                "date_start": date_start.strftime("%Y-%m-%d %H:%M:%S"),
+                "date_finish": date_finish.strftime("%Y-%m-%d %H:%M:%S"),
+                "returned": 1,
+                "page": 1,
+                "rows": self._SALES_PAGE_SIZE,
+            },
             headers={"Accept": "application/json"},
         )
         if isinstance(response, list):

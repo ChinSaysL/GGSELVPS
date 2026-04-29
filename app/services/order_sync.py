@@ -716,6 +716,31 @@ def _digiseller_verified_payload_matches_order(
     return True
 
 
+def _preverify_digiseller_unique_code(
+    *,
+    sale: NormalizedMarketplaceSale,
+    marketplace_client: MarketplaceOrderClientProtocol,
+) -> tuple[NormalizedMarketplaceSale | None, str | None]:
+    if sale.marketplace != "digiseller":
+        return sale, None
+    if not sale.unique_code:
+        return None, "awaiting_digiseller_unique_code"
+
+    digiseller_client = cast(DigisellerDeliveryClientProtocol, marketplace_client)
+    verification_payload = digiseller_client.verify_unique_code(sale.unique_code)
+    if not _digiseller_verified_payload_matches_order(verification_payload, sale):
+        return None, "digiseller_unique_code_does_not_match_order"
+
+    verified_sale = _normalize_marketplace_sale(
+        "digiseller",
+        sale.raw_payload,
+        verification_payload,
+        unique_code=sale.unique_code,
+    )
+    verified_sale.raw_payload["_digiseller_unique_code_preverified"] = True
+    return verified_sale, None
+
+
 def _deliver_to_marketplace(
     *,
     order: Order,
@@ -739,11 +764,14 @@ def _deliver_to_marketplace(
             order.error_message = "awaiting_digiseller_unique_code"
             return
         digiseller_client = cast(DigisellerDeliveryClientProtocol, marketplace_client)
-        verification_payload = digiseller_client.verify_unique_code(sale.unique_code)
-        if not _digiseller_verified_payload_matches_order(verification_payload, sale):
-            order.status = "needs_manual_review"
-            order.error_message = "digiseller_unique_code_does_not_match_order"
-            return
+        if bool(sale.raw_payload.get("_digiseller_unique_code_preverified")):
+            verification_payload = sale.raw_payload
+        else:
+            verification_payload = digiseller_client.verify_unique_code(sale.unique_code)
+            if not _digiseller_verified_payload_matches_order(verification_payload, sale):
+                order.status = "needs_manual_review"
+                order.error_message = "digiseller_unique_code_does_not_match_order"
+                return
         if not _digiseller_unique_code_is_already_delivered(verification_payload):
             marketplace_client.send_buyer_message(order.marketplace_order_id, buyer_id, message)
             digiseller_client.mark_unique_code_delivered(sale.unique_code)
@@ -816,6 +844,22 @@ def _process_normalized_sale(
             {"action": "skipped", "order_id": order.id, "reason": "order_already_delivered"}
         )
         return
+
+    verified_sale, verification_error = _preverify_digiseller_unique_code(
+        sale=sale,
+        marketplace_client=marketplace_client,
+    )
+    if verified_sale is None:
+        order.status = "needs_manual_review" if verification_error == "digiseller_unique_code_does_not_match_order" else "pending"
+        order.error_message = verification_error
+        db.add(order)
+        db.commit()
+        stats["skipped"] += 1
+        stats["details"].append(
+            {"action": "skipped", "order_id": order.id, "reason": verification_error}
+        )
+        return
+    sale = verified_sale
 
     create_response: dict[str, Any] | None = None
     if not order.supplier_order_id:

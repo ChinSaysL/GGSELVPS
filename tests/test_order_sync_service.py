@@ -664,6 +664,7 @@ def test_digiseller_order_waits_for_unique_code_then_delivers(db_session: Sessio
     pending_order = db_session.execute(select(Order)).scalars().one()
     pending_status = pending_order.status
     pending_error = pending_order.error_message
+    pending_create_calls = list(supplier_client.create_calls)
 
     delivery_stats = process_digiseller_unique_code(
         unique_code="UNIQUE-CODE-0001",
@@ -672,13 +673,22 @@ def test_digiseller_order_waits_for_unique_code_then_delivers(db_session: Sessio
         supplier_client=supplier_client,
         marketplace_client=marketplace_client,
     )
+    repeat_stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"digiseller": marketplace_client},
+    )
     delivered_order = db_session.execute(select(Order)).scalars().one()
 
-    assert sync_stats["supplier_orders_created"] == 1
+    assert sync_stats["supplier_orders_created"] == 0
     assert sync_stats["orders_delivered"] == 0
-    assert pending_status == "supplier_order_created"
+    assert pending_status == "pending"
     assert pending_error == "awaiting_digiseller_unique_code"
+    assert pending_create_calls == []
     assert delivery_stats["orders_delivered"] == 1
+    assert repeat_stats["orders_delivered"] == 0
+    assert repeat_stats["skipped"] == 1
     assert delivered_order.status == "delivered"
     assert len(supplier_client.create_calls) == 1
     assert marketplace_client.delivered_unique_codes == ["UNIQUE-CODE-0001"]

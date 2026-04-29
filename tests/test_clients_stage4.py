@@ -1106,8 +1106,10 @@ def test_digiseller_get_latest_sales_reads_official_rows_payload() -> None:
 
     assert captured["path"].endswith("/api/seller-sells/v2")
     assert captured["query"]["token"] == "secret"
+    assert "date_start" in captured["body"]
+    assert "date_finish" in captured["body"]
     assert captured["body"]["returned"] == 1
-    assert captured["body"]["rows"] == 1000
+    assert captured["body"]["rows"] == 5000
     assert sales == [
         {
             "invoice_id": 290877840,
