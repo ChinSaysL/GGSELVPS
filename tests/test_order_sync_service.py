@@ -258,6 +258,52 @@ def test_ggsel_paid_order_buys_from_gengine_and_delivers_once(db_session: Sessio
     assert "ABCD-EFGH-1234" in delivery_message
 
 
+def test_ggsel_delivery_skips_unique_code_verification(db_session: Session) -> None:
+    _add_linked_offer(
+        db_session,
+        marketplace="ggsel",
+        offer_id="102249445",
+        marketplace_variant_id=18944509,
+    )
+    sale = {
+        "invoice_id": "9001",
+        "id_goods": "102249445",
+        "date_pay": "2026-04-27 10:00:00",
+        "amount": "5.00",
+        "unique_code": "GGSEL-UNIQUE-0001",
+        "options": [
+            {"name": "Amount", "user_data": "250 TRY", "user_data_id": 18944509},
+            {"name": "Steam friend code", "user_data": "123456789", "user_data_id": None},
+        ],
+    }
+
+    class GGSELClientWithForbiddenUniqueCode(FakeMarketplaceOrderClient):
+        def verify_unique_code(self, unique_code: str) -> dict[str, Any]:
+            raise AssertionError(f"GGSEL unique-code verification must not run: {unique_code}")
+
+        def mark_unique_code_delivered(self, unique_code: str) -> dict[str, Any]:
+            raise AssertionError(f"GGSEL unique-code delivery must not run: {unique_code}")
+
+    supplier_client = FakeSupplierOrderClient()
+    marketplace_client = GGSELClientWithForbiddenUniqueCode(
+        sales=[sale],
+        order_payloads={"9001": sale},
+    )
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"ggsel": marketplace_client},
+    )
+
+    order = db_session.execute(select(Order)).scalars().one()
+    assert stats["orders_delivered"] == 1
+    assert order.status == "delivered"
+    assert len(marketplace_client.messages) == 2
+    assert "Your gift card has been delivered." in marketplace_client.messages[1][1]
+
+
 def test_supplier_provider_down_notifies_once_and_retries_purchase(
     db_session: Session,
 ) -> None:

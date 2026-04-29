@@ -1041,9 +1041,15 @@ class GGSELClient(BaseAPIClient):
             raise TypeError("Unexpected GGSEL order response format.")
         return response
 
-    def send_buyer_message(self, order_id: str, buyer_id: str, message: str) -> dict[str, Any]:
+    def _send_buyer_message_with_token(
+        self,
+        *,
+        order_id: str,
+        buyer_id: str,
+        message: str,
+        token: str,
+    ) -> dict[str, Any]:
         _ = buyer_id
-        token = self._get_access_token()
         path = self._build_path("/api/debates/v2")
         try:
             response = self.http.request(
@@ -1059,6 +1065,8 @@ class GGSELClient(BaseAPIClient):
         if response.is_error:
             detail = self._response_error_excerpt(response)
             suffix = f": {detail}" if detail else ""
+            if response.status_code in {401, 403}:
+                suffix = f"{suffix} ({self._auth_error_hint()})"
             raise APIRequestError(
                 f"GGSEL returned HTTP {response.status_code} for POST {path}{suffix}"
             )
@@ -1074,3 +1082,30 @@ class GGSELClient(BaseAPIClient):
             parsed.setdefault("status", "ok")
             return parsed
         return {"status": "ok", "response": parsed}
+
+    def send_buyer_message(self, order_id: str, buyer_id: str, message: str) -> dict[str, Any]:
+        last_auth_error: APIRequestError | None = None
+        refresh_rounds = (False, True) if self.seller_id else (False,)
+        for force_refresh in refresh_rounds:
+            token = self._get_access_token(force_refresh=force_refresh)
+            try:
+                return self._send_buyer_message_with_token(
+                    order_id=order_id,
+                    buyer_id=buyer_id,
+                    message=message,
+                    token=token,
+                )
+            except APIRequestError as exc:
+                if "HTTP 401" in str(exc) or "HTTP 403" in str(exc):
+                    last_auth_error = exc
+                    continue
+                raise
+
+        if last_auth_error is not None:
+            raise last_auth_error
+        return self._send_buyer_message_with_token(
+            order_id=order_id,
+            buyer_id=buyer_id,
+            message=message,
+            token=self._get_access_token(),
+        )

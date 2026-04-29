@@ -1693,6 +1693,47 @@ def test_ggsel_send_buyer_message_uses_prefixed_debates_endpoint() -> None:
     assert captured["json"] == {"message": "hello", "files": []}
 
 
+def test_ggsel_send_buyer_message_refreshes_apilogin_token_after_401() -> None:
+    state = {"apilogin_calls": 0, "message_tokens": []}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api_sellers/api/apilogin"):
+            state["apilogin_calls"] += 1
+            token = "ggsel-message-token-a" if state["apilogin_calls"] == 1 else "ggsel-message-token-b"
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "retval": 0,
+                    "token": token,
+                    "seller_id": 123456,
+                    "valid_thru": "2099-01-01T00:00:00Z",
+                },
+            )
+        if request.url.path.endswith("/api_sellers/api/debates/v2"):
+            token = str(request.url.params.get("token"))
+            state["message_tokens"].append(token)
+            if token == "ggsel-message-token-a":
+                return httpx.Response(status_code=401, text="Unauthorized")
+            if token == "ggsel-message-token-b":
+                return httpx.Response(status_code=200, content=b"")
+            return httpx.Response(status_code=400, json={"error": "unexpected token"})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GGSELClient(
+        base_url="https://seller.ggsel.com",
+        api_key="seller-api-key",
+        seller_id="123456",
+    )
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    result = client.send_buyer_message(order_id="9001", buyer_id="", message="hello")
+    client.close()
+
+    assert result == {"status": "ok"}
+    assert state["apilogin_calls"] == 2
+    assert state["message_tokens"] == ["ggsel-message-token-a", "ggsel-message-token-b"]
+
+
 def test_ggsel_get_latest_sales_reads_sales_payload_and_flattens_product() -> None:
     captured: dict[str, Any] = {}
 
