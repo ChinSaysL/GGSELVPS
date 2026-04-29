@@ -174,6 +174,10 @@ https://YOUR_PUBLIC_HOST/delivery/digiseller
 
 Digiseller appends the `uniquecode` query parameter. The endpoint verifies that code with Digiseller, reuses the existing local order if one exists, buys from G-Engine only after verification, delivers the G-Engine result to the buyer chat, then marks the unique code as delivered. If the buyer already pasted the unique code into the Digiseller order chat, order sync also checks recent buyer chat messages and verifies any code-like token before using it.
 
+The scheduled order sync uses the same automated checks. Pending Digiseller unique-code orders are rechecked on later runs, including after temporary buyer-chat lookup failures. `python manage.py digiseller-code` is only a manual rescue command for cases where the code is not available through the callback, order detail, or buyer chat.
+
+If an older unpaid G-Engine supplier order was left in `canceled`, `cancelled`, or `expired`, a verified Digiseller unique-code flow clears that dead supplier order ID and creates a fresh G-Engine order once. Other supplier terminal states stay in manual review to avoid duplicate purchases.
+
 Order polling scale knobs:
 - `ORDER_SYNC_INITIAL_LOOKBACK_HOURS` controls the first/recovery polling window when no successful order-sync checkpoint exists.
 - `ORDER_SYNC_OVERLAP_MINUTES` adds overlap after the last successful checkpoint so late marketplace writes are not missed.

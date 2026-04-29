@@ -112,8 +112,19 @@ def get_retry_action(status: str, supplier_order_id: str | None) -> RetryAction:
     return "retry_processing"
 
 
+_RECREATABLE_SUPPLIER_TERMINAL_ERRORS = (
+    "supplier_order_terminal:canceled",
+    "supplier_order_terminal:cancelled",
+    "supplier_order_terminal:expired",
+)
+
+
 def _supplier_order_can_be_recreated(error_message: str | None) -> bool:
-    return str(error_message or "").startswith("supplier_order_terminal:")
+    return str(error_message or "") in _RECREATABLE_SUPPLIER_TERMINAL_ERRORS
+
+
+def _sale_allows_supplier_recreate(sale: NormalizedMarketplaceSale) -> bool:
+    return sale.marketplace == "digiseller" and bool(sale.unique_code)
 
 
 def _to_decimal(value: object) -> Decimal | None:
@@ -899,6 +910,7 @@ def _process_normalized_sale(
     supplier_client: SupplierOrderClientProtocol,
     marketplace_client: MarketplaceOrderClientProtocol,
     stats: dict[str, Any],
+    allow_supplier_recreate: bool = True,
 ) -> None:
     if not sale.order_id or not sale.offer_id:
         stats["skipped"] += 1
@@ -977,6 +989,28 @@ def _process_normalized_sale(
     sale = verified_sale
 
     create_response: dict[str, Any] | None = None
+    if (
+        allow_supplier_recreate
+        and order.supplier_order_id
+        and _sale_allows_supplier_recreate(sale)
+        and _supplier_order_can_be_recreated(order.error_message)
+    ):
+        previous_supplier_order_id = str(order.supplier_order_id or "")
+        order.supplier_order_id = None
+        order.status = "pending"
+        order.error_message = None
+        db.add(order)
+        db.commit()
+        stats["details"].append(
+            {
+                "action": "supplier_order_recreate_queued",
+                "order_id": order.id,
+                "marketplace_order_id": order.marketplace_order_id,
+                "previous_supplier_order_id": previous_supplier_order_id,
+                "reason": "previous_supplier_order_terminal",
+            }
+        )
+
     if not order.supplier_order_id:
         if not should_create_supplier_purchase(order.status):
             stats["skipped"] += 1
@@ -1031,6 +1065,36 @@ def _process_normalized_sale(
             create_response=create_response,
         )
         if terminal_failure is not None:
+            if (
+                allow_supplier_recreate
+                and _sale_allows_supplier_recreate(sale)
+                and _supplier_order_can_be_recreated(terminal_failure)
+            ):
+                previous_supplier_order_id = str(order.supplier_order_id or "")
+                order.supplier_order_id = None
+                order.status = "pending"
+                order.error_message = None
+                db.add(order)
+                db.commit()
+                stats["details"].append(
+                    {
+                        "action": "supplier_order_recreate_queued",
+                        "order_id": order.id,
+                        "marketplace_order_id": order.marketplace_order_id,
+                        "previous_supplier_order_id": previous_supplier_order_id,
+                        "reason": terminal_failure,
+                    }
+                )
+                _process_normalized_sale(
+                    db=db,
+                    sale=sale,
+                    supplier_client=supplier_client,
+                    marketplace_client=marketplace_client,
+                    stats=stats,
+                    allow_supplier_recreate=False,
+                )
+                return
+
             order.status = "needs_manual_review"
             order.error_message = terminal_failure
             db.add(order)
@@ -1172,18 +1236,28 @@ def _load_retryable_pending_order_ids(
     marketplace: str,
     exclude_order_ids: set[str],
 ) -> list[str]:
+    retry_conditions = [
+        Order.error_message.like("awaiting_digiseller_unique_code%"),
+        Order.error_message == "supplier_order_not_ready",
+        and_(Order.status == "pending", Order.supplier_order_id.is_(None)),
+    ]
+    statuses = ["pending", "supplier_order_created"]
+    if marketplace == "digiseller":
+        statuses.append("needs_manual_review")
+        retry_conditions.append(
+            and_(
+                Order.status == "needs_manual_review",
+                Order.error_message.in_(_RECREATABLE_SUPPLIER_TERMINAL_ERRORS),
+            )
+        )
+
     stmt = (
         select(Order.marketplace_order_id)
         .where(
             Order.marketplace == marketplace,
             Order.marketplace_order_id.not_in(exclude_order_ids),
-            Order.status.in_(("pending", "supplier_order_created")),
-            or_(
-                Order.error_message.in_(
-                    ("awaiting_digiseller_unique_code", "supplier_order_not_ready")
-                ),
-                and_(Order.status == "pending", Order.supplier_order_id.is_(None)),
-            ),
+            Order.status.in_(statuses),
+            or_(*retry_conditions),
         )
         .order_by(Order.created_at)
         .limit(200)

@@ -442,15 +442,6 @@ def action_sync_orders() -> int:
         return 1
 
     _print_order_sync_result(result)
-    if (
-        sys.stdin.isatty()
-        and result.get("orders_delivered", 0) == 0
-        and _ask_bool(
-            "If this is a Digiseller unique-code purchase, process the buyer code now?",
-            default=False,
-        )
-    ):
-        return action_digiseller_code()
     return 0 if result.get("errors", 0) == 0 else 1
 
 

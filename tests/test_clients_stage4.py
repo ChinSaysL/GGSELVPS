@@ -1195,6 +1195,41 @@ def test_digiseller_get_buyer_messages_reads_order_chat() -> None:
     assert messages[0]["message"] == "unique code is E5E8B7E1369947A3"
 
 
+def test_digiseller_get_buyer_messages_reads_wrapped_order_chat() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/debates/v2"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "retval": 0,
+                    "content": {
+                        "messages": [
+                            {
+                                "id": 56627081,
+                                "message": "code E5E8B7E1369947A3",
+                                "buyer": 1,
+                            }
+                        ]
+                    },
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    messages = client.get_buyer_messages("9001")
+    client.close()
+
+    assert messages == [
+        {
+            "id": 56627081,
+            "message": "code E5E8B7E1369947A3",
+            "buyer": 1,
+        }
+    ]
+
+
 def test_digiseller_get_latest_sales_reads_official_rows_payload() -> None:
     captured: dict[str, Any] = {}
 

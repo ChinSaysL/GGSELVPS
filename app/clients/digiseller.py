@@ -995,6 +995,21 @@ class DigisellerClient(BaseAPIClient):
             raise TypeError("Unexpected Digiseller order response format.")
         return response
 
+    @classmethod
+    def _extract_buyer_message_items(cls, payload: object) -> list[dict[str, Any]]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if not isinstance(payload, dict):
+            return []
+
+        items: list[dict[str, Any]] = []
+        for key in ("items", "rows", "messages", "debates", "data", "content", "result"):
+            value = payload.get(key)
+            nested_items = cls._extract_buyer_message_items(value)
+            if nested_items:
+                items.extend(nested_items)
+        return items
+
     def get_buyer_messages(self, order_id: str) -> list[dict[str, Any]]:
         token = self._get_access_token()
         response = self._request_json(
@@ -1008,13 +1023,7 @@ class DigisellerClient(BaseAPIClient):
             },
             headers={"Accept": "application/json"},
         )
-        if isinstance(response, list):
-            return [item for item in response if isinstance(item, dict)]
-        if isinstance(response, dict):
-            items = response.get("items")
-            if isinstance(items, list):
-                return [item for item in items if isinstance(item, dict)]
-        return []
+        return self._extract_buyer_message_items(response)
 
     @staticmethod
     def _mask_unique_code(unique_code: str) -> str:

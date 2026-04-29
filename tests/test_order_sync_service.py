@@ -771,6 +771,99 @@ def test_digiseller_order_waits_for_unique_code_then_delivers(db_session: Sessio
     assert "Ваша подарочная карта доставлена." in marketplace_client.messages[1][1]
 
 
+def test_digiseller_unique_code_recreates_cancelled_supplier_order(
+    db_session: Session,
+) -> None:
+    supplier = _add_linked_offer(db_session, marketplace="digiseller", offer_id="5850465")
+    offer = db_session.execute(select(MarketplaceOffer)).scalars().one()
+    db_session.add(
+        Order(
+            marketplace="digiseller",
+            marketplace_order_id="9001",
+            marketplace_offer_id=offer.id,
+            supplier_product_id=supplier.id,
+            status="needs_manual_review",
+            supplier_order_id="7473",
+            error_message="supplier_order_terminal:canceled",
+        )
+    )
+    db_session.commit()
+
+    supplier_client = FakeSupplierOrderClient(
+        create_response={
+            "order_id": "ge-new-1",
+            "status": "completed",
+            "codes": ["NEW-CODE-0001"],
+        }
+    )
+    marketplace_client = FakeDigisellerOrderClient(sales=[])
+
+    stats = process_digiseller_unique_code(
+        unique_code="UNIQUE-CODE-0004",
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_client=marketplace_client,
+    )
+
+    order = db_session.execute(select(Order)).scalars().one()
+    assert stats["status"] == "ok"
+    assert stats["errors"] == 0
+    assert stats["supplier_orders_created"] == 1
+    assert stats["orders_delivered"] == 1
+    assert order.status == "delivered"
+    assert order.supplier_order_id == "ge-new-1"
+    assert len(supplier_client.create_calls) == 1
+    assert marketplace_client.delivered_unique_codes == ["UNIQUE-CODE-0004"]
+
+
+def test_digiseller_unique_code_recreates_supplier_order_cancelled_during_status_check(
+    db_session: Session,
+) -> None:
+    supplier = _add_linked_offer(db_session, marketplace="digiseller", offer_id="5850465")
+    offer = db_session.execute(select(MarketplaceOffer)).scalars().one()
+    db_session.add(
+        Order(
+            marketplace="digiseller",
+            marketplace_order_id="9001",
+            marketplace_offer_id=offer.id,
+            supplier_product_id=supplier.id,
+            status="supplier_order_created",
+            supplier_order_id="7473",
+            error_message="supplier_order_not_ready",
+        )
+    )
+    db_session.commit()
+
+    supplier_client = FakeSupplierOrderClient(
+        create_response={
+            "order_id": "ge-new-2",
+            "status": "completed",
+            "codes": ["NEW-CODE-0002"],
+        },
+        status_payload={"status": "canceled"},
+    )
+    marketplace_client = FakeDigisellerOrderClient(sales=[])
+
+    stats = process_digiseller_unique_code(
+        unique_code="UNIQUE-CODE-0005",
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_client=marketplace_client,
+    )
+
+    order = db_session.execute(select(Order)).scalars().one()
+    assert stats["status"] == "ok"
+    assert stats["errors"] == 0
+    assert stats["supplier_orders_created"] == 1
+    assert stats["orders_delivered"] == 1
+    assert order.status == "delivered"
+    assert order.supplier_order_id == "ge-new-2"
+    assert len(supplier_client.create_calls) == 1
+    assert marketplace_client.delivered_unique_codes == ["UNIQUE-CODE-0005"]
+
+
 def test_digiseller_order_with_unique_code_in_detail_delivers_in_sync(
     db_session: Session,
 ) -> None:
@@ -897,3 +990,59 @@ def test_order_sync_rechecks_local_pending_unique_code_orders_without_recent_sal
     assert order.status == "delivered"
     assert len(supplier_client.create_calls) == 1
     assert marketplace_client.delivered_unique_codes == ["UNIQUE-CODE-0003"]
+
+
+def test_order_sync_rechecks_pending_unique_code_chat_lookup_failures(
+    db_session: Session,
+) -> None:
+    supplier = _add_linked_offer(db_session, marketplace="digiseller", offer_id="5850465")
+    offer = db_session.execute(select(MarketplaceOffer)).scalars().one()
+    db_session.add(
+        Order(
+            marketplace="digiseller",
+            marketplace_order_id="9001",
+            marketplace_offer_id=offer.id,
+            supplier_product_id=supplier.id,
+            status="pending",
+            error_message="awaiting_digiseller_unique_code_chat_lookup_failed:timeout",
+        )
+    )
+    db_session.commit()
+
+    supplier_client = FakeSupplierOrderClient()
+    marketplace_client = FakeDigisellerOrderClient(
+        sales=[],
+        order_payloads={
+            "9001": {
+                "retval": 0,
+                "content": {
+                    "item_id": 5850465,
+                },
+            }
+        },
+        chat_messages={
+            "9001": [
+                {
+                    "id": 1,
+                    "message": "unique code E5E8B7E1369947A3",
+                    "buyer": 1,
+                    "deleted": 0,
+                    "date_written": "2026-04-27 10:01:00",
+                }
+            ]
+        },
+    )
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"digiseller": marketplace_client},
+    )
+
+    order = db_session.execute(select(Order)).scalars().one()
+    assert stats["orders_detected"] == 1
+    assert stats["orders_delivered"] == 1
+    assert order.status == "delivered"
+    assert len(supplier_client.create_calls) == 1
+    assert marketplace_client.delivered_unique_codes == ["E5E8B7E1369947A3"]
