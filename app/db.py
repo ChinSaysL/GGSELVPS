@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from pathlib import Path
+from typing import Any
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.config import get_settings
@@ -25,8 +26,27 @@ def _ensure_sqlite_directory(database_url: str) -> None:
     db_path.parent.mkdir(parents=True, exist_ok=True)
 
 
-def _sqlite_connect_args(database_url: str) -> dict[str, bool]:
-    return {"check_same_thread": False} if database_url.startswith("sqlite") else {}
+def _is_sqlite_url(database_url: str) -> bool:
+    return database_url.startswith("sqlite")
+
+
+def _sqlite_connect_args(database_url: str) -> dict[str, Any]:
+    if not _is_sqlite_url(database_url):
+        return {}
+    return {
+        "check_same_thread": False,
+        "timeout": 30,
+    }
+
+
+def _configure_sqlite_connection(dbapi_connection: Any, _connection_record: Any) -> None:
+    cursor = dbapi_connection.cursor()
+    try:
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA synchronous=NORMAL")
+    finally:
+        cursor.close()
 
 
 settings = get_settings()
@@ -38,6 +58,8 @@ engine = create_engine(
     pool_pre_ping=True,
     connect_args=_sqlite_connect_args(settings.database_url),
 )
+if _is_sqlite_url(settings.database_url):
+    event.listen(engine, "connect", _configure_sqlite_connection)
 
 SessionLocal = sessionmaker(
     bind=engine,

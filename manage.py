@@ -1102,6 +1102,20 @@ def _friendly_gengine_import_error(reference: GEngineProductReference, error: Ex
     return f"Could not fetch G-Engine product ID {reference.product_id}: {message}"
 
 
+def _is_sqlite_database_locked_error(error: Exception) -> bool:
+    return "database is locked" in str(error).lower()
+
+
+def _sqlite_database_locked_message() -> str:
+    return (
+        "Local SQLite database is locked. Another app process, scheduler job, or manage "
+        "session is writing right now. The app now waits longer for SQLite locks, but this "
+        "write still could not complete safely. Wait a few seconds and retry; if it keeps "
+        "happening, stop duplicate app/manage containers or pause the scheduler while "
+        "manual linking."
+    )
+
+
 def _format_gengine_import_skip_details(result: dict[str, Any]) -> str:
     skipped_details = result.get("details")
     detail_lines: list[str] = []
@@ -1186,14 +1200,19 @@ def _import_gengine_reference(reference: GEngineProductReference) -> GEngineImpo
             ),
         )
 
-    with SessionLocal() as db:
-        result = sync_products(
-            db=db,
-            settings=settings,
-            supplier_client=_ListSupplierClient(products),
-            marketplace_name=None,
-        )
-        db.commit()
+    try:
+        with SessionLocal() as db:
+            result = sync_products(
+                db=db,
+                settings=settings,
+                supplier_client=_ListSupplierClient(products),
+                marketplace_name=None,
+            )
+            db.commit()
+    except Exception as exc:  # noqa: BLE001 - CLI should show a readable database failure.
+        if _is_sqlite_database_locked_error(exc):
+            return GEngineImportResult(imported_rows=0, error_message=_sqlite_database_locked_message())
+        raise
 
     imported_rows = int(result["products_imported"])
     if imported_rows == 0:

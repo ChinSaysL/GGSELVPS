@@ -156,6 +156,16 @@ def test_gengine_import_skip_details_include_row_reason() -> None:
     assert "cost_usd=0" in message
 
 
+def test_sqlite_database_locked_error_has_operator_message() -> None:
+    error = RuntimeError("(sqlite3.OperationalError) database is locked")
+
+    assert manage._is_sqlite_database_locked_error(error)
+    message = manage._sqlite_database_locked_message()
+    assert "Local SQLite database is locked" in message
+    assert "retry" in message
+    assert "scheduler" in message
+
+
 def test_parse_plain_numeric_reference() -> None:
     reference = manage._parse_gengine_reference("5")
 
