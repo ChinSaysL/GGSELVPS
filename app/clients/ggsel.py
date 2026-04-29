@@ -525,13 +525,17 @@ class GGSELClient(BaseAPIClient):
 
     @classmethod
     def _normalize_price_update_variant(cls, variant: dict[str, Any]) -> dict[str, Any]:
+        # GGSEL schema uses `value` for variant ID, `modify_type` (string) and
+        # `modify_value` (string) for the price modifier — not `variant_id`/`type`/`rate`.
         variant_id = cls._extract_variant_id(variant)
-        out: dict[str, Any] = {"type": variant.get("type", 2)}
+        type_value = variant.get("type", 2)
+        rate = variant.get("rate", 0)
+        out: dict[str, Any] = {
+            "modify_type": cls._variant_type_name(type_value),
+            "modify_value": str(rate),
+        }
         if variant_id is not None:
-            out["variant_id"] = int(variant_id)
-        rate = variant.get("rate")
-        if rate is not None:
-            out["rate"] = rate
+            out["value"] = int(variant_id)
         return out
 
     @classmethod
