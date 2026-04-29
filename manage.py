@@ -56,6 +56,12 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
     MenuAction("16", "Sync orders (live)", "sync-orders", "Process paid orders and delivery."),
     MenuAction("17", "Manual link help", "manual-link-example", "Print an example link request."),
     MenuAction("18", "Docker build", "docker-build", "Run docker compose build."),
+    MenuAction(
+        "19",
+        "Process Digiseller code",
+        "digiseller-code",
+        "Verify a Digiseller buyer unique code and deliver the linked order.",
+    ),
 )
 
 VALID_MARKETPLACES = ("digiseller", "ggsel")
@@ -422,6 +428,78 @@ def action_sync_orders() -> int:
     except Exception as exc:  # noqa: BLE001 - CLI should show a readable failure.
         print(f"Order sync failed: {exc}")
         return 1
+
+    _print_order_sync_result(result)
+    if (
+        sys.stdin.isatty()
+        and result.get("orders_delivered", 0) == 0
+        and _ask_bool(
+            "If this is a Digiseller unique-code purchase, process the buyer code now?",
+            default=False,
+        )
+    ):
+        return action_digiseller_code()
+    return 0 if result.get("errors", 0) == 0 else 1
+
+
+def _normalize_digiseller_unique_code(value: str) -> str:
+    return re.sub(r"\s+", "", value).strip()
+
+
+def action_digiseller_code() -> int:
+    _print_header("Digiseller Unique-Code Delivery")
+    print(
+        "Use this when the buyer page shows a paid order with a unique code that "
+        "has not yet been verified by the seller."
+    )
+    unique_code = _normalize_digiseller_unique_code(
+        _ask_text("Digiseller unique code from buyer page")
+    )
+    if not unique_code:
+        print("Unique code is required.")
+        return 1
+
+    try:
+        from app.clients import DigisellerClient, GEngineClient
+        from app.config import get_settings
+        from app.db import SessionLocal
+        from app.services.order_sync import process_digiseller_unique_code
+    except ImportError as exc:
+        print(f"Could not import app dependencies: {exc}")
+        print("Run: python -m pip install -r requirements.txt")
+        return 1
+
+    settings = get_settings()
+    if not settings.gengine_api_key:
+        print("GENGINE_API_KEY is required for Digiseller delivery.")
+        return 1
+    if not settings.digiseller_api_key:
+        print("DIGISELLER_API_KEY is required for Digiseller delivery.")
+        return 1
+
+    supplier_client = GEngineClient(settings.gengine_base_url, settings.gengine_api_key)
+    marketplace_client = DigisellerClient(
+        settings.digiseller_base_url,
+        settings.digiseller_api_key,
+        seller_id=settings.digiseller_seller_id,
+        task_poll_timeout_seconds=settings.digiseller_task_poll_timeout_seconds,
+        task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
+    )
+    try:
+        with SessionLocal() as db:
+            result = process_digiseller_unique_code(
+                unique_code=unique_code,
+                db=db,
+                settings=settings,
+                supplier_client=supplier_client,
+                marketplace_client=marketplace_client,
+            )
+    except Exception as exc:  # noqa: BLE001 - CLI should show a readable failure.
+        print(f"Digiseller unique-code delivery failed: {exc}")
+        return 1
+    finally:
+        marketplace_client.close()
+        supplier_client.close()
 
     _print_order_sync_result(result)
     return 0 if result.get("errors", 0) == 0 else 1
@@ -2379,6 +2457,17 @@ def _products_for_reference(reference: GEngineProductReference, products: list[A
         if _product_matches_reference_id(product, reference)
     ]
     if id_matches:
+        if reference.kind == "shop" and reference.slug is not None:
+            slug_matches = [
+                product
+                for product in products
+                if _product_matches_reference_slug(product, reference)
+            ]
+            if slug_matches:
+                merged_by_id = {int(product.id): product for product in id_matches}
+                for product in slug_matches:
+                    merged_by_id.setdefault(int(product.id), product)
+                return _sort_products_for_reference(list(merged_by_id.values()), reference)
         return _sort_products_for_reference(id_matches, reference)
 
     if reference.kind in {"recharge", "gifts"}:
@@ -3532,6 +3621,7 @@ COMMANDS: dict[str, Callable[[], int]] = {
     "sync-prices": action_sync_prices,
     "sync-stock": action_sync_stock,
     "sync-orders": action_sync_orders,
+    "digiseller-code": action_digiseller_code,
     "list-products": action_list_products,
     "list-offers": action_list_offers,
     "manual-link": action_manual_link,

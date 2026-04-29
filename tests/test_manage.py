@@ -173,6 +173,45 @@ def test_products_for_reference_prefers_id_matches_over_slug_fallback() -> None:
     assert [product.id for product in matches] == [1]
 
 
+def test_products_for_shop_reference_keeps_slug_denomination_rows_with_parent_row() -> None:
+    reference = manage.GEngineProductReference(
+        kind="shop",
+        product_id="6",
+        slug="steam-wallet-code-usa",
+        source="https://b2b.g-engine.net/en/shop/6/steam-wallet-code-usa",
+    )
+    products = [
+        SimpleNamespace(
+            id=10,
+            title="Steam Wallet Code USA",
+            category="Gift Card, Steam",
+            denomination=None,
+            supplier_product_id="6",
+            raw_payload_json="{}",
+        ),
+        SimpleNamespace(
+            id=84,
+            title="5 USD",
+            category="Gift Card, Steam",
+            denomination="5 USD",
+            supplier_product_id="600",
+            raw_payload_json='{"source_slug":"steam-wallet-code-usa"}',
+        ),
+        SimpleNamespace(
+            id=120,
+            title="5 USD",
+            category="Gift Card, Google",
+            denomination="5 USD",
+            supplier_product_id="566",
+            raw_payload_json='{"source_slug":"google-play-usa"}',
+        ),
+    ]
+
+    matches = manage._products_for_reference(reference, products)
+
+    assert [product.id for product in matches] == [10, 84]
+
+
 def test_products_for_reference_recharge_requires_exact_id_metadata() -> None:
     reference = manage.GEngineProductReference(
         kind="recharge",

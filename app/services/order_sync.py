@@ -369,6 +369,8 @@ def _normalize_marketplace_sale(
         sale_price=(
             _to_decimal(payload.get("amount"))
             or _to_decimal(payload.get("amount_usd"))
+            or _to_decimal(payload.get("amount_in"))
+            or _to_decimal(payload.get("amount_out"))
             or _to_decimal(payload.get("price"))
         ),
         quantity=quantity,

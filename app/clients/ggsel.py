@@ -872,18 +872,53 @@ class GGSELClient(BaseAPIClient):
             return task_status
         return response
 
+    @classmethod
+    def _extract_sales_items(cls, payload: object) -> list[dict[str, Any]]:
+        if isinstance(payload, list):
+            return [item for item in payload if isinstance(item, dict)]
+        if not isinstance(payload, dict):
+            return []
+
+        for key in ("rows", "sales", "items", "data", "content"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+            if isinstance(value, dict):
+                nested = cls._extract_sales_items(value)
+                if nested:
+                    return nested
+        return []
+
+    @staticmethod
+    def _normalize_sales_item(item: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(item)
+        product = normalized.get("product")
+        if isinstance(product, dict):
+            for source_key, target_key in (
+                ("id", "product_id"),
+                ("name", "product_name"),
+                ("price_usd", "amount_usd"),
+                ("price_rub", "amount_rub"),
+                ("price_eur", "amount_eur"),
+                ("price_uah", "amount_uah"),
+            ):
+                value = product.get(source_key)
+                if value not in (None, ""):
+                    normalized.setdefault(target_key, value)
+        return normalized
+
     def get_latest_sales(self) -> list[dict[str, Any]]:
         response = self._request_json(
             method="GET",
             path=self._build_path("/api/seller-last-sales"),
-            params=self._auth_query_params(),
+            params={**self._auth_query_params(), "group": "false", "top": "1000"},
+            headers={"Accept": "application/json"},
         )
         if isinstance(response, list):
-            return [item for item in response if isinstance(item, dict)]
+            return [self._normalize_sales_item(item) for item in response if isinstance(item, dict)]
         if isinstance(response, dict):
-            data = response.get("data")
-            if isinstance(data, list):
-                return [item for item in data if isinstance(item, dict)]
+            self._ensure_success_response(response, context="GGSEL latest sales failed")
+            return [self._normalize_sales_item(item) for item in self._extract_sales_items(response)]
         return []
 
     def get_order(self, order_id: str) -> dict[str, Any]:

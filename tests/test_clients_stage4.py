@@ -1029,6 +1029,24 @@ def test_digiseller_unique_code_delivery_uses_confirmed_endpoints() -> None:
     assert captured["deliver_query"]["token"] == "secret"
 
 
+def test_digiseller_unique_code_error_masks_code_in_path() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/purchases/unique-code/ABC1234567890000"):
+            return httpx.Response(status_code=404, json={"error": "not found"})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    with pytest.raises(APIRequestError) as exc_info:
+        client.verify_unique_code("ABC1234567890000")
+    client.close()
+
+    error_text = str(exc_info.value)
+    assert "ABC1234567890000" not in error_text
+    assert "AB************00" in error_text
+
+
 def test_digiseller_send_buyer_message_uses_order_as_dialog_id() -> None:
     captured: dict[str, Any] = {}
 
@@ -1048,6 +1066,59 @@ def test_digiseller_send_buyer_message_uses_order_as_dialog_id() -> None:
     assert result == {"status": "ok"}
     assert captured["query"] == {"token": "secret", "id_i": "9001"}
     assert captured["json"] == {"message": "hello", "files": []}
+
+
+def test_digiseller_get_latest_sales_reads_official_rows_payload() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["query"] = dict(request.url.params)
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        if request.url.path.endswith("/api/seller-sells/v2"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "retval": 0,
+                    "total_rows": 1,
+                    "pages": 1,
+                    "page": 1,
+                    "rows": [
+                        {
+                            "invoice_id": 290877840,
+                            "product_id": 5856640,
+                            "product_name": "STEAM USD",
+                            "date_pay": "2026-04-29 02:05:00",
+                            "amount_in": 7.57,
+                            "amount_currency": "WMZ",
+                            "returned": 0,
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    sales = client.get_latest_sales()
+    client.close()
+
+    assert captured["path"].endswith("/api/seller-sells/v2")
+    assert captured["query"]["token"] == "secret"
+    assert captured["body"]["returned"] == 1
+    assert captured["body"]["rows"] == 1000
+    assert sales == [
+        {
+            "invoice_id": 290877840,
+            "product_id": 5856640,
+            "product_name": "STEAM USD",
+            "date_pay": "2026-04-29 02:05:00",
+            "amount_in": 7.57,
+            "amount_currency": "WMZ",
+            "returned": 0,
+        }
+    ]
 
 
 def test_digiseller_variant_update_error_includes_response_body() -> None:
@@ -1166,6 +1237,54 @@ def test_ggsel_send_buyer_message_uses_prefixed_debates_endpoint() -> None:
     assert result == {"status": "ok"}
     assert captured["query"] == {"token": "secret", "id_i": "9001"}
     assert captured["json"] == {"message": "hello", "files": []}
+
+
+def test_ggsel_get_latest_sales_reads_sales_payload_and_flattens_product() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["path"] = request.url.path
+        captured["query"] = dict(request.url.params)
+        if request.url.path.endswith("/api_sellers/api/seller-last-sales"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "retval": 0,
+                    "sales": [
+                        {
+                            "date": "2026-04-29 02:05:00",
+                            "invoice_id": 290877840,
+                            "product": {
+                                "id": 5856640,
+                                "name": "STEAM USD",
+                                "price_usd": 7.57,
+                            },
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GGSELClient(base_url="https://seller.ggsel.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    sales = client.get_latest_sales()
+    client.close()
+
+    assert captured["path"].endswith("/api_sellers/api/seller-last-sales")
+    assert captured["query"]["token"] == "secret"
+    assert captured["query"]["group"] == "false"
+    assert captured["query"]["top"] == "1000"
+    assert sales == [
+        {
+            "date": "2026-04-29 02:05:00",
+            "invoice_id": 290877840,
+            "product": {"id": 5856640, "name": "STEAM USD", "price_usd": 7.57},
+            "product_id": 5856640,
+            "product_name": "STEAM USD",
+            "amount_usd": 7.57,
+        }
+    ]
 
 
 def test_ggsel_get_offer_by_id_filters_from_seller_goods() -> None:

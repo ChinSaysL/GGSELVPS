@@ -1034,7 +1034,7 @@ def sync_offer_stock(
             cost_per_unit_usd=supplier.cost_usd,
             min_purchase_quantity=mapping.min_purchase_quantity,
         )
-        detail: dict[str, Any] = {
+        stock_detail: dict[str, Any] = {
             "offer_id": offer.id,
             "marketplace": offer.marketplace,
             "marketplace_offer_id": offer.marketplace_offer_id,
@@ -1046,12 +1046,12 @@ def sync_offer_stock(
         }
         try:
             cast(Any, client).set_offer_stock(offer.marketplace_offer_id, stock_qty)
-            detail["status"] = "ok"
+            stock_detail["status"] = "ok"
         except Exception as exc:  # noqa: BLE001
-            detail["status"] = "error"
-            detail["reason"] = str(exc)
+            stock_detail["status"] = "error"
+            stock_detail["reason"] = str(exc)
             stats["errors"] += 1
-        stats["details"].append(detail)
+        stats["details"].append(stock_detail)
 
     if stats["errors"] > 0:
         stats["status"] = "partial"
