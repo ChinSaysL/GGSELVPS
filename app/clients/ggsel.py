@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import hashlib
 import time
-from decimal import Decimal, ROUND_UP
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -508,27 +507,26 @@ class GGSELClient(BaseAPIClient):
     def _variant_type_name(value: object) -> str:
         if isinstance(value, int):
             return {
-                0: "percentplus",
-                1: "percentminus",
-                2: "priceplus",
-                3: "priceminus",
-            }.get(value, "priceplus")
+                0: "PercentPlus",
+                1: "PercentMinus",
+                2: "PricePlus",
+                3: "PriceMinus",
+            }.get(value, "PricePlus")
 
         text = str(value or "").strip()
         compact = text.replace("_", "").replace("-", "").replace(" ", "").lower()
         if compact in {"percentplus", "0"}:
-            return "percentplus"
+            return "PercentPlus"
         if compact in {"percentminus", "1"}:
-            return "percentminus"
+            return "PercentMinus"
         if compact in {"priceminus", "3"}:
-            return "priceminus"
-        return "priceplus"
+            return "PriceMinus"
+        return "PricePlus"
 
     @classmethod
     def _normalize_price_update_variant(cls, variant: dict[str, Any]) -> dict[str, Any]:
         # GGSEL schema uses `value` for variant ID, `modify_type` (string) and
-        # `modify_value` (string) for the price modifier — inserting extra keys
-        # like `variant_id`, `type`, or `rate` causes an HTTP 500 error!
+        # `modify_value` (string) for the price modifier — not `variant_id`/`type`/`rate`.
         variant_id = cls._extract_variant_id(variant)
         type_value = variant.get("type", 2)
         rate = variant.get("rate", 0)
@@ -963,10 +961,9 @@ class GGSELClient(BaseAPIClient):
         variants: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         _ = currency
-        price_value = Decimal(str(price)).quantize(Decimal("0.01"), rounding=ROUND_UP)
         request_item: dict[str, Any] = {
             "product_id": int(offer_id),
-            "price": float(price_value),
+            "price": float(price),
         }
         if variants:
             request_item["variants"] = [
