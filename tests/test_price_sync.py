@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.clients.base import APIRequestError
 from app.config import Settings
 from app.db import Base
 from app.models import MarketplaceOffer, ProductMapping, SupplierProduct
@@ -52,6 +53,7 @@ class FakeMarketplacePriceClient:
 @dataclass
 class FakeSupplierRefreshClient:
     products_by_id: dict[str, list[dict[str, Any]]]
+    error: Exception | None = None
 
     def list_product_denominations(
         self,
@@ -61,6 +63,8 @@ class FakeSupplierRefreshClient:
         source_slug: str | None = None,
     ) -> list[dict[str, Any]]:
         _ = (fallback_title, source_slug)
+        if self.error is not None:
+            raise self.error
         return self.products_by_id.get(product_id, [])
 
     def list_recharge_service_products(
@@ -72,6 +76,8 @@ class FakeSupplierRefreshClient:
         include_unpriced: bool = False,
     ) -> list[dict[str, Any]]:
         _ = (fallback_title, source_slug, include_unpriced)
+        if self.error is not None:
+            raise self.error
         return self.products_by_id.get(f"recharge:{service_id}", [])
 
     def close(self) -> None:
@@ -600,6 +606,43 @@ def test_price_sync_refreshes_linked_gengine_cost_before_preview(
     assert result["prices_previewed"] == 1
     assert supplier.cost_usd == Decimal("6.00")
     assert Decimal(result["details"][0]["cost_usd"]) == Decimal("6.00")
+
+
+def test_price_sync_skips_price_push_when_supplier_refresh_is_down(
+    db_session: Session,
+) -> None:
+    supplier, _offer, _mapping = _linked_offer(
+        db_session,
+        offer_price=Decimal("1.00"),
+        offer_currency="USD",
+        supplier_cost_usd=Decimal("5.50"),
+        supplier_product_id="5",
+        raw_payload_json='{"id":"5","product_id":"5","base_product_id":"5"}',
+    )
+    supplier_client = FakeSupplierRefreshClient(
+        {},
+        error=APIRequestError("G-Engine returned HTTP 503 for GET /v2.1/shop/products/5"),
+    )
+    marketplace_client = FakeMarketplacePriceClient()
+
+    result = sync_offer_prices(
+        db=db_session,
+        settings=_settings_for_tests(default_currency="USD"),
+        marketplace_clients={"digiseller": marketplace_client},
+        supplier_client=supplier_client,
+        dry_run=False,
+        refresh_supplier_prices=True,
+    )
+
+    db_session.refresh(supplier)
+    assert result["status"] == "partial"
+    assert result["supplier_refresh_errors"] == 1
+    assert result["prices_updated"] == 0
+    assert result["skipped"] == 1
+    assert marketplace_client.calls == []
+    assert supplier.cost_usd == Decimal("5.50")
+    assert result["details"][0]["reason"] == "supplier_provider_unavailable"
+    assert result["details"][1]["reason"] == "supplier_price_refresh_failed"
 
 
 def test_price_sync_refreshes_recharge_service_cost_before_preview(

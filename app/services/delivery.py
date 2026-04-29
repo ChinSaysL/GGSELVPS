@@ -54,6 +54,8 @@ def detect_delivery_product_kind(
         return "recharge"
     if "gift card" in searchable or "gift-card" in searchable:
         return "gift_card"
+    if source_type in {"gift", "gifts"} or supplier_id.startswith(("gift:", "gifts:")):
+        return "steam_game"
     if "steam" in searchable and ("game" in searchable or "games" in searchable):
         return "steam_game"
     return "product"
@@ -84,6 +86,17 @@ def build_purchase_message(
         f"and will be delivered shortly.{en_product}\n\n"
         "RU: Спасибо за вашу покупку! Ваш заказ успешно обработан "
         f"и будет доставлен в ближайшее время.{ru_product}"
+    )
+
+
+def build_provider_unavailable_message(
+    *,
+    product_title: str | None = None,
+) -> str:
+    en_product, _ru_product = _product_lines(product_title)
+    return (
+        "EN: Our provider is currently down. We will deliver your order as soon as "
+        f"it is active again.{en_product}"
     )
 
 

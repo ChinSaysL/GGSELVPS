@@ -179,6 +179,73 @@ def test_gengine_shop_status_does_not_pay_cancelled_order() -> None:
     assert captured == [{"method": "GET", "path": "/v2.1/shop/orders/7473"}]
 
 
+def test_gengine_create_gift_order_uses_gifts_endpoint_without_pay_step() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8") or "{}") if request.content else None
+        captured.append({"method": request.method, "path": request.url.path, "body": body})
+        if request.url.path.endswith("/gifts/orders"):
+            return httpx.Response(status_code=200, json={"id": 9001, "status": "accepted"})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    response = client.create_order(
+        "gift:4451080:777:TR",
+        buyer_inputs={"steam_invite_url": "https://steamcommunity.com/invite/abc"},
+        external_order_id="ggsel:9001",
+        product_payload={"source_type": "gift"},
+    )
+    client.close()
+
+    assert response == {"id": 9001, "status": "accepted", "supplier_order_id": "gift:9001"}
+    assert captured == [
+        {
+            "method": "POST",
+            "path": "/v2.1/gifts/orders",
+            "body": {
+                "invite_url": "https://steamcommunity.com/invite/abc",
+                "package_id": 777,
+                "region": "TR",
+            },
+        }
+    ]
+
+
+def test_gengine_gift_status_uses_gifts_endpoint() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.append({"method": request.method, "path": request.url.path})
+        if request.url.path.endswith("/gifts/orders/9001"):
+            return httpx.Response(status_code=200, json={"id": 9001, "status": "delivered"})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    response = client.get_order_status("gift:9001")
+    client.close()
+
+    assert response == {"id": 9001, "status": "delivered", "supplier_order_id": "gift:9001"}
+    assert captured == [{"method": "GET", "path": "/v2.1/gifts/orders/9001"}]
+
+
+def test_gengine_gift_order_requires_invite_url() -> None:
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+
+    with pytest.raises(APIClientError, match="invite_url"):
+        client.create_order(
+            "gift:4451080:777:TR",
+            buyer_inputs={},
+            product_payload={"source_type": "gift"},
+        )
+
+    client.close()
+
+
 def test_gengine_create_recharge_order_posts_params_and_pays_when_verified() -> None:
     captured: list[dict[str, Any]] = []
 
@@ -484,6 +551,95 @@ def test_gengine_list_product_denominations_fetches_direct_product_id() -> None:
             "denomination": "500 TRY",
             "stock": "300+",
         },
+    ]
+
+
+def test_gengine_list_gift_app_products_expands_package_regions() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/gifts/apps/4451080"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "id": 4451080,
+                    "name": "Vituber Melody",
+                    "type": "game",
+                    "packages": [
+                        {
+                            "id": 777,
+                            "name": "Vituber Melody",
+                            "prices": [
+                                {
+                                    "region": "TR",
+                                    "currency": "USD",
+                                    "price": 5.5,
+                                    "zone": "Turkey",
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    products = client.list_gift_app_products(
+        "4451080",
+        fallback_title="Vituber Melody",
+        source_slug="vituber-melody",
+    )
+    client.close()
+
+    assert products == [
+        {
+            "id": "gift:4451080:777:TR",
+            "name": "Vituber Melody",
+            "type": "game",
+            "packages": [
+                {
+                    "id": 777,
+                    "name": "Vituber Melody",
+                    "prices": [
+                        {
+                            "region": "TR",
+                            "currency": "USD",
+                            "price": 5.5,
+                            "zone": "Turkey",
+                        }
+                    ],
+                }
+            ],
+            "prices": [
+                {
+                    "region": "TR",
+                    "currency": "USD",
+                    "price": 5.5,
+                    "zone": "Turkey",
+                }
+            ],
+            "region": "TR",
+            "currency": "USD",
+            "price": 5.5,
+            "zone": "Turkey",
+            "source_type": "gift",
+            "gift_app_id": "4451080",
+            "gift_id": "4451080",
+            "gift_package_id": "777",
+            "gift_region": "TR",
+            "package_id": "777",
+            "title": "Vituber Melody",
+            "category": "Games, Steam Gifts",
+            "denomination": "TR",
+            "cost_usd": "5.5",
+            "stock": "unlimited",
+            "is_available": True,
+            "source_slug": "vituber-melody",
+            "base_product_id": "4451080",
+            "gift_package_name": "Vituber Melody",
+            "gift_currency": "USD",
+            "gift_zone": "Turkey",
+        }
     ]
 
 

@@ -129,6 +129,7 @@ After `python manage.py manual-link`, run the offered live stock sync prompt if 
   - `price = base + (base * markup_percent) + (base * marketplace_commission_percent)`
   - resulting price is rounded to 3 decimals
 - Multi-denomination offers with linked variant IDs are updated in one bulk price call using variant modifiers.
+- If G-Engine is unavailable during supplier cost refresh, price sync skips those affected offers instead of writing prices from stale refreshed data.
 
 For GGSEL live writes, set `GGSEL_API_KEY` to the seller API key/token accepted by GGSEL write endpoints. If you have the long-lived seller API key plus seller ID, also set `GGSEL_SELLER_ID` so the app can call `/api_sellers/api/apilogin` and refresh the short-lived token automatically. A browser/session JWT may work for public item lookup but can still return `401` for price updates.
 
@@ -151,6 +152,11 @@ Steam Wallet top-ups, can also be linked in two modes during `manual-link`:
 - fixed package mode: every order sends the same G-Engine `Quantity`
 - marketplace-quantity mode: the buyer's marketplace quantity is sent as G-Engine `Quantity`
 
+Gift links are imported from `/gifts/apps/{app_id}` as one local row per package and country.
+The local supplier ID is shaped like `gift:{app_id}:{package_id}:{region}` and the row
+denomination is the country code, so marketplace options such as `RU`, `US`, or `CIS` can be
+linked to the matching G-Engine gift country.
+
 For unit listings like "1 Steam RUB unit", use marketplace-quantity mode with `G-Engine Quantity
 per 1 marketplace unit = 1` and supplier cost per 1 marketplace unit. Recharge orders use
 `/recharge/orders/{service_id}`, pay verified orders through `/recharge/orders/{order_id}/pay`, and
@@ -163,8 +169,15 @@ treat `shipped` as fulfilled without a gift-card code.
 - polls incrementally from the last successful order-sync run, with a small overlap, instead of re-scanning all historical marketplace sales every time
 - creates one G-Engine order for the mapped supplier row, including buyer input fields when the marketplace order provides them
 - immediately pays G-Engine shop orders through `/shop/orders/{order_id}/pay`; if the pay response is still processing, later order sync runs poll `/shop/orders/{order_id}` until codes are available
+- creates G-Engine gift orders through `/gifts/orders` using the linked country/region row and the buyer's Steam quick-invite URL, then polls `/gifts/orders/{order_id}` until delivery is complete
 - stores the supplier order ID before delivery so retries do not buy the same marketplace order twice
 - delivers returned codes through the marketplace order correspondence and stores only masked codes locally
+
+If G-Engine is temporarily unavailable while creating or polling a supplier order, order sync sends
+one buyer message saying the provider is currently down and the order will be delivered when it is
+active again. The local order stays retryable (`pending` before a supplier order exists,
+`supplier_order_created` after one exists), so later order-sync runs continue automatically without
+creating duplicate deliveries.
 
 Digiseller unique-code products require a second buyer-side step. Configure the Digiseller product's automatic code verification URL to:
 

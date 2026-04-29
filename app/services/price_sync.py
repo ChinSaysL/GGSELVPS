@@ -21,6 +21,10 @@ from app.pricing import (
 )
 from app.services.fx import resolve_usd_rub_rate
 from app.services.product_sync import sync_products
+from app.services.provider_status import (
+    SUPPLIER_PROVIDER_UNAVAILABLE,
+    is_temporary_provider_error,
+)
 from app.utils.logging import get_logger, log_event
 
 logger = get_logger(__name__)
@@ -247,12 +251,13 @@ def _refresh_linked_supplier_products(
         except Exception as exc:  # noqa: BLE001 - keep scheduler resilient per product group.
             stats["supplier_refresh_errors"] += 1
             failed_product_ids.add(_supplier_refresh_reference_key(reference))
+            reason = SUPPLIER_PROVIDER_UNAVAILABLE if is_temporary_provider_error(exc) else str(exc)
             stats["details"].append(
                 {
                     "action": "supplier_refresh_error",
                     "gengine_section": reference.kind,
                     "gengine_product_id": reference.product_id,
-                    "reason": str(exc),
+                    "reason": reason,
                 }
             )
             continue
@@ -1237,7 +1242,7 @@ def sync_offer_prices(
         detail["action"] = "updated"
         stats["details"].append(detail)
 
-    if stats["errors"] > 0:
+    if stats["errors"] > 0 or stats["supplier_refresh_errors"] > 0:
         stats["status"] = "partial"
 
     return stats

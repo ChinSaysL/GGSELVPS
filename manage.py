@@ -1023,6 +1023,26 @@ def _friendly_gengine_import_error(reference: GEngineProductReference, error: Ex
     return f"Could not fetch G-Engine product ID {reference.product_id}: {message}"
 
 
+def _format_gengine_import_skip_details(result: dict[str, Any]) -> str:
+    skipped_details = result.get("details")
+    detail_lines: list[str] = []
+    if isinstance(skipped_details, list):
+        for item in skipped_details[:3]:
+            if not isinstance(item, dict):
+                continue
+            reason = item.get("reason")
+            supplier_id = item.get("supplier_product_id")
+            title = item.get("title")
+            cost_usd = item.get("cost_usd")
+            detail_lines.append(
+                f"- reason={reason}; supplier_id={supplier_id}; "
+                f"title={title}; cost_usd={cost_usd}"
+            )
+    if not detail_lines:
+        return ""
+    return "\nSkipped rows:\n" + "\n".join(detail_lines)
+
+
 def _import_gengine_reference(reference: GEngineProductReference) -> GEngineImportResult:
     if reference.kind not in {"shop", "recharge", "gifts", "unknown"}:
         return GEngineImportResult(
@@ -1056,6 +1076,12 @@ def _import_gengine_reference(reference: GEngineProductReference) -> GEngineImpo
                 fallback_title=_title_from_slug(reference.slug),
                 source_slug=reference.slug,
                 include_unpriced=True,
+            )
+        elif reference.kind == "gifts":
+            products = client.list_gift_app_products(
+                reference.product_id,
+                fallback_title=_title_from_slug(reference.slug),
+                source_slug=reference.slug,
             )
         else:
             products = client.list_product_denominations(
@@ -1092,11 +1118,13 @@ def _import_gengine_reference(reference: GEngineProductReference) -> GEngineImpo
 
     imported_rows = int(result["products_imported"])
     if imported_rows == 0:
+        detail_text = _format_gengine_import_skip_details(result)
         return GEngineImportResult(
             imported_rows=0,
             error_message=(
                 "G-Engine returned rows, but product sync skipped them because required "
                 f"fields were missing or unsafe. Sync stats: skipped={result.get('skipped')}."
+                f"{detail_text}"
             ),
         )
     return GEngineImportResult(imported_rows=imported_rows)

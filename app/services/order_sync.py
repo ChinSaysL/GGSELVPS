@@ -19,9 +19,15 @@ from app.models import MarketplaceOffer, Order, ProductMapping, SyncRun
 from app.services.delivery import (
     DeliveryProductKind,
     build_delivery_message,
+    build_provider_unavailable_message,
     build_purchase_message,
     detect_delivery_product_kind,
     masked_code_for_logs,
+)
+from app.services.provider_status import (
+    SUPPLIER_PROVIDER_UNAVAILABLE,
+    SUPPLIER_PROVIDER_UNAVAILABLE_NOTIFIED,
+    is_temporary_provider_error,
 )
 from app.utils.logging import get_logger, log_event
 
@@ -735,6 +741,70 @@ def _send_purchase_acknowledgement(
         )
 
 
+def _send_provider_unavailable_notice(
+    *,
+    order: Order,
+    sale: NormalizedMarketplaceSale,
+    marketplace_client: MarketplaceOrderClientProtocol,
+    product_title: str,
+    stats: dict[str, Any],
+) -> bool:
+    if order.error_message == SUPPLIER_PROVIDER_UNAVAILABLE_NOTIFIED:
+        return True
+
+    buyer_id = sale.buyer_id or order.buyer_id or ""
+    message = build_provider_unavailable_message(product_title=product_title)
+    try:
+        marketplace_client.send_buyer_message(order.marketplace_order_id, buyer_id, message)
+    except Exception as exc:  # noqa: BLE001 - keep the order retryable even if chat fails.
+        stats["details"].append(
+            {
+                "action": "provider_unavailable_message_failed",
+                "order_id": order.id,
+                "reason": str(exc),
+            }
+        )
+        return False
+    return True
+
+
+def _defer_for_provider_unavailable(
+    *,
+    db: Session,
+    order: Order,
+    sale: NormalizedMarketplaceSale,
+    offer: MarketplaceOffer,
+    mapping: ProductMapping,
+    marketplace_client: MarketplaceOrderClientProtocol,
+    stats: dict[str, Any],
+    retry_status: OrderStatus,
+) -> None:
+    product_title, _product_kind = _delivery_message_context(offer, mapping, sale)
+    notice_sent = _send_provider_unavailable_notice(
+        order=order,
+        sale=sale,
+        marketplace_client=marketplace_client,
+        product_title=product_title,
+        stats=stats,
+    )
+    order.status = retry_status
+    order.error_message = (
+        SUPPLIER_PROVIDER_UNAVAILABLE_NOTIFIED if notice_sent else SUPPLIER_PROVIDER_UNAVAILABLE
+    )
+    db.add(order)
+    db.commit()
+    stats["provider_unavailable"] += 1
+    stats["skipped"] += 1
+    stats["details"].append(
+        {
+            "action": "skipped",
+            "order_id": order.id,
+            "marketplace_order_id": order.marketplace_order_id,
+            "reason": SUPPLIER_PROVIDER_UNAVAILABLE,
+        }
+    )
+
+
 def _create_supplier_purchase(
     *,
     order: Order,
@@ -1031,6 +1101,18 @@ def _process_normalized_sale(
                 supplier_client=supplier_client,
             )
         except Exception as exc:  # noqa: BLE001 - keep other paid orders moving.
+            if is_temporary_provider_error(exc):
+                _defer_for_provider_unavailable(
+                    db=db,
+                    order=order,
+                    sale=sale,
+                    offer=offer,
+                    mapping=mapping,
+                    marketplace_client=marketplace_client,
+                    stats=stats,
+                    retry_status="pending",
+                )
+                return
             order.status = "failed"
             order.error_message = str(exc)
             db.add(order)
@@ -1135,6 +1217,18 @@ def _process_normalized_sale(
             codes=codes,
         )
     except Exception as exc:  # noqa: BLE001 - preserve supplier purchase for delivery retry.
+        if is_temporary_provider_error(exc):
+            _defer_for_provider_unavailable(
+                db=db,
+                order=order,
+                sale=sale,
+                offer=offer,
+                mapping=mapping,
+                marketplace_client=marketplace_client,
+                stats=stats,
+                retry_status="supplier_order_created" if order.supplier_order_id else "pending",
+            )
+            return
         order.status = "failed" if not order.supplier_order_id else "needs_manual_review"
         order.error_message = str(exc)
         db.add(order)
@@ -1239,6 +1333,9 @@ def _load_retryable_pending_order_ids(
     retry_conditions = [
         Order.error_message.like("awaiting_digiseller_unique_code%"),
         Order.error_message == "supplier_order_not_ready",
+        Order.error_message.in_(
+            (SUPPLIER_PROVIDER_UNAVAILABLE, SUPPLIER_PROVIDER_UNAVAILABLE_NOTIFIED)
+        ),
         and_(Order.status == "pending", Order.supplier_order_id.is_(None)),
     ]
     statuses = ["pending", "supplier_order_created"]
@@ -1280,6 +1377,7 @@ def sync_orders(
         "orders_delivered": 0,
         "skipped": 0,
         "errors": 0,
+        "provider_unavailable": 0,
         "details": [],
     }
     date_start, date_finish = _order_poll_window(db, settings)
@@ -1332,7 +1430,7 @@ def sync_orders(
                 stats=stats,
             )
 
-    if stats["errors"] > 0:
+    if stats["errors"] > 0 or stats["provider_unavailable"] > 0:
         stats["status"] = "partial"
     return stats
 
@@ -1354,6 +1452,7 @@ def process_digiseller_unique_code(
         "orders_delivered": 0,
         "skipped": 0,
         "errors": 0,
+        "provider_unavailable": 0,
         "details": [],
     }
     verification_payload = marketplace_client.verify_unique_code(unique_code)

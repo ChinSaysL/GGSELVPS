@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.clients.base import APIRequestError
 from app.config import Settings
 from app.db import Base
 from app.models import MarketplaceOffer, ProductMapping, SupplierProduct
@@ -18,8 +19,11 @@ from app.services.product_sync import sync_products
 @dataclass
 class FakeSupplierClient:
     products: list[dict[str, Any]]
+    error: Exception | None = None
 
     def list_products(self) -> list[dict[str, Any]]:
+        if self.error is not None:
+            raise self.error
         return self.products
 
 
@@ -57,6 +61,30 @@ def _db_session() -> Generator[Session, None, None]:
 @pytest.fixture
 def db_session() -> Generator[Session, None, None]:
     yield from _db_session()
+
+
+def test_product_sync_keeps_local_catalog_unchanged_when_supplier_is_down(
+    db_session: Session,
+) -> None:
+    supplier_client = FakeSupplierClient(
+        products=[],
+        error=APIRequestError("G-Engine returned HTTP 503 for GET /v2.1/shop/products"),
+    )
+
+    result = sync_products(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_name="digiseller",
+    )
+
+    suppliers = db_session.execute(select(SupplierProduct)).scalars().all()
+    assert result["status"] == "provider_unavailable"
+    assert result["provider_unavailable"] == 1
+    assert result["products_received"] == 0
+    assert result["products_imported"] == 0
+    assert result["details"][0]["reason"] == "supplier_provider_unavailable"
+    assert suppliers == []
 
 
 def test_product_sync_imports_supplier_products_without_creating_offers(
@@ -354,6 +382,16 @@ def test_product_sync_skips_zero_cost_non_placeholder_product(db_session: Sessio
 
     assert result["products_imported"] == 0
     assert result["skipped"] == 1
+    assert result["details"] == [
+        {
+            "action": "skipped",
+            "reason": "non_positive_cost_usd",
+            "supplier_product_id": "zero-cost",
+            "title": "Unexpected Free Product",
+            "cost_usd": "0",
+            "source_type": None,
+        }
+    ]
     assert suppliers == []
 
 
@@ -381,6 +419,10 @@ def test_product_sync_skips_products_missing_core_fields(db_session: Session) ->
     assert result["products_received"] == 2
     assert result["products_imported"] == 0
     assert result["skipped"] == 2
+    assert [item["reason"] for item in result["details"]] == [
+        "missing_title",
+        "missing_supplier_product_id",
+    ]
     assert result["manual_link_required"] == 0
     assert result["offers_skipped"] == 0
     assert len(suppliers) == 0

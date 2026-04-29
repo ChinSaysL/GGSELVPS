@@ -13,6 +13,10 @@ from app.clients import GEngineClient
 from app.config import Settings, get_settings
 from app.db import SessionLocal
 from app.models import SupplierProduct, SyncRun
+from app.services.provider_status import (
+    SUPPLIER_PROVIDER_UNAVAILABLE,
+    is_temporary_provider_error,
+)
 from app.utils.logging import get_logger, log_event
 
 logger = get_logger(__name__)
@@ -87,17 +91,53 @@ def _is_manual_cost_recharge_placeholder(raw_product: dict[str, Any]) -> bool:
     )
 
 
+def _supplier_product_skip_reason(raw_product: dict[str, Any]) -> str | None:
+    supplier_product_id = _first_non_empty_str(raw_product, ("id", "product_id", "productId", "sku"))
+    if supplier_product_id is None:
+        return "missing_supplier_product_id"
+
+    title = _first_non_empty_str(raw_product, ("title", "name", "product_name"))
+    if title is None:
+        return "missing_title"
+
+    cost_value = _first_decimal(
+        raw_product,
+        ("cost_usd", "cost", "price_usd", "price", "amount"),
+    )
+    if cost_value is None:
+        return "missing_or_invalid_cost_usd"
+    if cost_value <= 0 and not _is_manual_cost_recharge_placeholder(raw_product):
+        return "non_positive_cost_usd"
+    return None
+
+
+def _skip_detail(raw_product: dict[str, Any], *, reason: str) -> dict[str, Any]:
+    supplier_product_id = _first_non_empty_str(raw_product, ("id", "product_id", "productId", "sku"))
+    title = _first_non_empty_str(raw_product, ("title", "name", "product_name"))
+    cost_value = _first_non_empty_str(raw_product, ("cost_usd", "cost", "price_usd", "price", "amount"))
+    return {
+        "action": "skipped",
+        "reason": reason,
+        "supplier_product_id": supplier_product_id,
+        "title": title,
+        "cost_usd": cost_value,
+        "source_type": _first_non_empty_str(raw_product, ("source_type",)),
+    }
+
+
 def _normalize_supplier_product(raw_product: dict[str, Any]) -> NormalizedSupplierProduct | None:
+    if _supplier_product_skip_reason(raw_product) is not None:
+        return None
+
     supplier_product_id = _first_non_empty_str(raw_product, ("id", "product_id", "productId", "sku"))
     title = _first_non_empty_str(raw_product, ("title", "name", "product_name"))
     cost_value = _first_decimal(
         raw_product,
         ("cost_usd", "cost", "price_usd", "price", "amount"),
     )
-    if supplier_product_id is None or title is None or cost_value is None:
-        return None
-    if cost_value <= 0 and not _is_manual_cost_recharge_placeholder(raw_product):
-        return None
+    assert supplier_product_id is not None
+    assert title is not None
+    assert cost_value is not None
 
     category = _first_non_empty_str(raw_product, ("category", "category_name", "group"))
     denomination = _first_non_empty_str(
@@ -172,13 +212,11 @@ def sync_products(
     # Pricing/listing settings are intentionally ignored here. Product sync never creates
     # or updates marketplace listings; offers must be linked explicitly by an operator.
     _ = settings
-    raw_products = supplier_client.list_products()
-
     stats: dict[str, Any] = {
         "status": "ok",
         "supplier": "gengine",
         "marketplace": marketplace_name or "none",
-        "products_received": len(raw_products),
+        "products_received": 0,
         "products_imported": 0,
         "supplier_products_created": 0,
         "supplier_products_updated": 0,
@@ -188,13 +226,35 @@ def sync_products(
         "mappings_created": 0,
         "manual_link_required": 0,
         "skipped": 0,
+        "provider_unavailable": 0,
+        "details": [],
     }
+
+    try:
+        raw_products = supplier_client.list_products()
+    except Exception as exc:  # noqa: BLE001 - supplier outage should not mutate local products.
+        if not is_temporary_provider_error(exc):
+            raise
+        stats["status"] = "provider_unavailable"
+        stats["provider_unavailable"] = 1
+        stats["skipped"] = 1
+        stats["details"].append(
+            {
+                "action": "skipped",
+                "reason": SUPPLIER_PROVIDER_UNAVAILABLE,
+            }
+        )
+        return stats
+
+    stats["products_received"] = len(raw_products)
 
     for raw in raw_products:
         normalized = _normalize_supplier_product(raw)
         if normalized is None:
+            reason = _supplier_product_skip_reason(raw) or "missing_core_fields"
             stats["skipped"] += 1
-            log_event(logger, "product_sync.product_skipped", reason="missing_core_fields")
+            stats["details"].append(_skip_detail(raw, reason=reason))
+            log_event(logger, "product_sync.product_skipped", reason=reason)
             continue
 
         _supplier_product, change_type = _upsert_supplier_product(db, normalized)
@@ -265,7 +325,7 @@ def run_product_sync() -> dict[str, Any]:
             if marketplace_warning:
                 stats["warning"] = marketplace_warning
 
-            sync_run.status = "success"
+            sync_run.status = "success" if stats["status"] == "ok" else str(stats["status"])
             sync_run.finished_at = datetime.now(timezone.utc)
             sync_run.details_json = json.dumps(stats, ensure_ascii=True, separators=(",", ":"))
             db.add(sync_run)

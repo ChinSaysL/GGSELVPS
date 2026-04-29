@@ -87,6 +87,25 @@ def test_parse_gengine_gift_reference_from_url() -> None:
     assert reference.slug == "vituber-melody"
 
 
+def test_gengine_import_skip_details_include_row_reason() -> None:
+    message = manage._format_gengine_import_skip_details(
+        {
+            "details": [
+                {
+                    "reason": "non_positive_cost_usd",
+                    "supplier_product_id": "gift:1238840:432909:RU",
+                    "title": "Battlefield 1",
+                    "cost_usd": "0",
+                }
+            ]
+        }
+    )
+
+    assert "reason=non_positive_cost_usd" in message
+    assert "supplier_id=gift:1238840:432909:RU" in message
+    assert "cost_usd=0" in message
+
+
 def test_parse_plain_numeric_reference() -> None:
     reference = manage._parse_gengine_reference("5")
 

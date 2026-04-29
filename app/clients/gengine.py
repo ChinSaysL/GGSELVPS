@@ -18,6 +18,9 @@ class GEngineClient(BaseAPIClient):
     - POST /v2.1/shop/orders
     - POST /v2.1/shop/orders/{order_id}/pay
     - GET /v2.1/shop/orders/{order_id}
+    - GET /v2.1/gifts/apps/{app_id}
+    - POST /v2.1/gifts/orders
+    - GET /v2.1/gifts/orders/{order_id}
     - GET /v2.1/recharge/services
     - POST /v2.1/recharge/orders/{service_id}
     - POST /v2.1/recharge/orders/{order_id}/pay
@@ -125,6 +128,15 @@ class GEngineClient(BaseAPIClient):
         if items:
             return items
         return []
+
+    def _response_payload(self, response: dict[str, Any]) -> dict[str, Any]:
+        data = response.get("data")
+        if isinstance(data, dict):
+            return data
+        content = response.get("content")
+        if isinstance(content, dict):
+            return content
+        return response
 
     def _extract_paginated_items(self, response: dict[str, Any]) -> list[dict[str, Any]]:
         for key in ("items", "services", "rows", "results", "data"):
@@ -520,6 +532,94 @@ class GEngineClient(BaseAPIClient):
             expanded_products.append(combined)
         return expanded_products
 
+    def list_gift_app_products(
+        self,
+        app_id: str,
+        *,
+        fallback_title: str | None = None,
+        source_slug: str | None = None,
+    ) -> list[dict[str, Any]]:
+        response = self._request_json(
+            method="GET",
+            path=self._build_path(f"/gifts/apps/{app_id}"),
+            headers=self._auth_headers(),
+        )
+        if not isinstance(response, dict):
+            raise TypeError("Unexpected G-Engine gift app response format.")
+
+        app = self._response_payload(response)
+        app_name = (
+            self._first_non_empty_str(app, ("name", "title"))
+            or fallback_title
+            or f"Gift app {app_id}"
+        )
+        packages = self._extract_dict_items(app.get("packages"))
+        if not packages and app.get("default_package_id") is not None:
+            packages = [
+                {
+                    "id": app.get("default_package_id"),
+                    "name": app_name,
+                    "prices": [
+                        {
+                            "region": app.get("region") or app.get("default_region"),
+                            "currency": app.get("currency") or "USD",
+                            "price": app.get("price"),
+                        }
+                    ],
+                }
+            ]
+
+        products: list[dict[str, Any]] = []
+        for package in packages:
+            package_id = self._first_non_empty_str(package, ("id", "package_id"))
+            if package_id is None:
+                continue
+            package_name = self._first_non_empty_str(package, ("name", "title")) or app_name
+            prices = self._extract_dict_items(package.get("prices"))
+            if not prices:
+                prices = [
+                    {
+                        "region": package.get("region"),
+                        "currency": package.get("currency") or "USD",
+                        "price": package.get("price"),
+                    }
+                ]
+            for price in prices:
+                region = self._first_non_empty_str(price, ("region", "zone"))
+                cost = self._first_non_empty_str(price, ("price", "cost", "cost_usd", "price_usd"))
+                if region is None or cost is None:
+                    continue
+                region_id = region.replace(":", "-")
+                title = f"{app_name} - {package_name}" if package_name != app_name else app_name
+                products.append(
+                    {
+                        **app,
+                        **package,
+                        **price,
+                        "id": f"gift:{app_id}:{package_id}:{region_id}",
+                        "source_type": "gift",
+                        "gift_app_id": str(app_id),
+                        "gift_id": str(app_id),
+                        "gift_package_id": str(package_id),
+                        "gift_region": region,
+                        "package_id": str(package_id),
+                        "region": region,
+                        "title": title,
+                        "name": title,
+                        "category": "Games, Steam Gifts",
+                        "denomination": region,
+                        "cost_usd": cost,
+                        "stock": "unlimited",
+                        "is_available": True,
+                        "source_slug": source_slug,
+                        "base_product_id": str(app_id),
+                        "gift_package_name": package_name,
+                        "gift_currency": price.get("currency"),
+                        "gift_zone": price.get("zone"),
+                    }
+                )
+        return products
+
     def _extract_product_detail_base(
         self,
         response: dict[str, Any],
@@ -583,11 +683,26 @@ class GEngineClient(BaseAPIClient):
         return str(product_id).startswith("recharge:")
 
     @staticmethod
+    def _is_gift_product_id(product_id: str) -> bool:
+        prefix = str(product_id).split(":", maxsplit=1)[0]
+        return prefix in {"gift", "gifts"}
+
+    @staticmethod
     def _parse_recharge_product_id(product_id: str) -> tuple[str, str | None]:
         parts = str(product_id).split(":")
         if len(parts) not in {2, 3} or parts[0] != "recharge" or not parts[1]:
             raise APIClientError(f"Invalid G-Engine recharge supplier product ID: {product_id}")
         return parts[1], parts[2] if len(parts) == 3 and parts[2] else None
+
+    @staticmethod
+    def _parse_gift_product_id(product_id: str) -> tuple[str | None, str | None, str | None]:
+        parts = str(product_id).split(":")
+        if len(parts) < 2 or parts[0] not in {"gift", "gifts"} or not parts[1]:
+            raise APIClientError(f"Invalid G-Engine gift supplier product ID: {product_id}")
+        app_id = parts[1]
+        package_id = parts[2] if len(parts) >= 3 and parts[2] else None
+        region = parts[3] if len(parts) >= 4 and parts[3] else None
+        return app_id, package_id, region
 
     @staticmethod
     def _normalize_param_key(value: object) -> str:
@@ -756,6 +871,10 @@ class GEngineClient(BaseAPIClient):
         return cls._extract_order_id(payload, prefix="recharge")
 
     @classmethod
+    def _extract_gift_order_id(cls, payload: dict[str, Any]) -> str | None:
+        return cls._extract_order_id(payload, prefix="gift")
+
+    @classmethod
     def _mark_recharge_order_payload(cls, payload: dict[str, Any]) -> dict[str, Any]:
         order_id = cls._extract_recharge_order_id(payload)
         if order_id:
@@ -821,6 +940,88 @@ class GEngineClient(BaseAPIClient):
         if order_id and status == "verified":
             return self._pay_recharge_order(order_id)
         return marked_response
+
+    @classmethod
+    def _mark_gift_order_payload(cls, payload: dict[str, Any]) -> dict[str, Any]:
+        order_id = cls._extract_gift_order_id(payload)
+        if order_id:
+            payload = dict(payload)
+            payload["supplier_order_id"] = f"gift:{order_id}"
+        return payload
+
+    @classmethod
+    def _value_for_gift_invite_url(cls, buyer_inputs: dict[str, str]) -> str | None:
+        preferred_keys = {
+            "inviteurl",
+            "steaminviteurl",
+            "friendinviteurl",
+            "steamfriendurl",
+            "steamprofileurl",
+            "profileurl",
+            "steamlink",
+            "link",
+            "url",
+            "account",
+        }
+        for key, value in buyer_inputs.items():
+            if cls._normalize_param_key(key) in preferred_keys and value:
+                return value
+        for value in buyer_inputs.values():
+            if "://" in value or "steamcommunity.com" in value.lower():
+                return value
+        if len(buyer_inputs) == 1:
+            return next(iter(buyer_inputs.values()))
+        return None
+
+    def _create_gift_order(
+        self,
+        product_id: str,
+        quantity: int,
+        *,
+        buyer_inputs: dict[str, str] | None,
+        product_payload: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        if quantity != 1:
+            raise APIClientError("G-Engine gift fulfillment currently supports quantity=1 only.")
+
+        payload = product_payload if isinstance(product_payload, dict) else {}
+        _app_id, product_package_id, product_region = self._parse_gift_product_id(product_id)
+        package_id = (
+            self._first_non_empty_str(payload, ("gift_package_id", "package_id", "default_package_id"))
+            or product_package_id
+        )
+        region = self._first_non_empty_str(payload, ("gift_region", "region")) or product_region
+        invite_url = self._value_for_gift_invite_url(self._clean_buyer_inputs(buyer_inputs))
+
+        missing = []
+        if not invite_url:
+            missing.append("invite_url")
+        if not package_id:
+            missing.append("package_id")
+        if not region:
+            missing.append("region")
+        if missing:
+            raise APIClientError(
+                "Missing buyer/default input for G-Engine gift order: "
+                f"{', '.join(missing)}"
+            )
+        assert invite_url is not None
+        assert package_id is not None
+        assert region is not None
+
+        response = self._request_json(
+            method="POST",
+            path=self._build_path("/gifts/orders"),
+            headers=self._auth_headers(),
+            json_body={
+                "invite_url": invite_url,
+                "package_id": self._coerce_item_id(package_id),
+                "region": region,
+            },
+        )
+        if not isinstance(response, dict):
+            raise TypeError("Unexpected G-Engine gift order response format.")
+        return self._mark_gift_order_payload(response)
 
     @classmethod
     def _mark_shop_order_payload(cls, payload: dict[str, Any]) -> dict[str, Any]:
@@ -906,6 +1107,14 @@ class GEngineClient(BaseAPIClient):
                 product_payload=product_payload,
             )
 
+        if self._is_gift_product_id(product_id):
+            return self._create_gift_order(
+                product_id,
+                quantity,
+                buyer_inputs=buyer_inputs,
+                product_payload=product_payload,
+            )
+
         return self._create_shop_order(
             product_id,
             quantity,
@@ -928,6 +1137,17 @@ class GEngineClient(BaseAPIClient):
             if status == "verified":
                 return self._pay_recharge_order(recharge_order_id)
             return marked_response
+
+        if self._is_gift_product_id(order_id):
+            gift_order_id = str(order_id).split(":", maxsplit=1)[1]
+            response = self._request_json(
+                method="GET",
+                path=self._build_path(f"/gifts/orders/{gift_order_id}"),
+                headers=self._auth_headers(),
+            )
+            if not isinstance(response, dict):
+                raise TypeError("Unexpected G-Engine gift order status response format.")
+            return self._mark_gift_order_payload(response)
 
         response = self._request_json(
             method="GET",

@@ -10,9 +10,11 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session, sessionmaker
 
+from app.clients.base import APIRequestError
 from app.config import Settings
 from app.db import Base
 from app.models import MarketplaceOffer, Order, ProductMapping, SupplierProduct
+from app.services.provider_status import SUPPLIER_PROVIDER_UNAVAILABLE_NOTIFIED
 from app.services.order_sync import process_digiseller_unique_code, retry_order, sync_orders
 
 
@@ -61,6 +63,8 @@ class FakeSupplierOrderClient:
     status_payload: dict[str, Any] = field(
         default_factory=lambda: {"status": "completed", "codes": ["ABCD-EFGH-1234"]}
     )
+    create_error: Exception | None = None
+    status_error: Exception | None = None
 
     def create_order(
         self,
@@ -80,9 +84,13 @@ class FakeSupplierOrderClient:
                 "product_payload": product_payload,
             }
         )
+        if self.create_error is not None:
+            raise self.create_error
         return dict(self.create_response)
 
     def get_order_status(self, order_id: str) -> dict[str, Any]:
+        if self.status_error is not None:
+            raise self.status_error
         return {"order_id": order_id, **self.status_payload}
 
     def close(self) -> None:
@@ -248,6 +256,133 @@ def test_ggsel_paid_order_buys_from_gengine_and_delivers_once(db_session: Sessio
     assert "Product: Steam top up - 250 TRY" in delivery_message
     assert "Товар: Steam top up - 250 TRY" in delivery_message
     assert "ABCD-EFGH-1234" in delivery_message
+
+
+def test_supplier_provider_down_notifies_once_and_retries_purchase(
+    db_session: Session,
+) -> None:
+    _add_linked_offer(
+        db_session,
+        marketplace="ggsel",
+        offer_id="102249445",
+        marketplace_variant_id=18944509,
+    )
+    sale = {
+        "invoice_id": "9001",
+        "id_goods": "102249445",
+        "date_pay": "2026-04-27 10:00:00",
+        "amount": "5.00",
+        "options": [
+            {"name": "Amount", "user_data": "250 TRY", "user_data_id": 18944509},
+            {"name": "Steam friend code", "user_data": "123456789", "user_data_id": None},
+        ],
+    }
+    supplier_down = FakeSupplierOrderClient(
+        create_error=APIRequestError("G-Engine request failed: POST /v2.1/shop/orders")
+    )
+    marketplace_client = FakeMarketplaceOrderClient(sales=[sale], order_payloads={"9001": sale})
+
+    first_stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_down,
+        marketplace_clients={"ggsel": marketplace_client},
+    )
+    second_stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_down,
+        marketplace_clients={"ggsel": marketplace_client},
+    )
+
+    order = db_session.execute(select(Order)).scalars().one()
+    assert first_stats["status"] == "partial"
+    assert first_stats["provider_unavailable"] == 1
+    assert second_stats["provider_unavailable"] == 1
+    assert order.status == "pending"
+    assert order.supplier_order_id is None
+    assert order.error_message == SUPPLIER_PROVIDER_UNAVAILABLE_NOTIFIED
+    assert len(marketplace_client.messages) == 1
+    assert "Our provider is currently down" in marketplace_client.messages[0][1]
+
+    supplier_up = FakeSupplierOrderClient()
+    recovered_stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_up,
+        marketplace_clients={"ggsel": marketplace_client},
+    )
+
+    db_session.refresh(order)
+    assert recovered_stats["orders_delivered"] == 1
+    assert order.status == "delivered"
+    assert supplier_up.create_calls == [
+        {
+            "product_id": "718",
+            "quantity": 1,
+            "buyer_inputs": {"steam_friend_code": "123456789"},
+            "external_order_id": "ggsel:9001",
+            "product_payload": {},
+        }
+    ]
+    assert len(marketplace_client.messages) == 3
+    assert "Your gift card has been delivered." in marketplace_client.messages[2][1]
+
+
+def test_supplier_provider_down_during_delivery_poll_stays_retryable(
+    db_session: Session,
+) -> None:
+    _add_linked_offer(
+        db_session,
+        marketplace="ggsel",
+        offer_id="102249445",
+        marketplace_variant_id=18944509,
+    )
+    sale = {
+        "invoice_id": "9001",
+        "id_goods": "102249445",
+        "date_pay": "2026-04-27 10:00:00",
+        "amount": "5.00",
+        "options": [
+            {"name": "Amount", "user_data": "250 TRY", "user_data_id": 18944509},
+            {"name": "Steam friend code", "user_data": "123456789", "user_data_id": None},
+        ],
+    }
+    supplier_down = FakeSupplierOrderClient(
+        create_response={"order_id": "ge-1", "status": "processing"},
+        status_error=APIRequestError("G-Engine returned HTTP 503 for GET /v2.1/shop/orders/ge-1"),
+    )
+    marketplace_client = FakeMarketplaceOrderClient(sales=[sale], order_payloads={"9001": sale})
+
+    first_stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_down,
+        marketplace_clients={"ggsel": marketplace_client},
+    )
+
+    order = db_session.execute(select(Order)).scalars().one()
+    assert first_stats["provider_unavailable"] == 1
+    assert order.status == "supplier_order_created"
+    assert order.supplier_order_id == "ge-1"
+    assert order.error_message == SUPPLIER_PROVIDER_UNAVAILABLE_NOTIFIED
+    assert len(marketplace_client.messages) == 2
+    assert "Our provider is currently down" in marketplace_client.messages[1][1]
+
+    supplier_up = FakeSupplierOrderClient()
+    recovered_stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_up,
+        marketplace_clients={"ggsel": marketplace_client},
+    )
+
+    db_session.refresh(order)
+    assert recovered_stats["orders_delivered"] == 1
+    assert order.status == "delivered"
+    assert supplier_up.create_calls == []
+    assert len(marketplace_client.messages) == 3
+    assert "Your gift card has been delivered." in marketplace_client.messages[2][1]
 
 
 def test_ggsel_paid_recharge_order_delivers_after_shipped_without_code(
@@ -575,6 +710,98 @@ def test_ggsel_steam_game_gift_delivery_instructs_friend_request(
     assert "примите запрос в друзья от нашего аккаунта Steam" in delivery_message
     assert "Product: Helldivers 2 Steam" in delivery_message
     assert "Товар: Helldivers 2 Steam" in delivery_message
+
+
+def test_ggsel_gengine_gift_order_uses_common_supplier_flow(
+    db_session: Session,
+) -> None:
+    raw_payload_json = (
+        '{"source_type":"gift","gift_app_id":"4451080",'
+        '"gift_package_id":"777","gift_region":"RU"}'
+    )
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="gift:4451080:777:RU",
+        title="RV There Yet?",
+        category="Games, Steam Gifts",
+        denomination="RU",
+        region="RU",
+        cost_usd=Decimal("4.23"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json=raw_payload_json,
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="ggsel",
+        marketplace_offer_id="102300001",
+        supplier_product_id=supplier.id,
+        title="RV There Yet? Steam Gift",
+        price=Decimal("7.00"),
+        currency="USD",
+        is_enabled=True,
+        requires_buyer_input=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+    db_session.add(
+        ProductMapping(
+            supplier_product_id=supplier.id,
+            marketplace_offer_id=offer.id,
+            enabled=True,
+            marketplace_variant_id=445108001,
+            marketplace_variant_name="RU",
+        )
+    )
+    db_session.commit()
+
+    sale = {
+        "invoice_id": "9006",
+        "id_goods": "102300001",
+        "date_pay": "2026-04-27 10:00:00",
+        "amount": "7.00",
+        "options": [
+            {"name": "Country", "user_data": "RU", "user_data_id": 445108001},
+            {
+                "name": "Quick-invite Steam URL",
+                "user_data": "https://steamcommunity.com/invite/abc",
+                "user_data_id": None,
+            },
+        ],
+    }
+    supplier_client = FakeSupplierOrderClient(
+        create_response={"supplier_order_id": "gift:9001", "status": "delivered"}
+    )
+    marketplace_client = FakeMarketplaceOrderClient(sales=[sale], order_payloads={"9006": sale})
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"ggsel": marketplace_client},
+    )
+
+    order = db_session.execute(select(Order)).scalars().one()
+    assert stats["orders_delivered"] == 1
+    assert order.status == "delivered"
+    assert supplier_client.create_calls == [
+        {
+            "product_id": "gift:4451080:777:RU",
+            "quantity": 1,
+            "buyer_inputs": {"quick_invite_steam_url": "https://steamcommunity.com/invite/abc"},
+            "external_order_id": "ggsel:9006",
+            "product_payload": {
+                "source_type": "gift",
+                "gift_app_id": "4451080",
+                "gift_package_id": "777",
+                "gift_region": "RU",
+            },
+        }
+    ]
+    assert len(marketplace_client.messages) == 2
+    assert "Your game is ready to be delivered!" in marketplace_client.messages[1][1]
 
 
 def test_supplier_cancelled_order_needs_manual_review_and_retry_can_recreate(
