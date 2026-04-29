@@ -29,6 +29,7 @@ class DigisellerClient(BaseAPIClient):
     _TASK_POLL_TIMEOUT_SECONDS = 120.0
     _SALES_LOOKBACK_DAYS = 30
     _SALES_PAGE_SIZE = 5000
+    _SALES_MAX_PAGES = 3
 
     def __init__(
         self,
@@ -37,6 +38,8 @@ class DigisellerClient(BaseAPIClient):
         seller_id: str | int | None = None,
         task_poll_timeout_seconds: float | None = None,
         task_poll_interval_seconds: float | None = None,
+        sales_page_size: int | None = None,
+        sales_max_pages: int | None = None,
         timeout: float = 20.0,
     ) -> None:
         super().__init__(
@@ -62,6 +65,8 @@ class DigisellerClient(BaseAPIClient):
             if task_poll_interval_seconds is not None
             else self._TASK_POLL_INTERVAL_SECONDS
         )
+        self._sales_page_size = max(1, min(int(sales_page_size or self._SALES_PAGE_SIZE), 5000))
+        self._sales_max_pages = max(1, int(sales_max_pages or self._SALES_MAX_PAGES))
 
     @staticmethod
     def _parse_valid_thru(value: object) -> datetime | None:
@@ -914,29 +919,71 @@ class DigisellerClient(BaseAPIClient):
                     normalized.setdefault(target_key, value)
         return normalized
 
-    def get_latest_sales(self) -> list[dict[str, Any]]:
+    @staticmethod
+    def _payload_int(payload: dict[str, Any], keys: tuple[str, ...]) -> int | None:
+        for key in keys:
+            value = payload.get(key)
+            if value is None:
+                continue
+            try:
+                return int(str(value))
+            except ValueError:
+                continue
+        return None
+
+    def get_latest_sales(
+        self,
+        *,
+        date_start: datetime | None = None,
+        date_finish: datetime | None = None,
+    ) -> list[dict[str, Any]]:
         now = datetime.now(timezone.utc)
-        date_finish = now + timedelta(days=1)
-        date_start = now - timedelta(days=self._SALES_LOOKBACK_DAYS)
-        response = self._request_json(
-            method="POST",
-            path="/api/seller-sells/v2",
-            params=self._auth_query_params(),
-            json_body={
-                "date_start": date_start.strftime("%Y-%m-%d %H:%M:%S"),
-                "date_finish": date_finish.strftime("%Y-%m-%d %H:%M:%S"),
-                "returned": 1,
-                "page": 1,
-                "rows": self._SALES_PAGE_SIZE,
-            },
-            headers={"Accept": "application/json"},
-        )
-        if isinstance(response, list):
-            return [self._normalize_sales_item(item) for item in response if isinstance(item, dict)]
-        if isinstance(response, dict):
-            self._ensure_success_response(response, context="Digiseller latest sales failed")
-            return [self._normalize_sales_item(item) for item in self._extract_sales_items(response)]
-        return []
+        date_finish = date_finish or now + timedelta(days=1)
+        date_start = date_start or now - timedelta(days=self._SALES_LOOKBACK_DAYS)
+        merged: dict[str, dict[str, Any]] = {}
+
+        for page in range(1, self._sales_max_pages + 1):
+            response = self._request_json(
+                method="POST",
+                path="/api/seller-sells/v2",
+                params=self._auth_query_params(),
+                json_body={
+                    "date_start": date_start.strftime("%Y-%m-%d %H:%M:%S"),
+                    "date_finish": date_finish.strftime("%Y-%m-%d %H:%M:%S"),
+                    "returned": 1,
+                    "page": page,
+                    "rows": self._sales_page_size,
+                },
+                headers={"Accept": "application/json"},
+            )
+            if isinstance(response, list):
+                items = [item for item in response if isinstance(item, dict)]
+                total_pages = None
+            elif isinstance(response, dict):
+                self._ensure_success_response(response, context="Digiseller latest sales failed")
+                items = self._extract_sales_items(response)
+                total_pages = self._payload_int(response, ("pages", "total_pages", "cnt_pages"))
+            else:
+                items = []
+                total_pages = None
+
+            for item in items:
+                normalized = self._normalize_sales_item(item)
+                sale_id = str(
+                    normalized.get("invoice_id")
+                    or normalized.get("inv")
+                    or normalized.get("id_i")
+                    or normalized.get("id")
+                    or len(merged)
+                )
+                merged.setdefault(sale_id, normalized)
+
+            if not items or len(items) < self._sales_page_size:
+                break
+            if total_pages is not None and page >= total_pages:
+                break
+
+        return list(merged.values())
 
     def get_order(self, order_id: str) -> dict[str, Any]:
         response = self._request_json(
@@ -947,6 +994,27 @@ class DigisellerClient(BaseAPIClient):
         if not isinstance(response, dict):
             raise TypeError("Unexpected Digiseller order response format.")
         return response
+
+    def get_buyer_messages(self, order_id: str) -> list[dict[str, Any]]:
+        token = self._get_access_token()
+        response = self._request_json(
+            method="GET",
+            path="/api/debates/v2",
+            params={
+                "token": token,
+                "id_i": order_id,
+                "hidden": 0,
+                "count": 50,
+            },
+            headers={"Accept": "application/json"},
+        )
+        if isinstance(response, list):
+            return [item for item in response if isinstance(item, dict)]
+        if isinstance(response, dict):
+            items = response.get("items")
+            if isinstance(items, list):
+                return [item for item in items if isinstance(item, dict)]
+        return []
 
     @staticmethod
     def _mask_unique_code(unique_code: str) -> str:

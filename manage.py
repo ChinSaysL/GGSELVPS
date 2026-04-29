@@ -67,6 +67,18 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
 VALID_MARKETPLACES = ("digiseller", "ggsel")
 VALID_CURRENCIES = ("RUB", "USD")
 GENGINE_LINK_KINDS = ("shop", "recharge", "gifts")
+ORDER_SYNC_PENDING_REASONS = {
+    "awaiting_digiseller_unique_code",
+    "supplier_order_not_ready",
+}
+ORDER_SYNC_HIDDEN_SKIP_REASONS = {
+    "marketplace_offer_not_linked",
+}
+
+
+def _is_order_sync_pending_reason(reason: object) -> bool:
+    text = str(reason or "")
+    return text in ORDER_SYNC_PENDING_REASONS or text.startswith("awaiting_digiseller_unique_code")
 
 
 _CONFUSABLE_LATIN_TRANSLATION = str.maketrans(
@@ -520,13 +532,31 @@ def _print_order_sync_result(result: dict[str, Any]) -> None:
 
     details = result.get("details")
     if isinstance(details, list):
+        pending = [
+            item
+            for item in details
+            if isinstance(item, dict)
+            and item.get("action") == "skipped"
+            and _is_order_sync_pending_reason(item.get("reason"))
+        ]
+        if pending:
+            print("Pending linked orders (first 10):")
+            for item in pending[:10]:
+                print(
+                    f"- order={item.get('marketplace_order_id') or item.get('order_id')} | "
+                    f"reason={item.get('reason')}"
+                )
+
         notable = [
             item
             for item in details
-            if isinstance(item, dict) and item.get("action") in {"skipped", "error"}
+            if isinstance(item, dict)
+            and item.get("action") in {"skipped", "error"}
+            and item.get("reason") not in ORDER_SYNC_HIDDEN_SKIP_REASONS
+            and item not in pending
         ]
         if notable:
-            print("Notable details (first 10):")
+            print("Other notable details (first 10):")
             for item in notable[:10]:
                 print(
                     f"- order={item.get('marketplace_order_id') or item.get('order_id')} | "

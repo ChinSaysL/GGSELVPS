@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import json
 import re
-from urllib.parse import parse_qs
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, Protocol, cast
+from urllib.parse import parse_qs
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -40,7 +40,12 @@ RetryAction = Literal["none", "retry_processing", "retry_delivery"]
 
 
 class MarketplaceOrderClientProtocol(Protocol):
-    def get_latest_sales(self) -> list[dict[str, Any]]: ...
+    def get_latest_sales(
+        self,
+        *,
+        date_start: datetime | None = None,
+        date_finish: datetime | None = None,
+    ) -> list[dict[str, Any]]: ...
 
     def get_order(self, order_id: str) -> dict[str, Any]: ...
 
@@ -53,6 +58,8 @@ class DigisellerDeliveryClientProtocol(MarketplaceOrderClientProtocol, Protocol)
     def verify_unique_code(self, unique_code: str) -> dict[str, Any]: ...
 
     def mark_unique_code_delivered(self, unique_code: str) -> dict[str, Any]: ...
+
+    def get_buyer_messages(self, order_id: str) -> list[dict[str, Any]]: ...
 
 
 class SupplierOrderClientProtocol(Protocol):
@@ -308,6 +315,40 @@ def _extract_unique_code(payload: dict[str, Any], explicit: str | None) -> str |
                 if value:
                     return value
     return None
+
+
+def _unique_code_candidates_from_text(text: str) -> list[str]:
+    candidates: list[str] = []
+    for match in re.finditer(r"\b[A-Za-z0-9][A-Za-z0-9_-]{7,63}\b", text):
+        candidate = match.group(0).strip("._-")
+        if len(candidate) < 8:
+            continue
+        if candidate.isdigit():
+            continue
+        if not any(character.isdigit() for character in candidate):
+            continue
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return candidates
+
+
+def _unique_code_candidates_from_messages(messages: list[dict[str, Any]]) -> list[str]:
+    candidates: list[str] = []
+    ordered_messages = sorted(
+        messages,
+        key=lambda item: str(item.get("date_written") or item.get("date") or ""),
+        reverse=True,
+    )
+    for message in ordered_messages:
+        if str(message.get("deleted") or "0").strip().lower() in {"1", "true", "yes"}:
+            continue
+        if str(message.get("buyer") or "").strip().lower() not in {"1", "true", "yes"}:
+            continue
+        text = str(message.get("message") or message.get("text") or "").strip()
+        for candidate in _unique_code_candidates_from_text(text):
+            if candidate not in candidates:
+                candidates.append(candidate)
+    return candidates
 
 
 def _sale_is_paid(payload: dict[str, Any]) -> bool:
@@ -737,19 +778,37 @@ def _preverify_digiseller_unique_code(
 ) -> tuple[NormalizedMarketplaceSale | None, str | None]:
     if sale.marketplace != "digiseller":
         return sale, None
-    if not sale.unique_code:
-        return None, "awaiting_digiseller_unique_code"
-
     digiseller_client = cast(DigisellerDeliveryClientProtocol, marketplace_client)
-    verification_payload = digiseller_client.verify_unique_code(sale.unique_code)
-    if not _digiseller_verified_payload_matches_order(verification_payload, sale):
-        return None, "digiseller_unique_code_does_not_match_order"
+    verification_payload: dict[str, Any] | None = None
+    unique_code = sale.unique_code
+
+    if unique_code:
+        verification_payload = digiseller_client.verify_unique_code(unique_code)
+        if not _digiseller_verified_payload_matches_order(verification_payload, sale):
+            return None, "digiseller_unique_code_does_not_match_order"
+    elif sale.order_id:
+        try:
+            messages = digiseller_client.get_buyer_messages(sale.order_id)
+        except Exception as exc:  # noqa: BLE001 - unique-code callback can still complete later.
+            return None, f"awaiting_digiseller_unique_code_chat_lookup_failed:{exc}"
+        for candidate in _unique_code_candidates_from_messages(messages)[:10]:
+            try:
+                candidate_payload = digiseller_client.verify_unique_code(candidate)
+            except Exception:
+                continue
+            if _digiseller_verified_payload_matches_order(candidate_payload, sale):
+                unique_code = candidate
+                verification_payload = candidate_payload
+                break
+
+    if not unique_code or verification_payload is None:
+        return None, "awaiting_digiseller_unique_code"
 
     verified_sale = _normalize_marketplace_sale(
         "digiseller",
         sale.raw_payload,
         verification_payload,
-        unique_code=sale.unique_code,
+        unique_code=unique_code,
     )
     verified_sale.raw_payload["_digiseller_unique_code_preverified"] = True
     return verified_sale, None
@@ -1036,6 +1095,49 @@ def _process_raw_sale(
     )
 
 
+def _last_successful_order_sync_time(db: Session) -> datetime | None:
+    stmt = (
+        select(SyncRun)
+        .where(SyncRun.job_name == "order_sync", SyncRun.status == "success")
+        .order_by(SyncRun.finished_at.desc(), SyncRun.started_at.desc())
+        .limit(1)
+    )
+    sync_run = db.execute(stmt).scalars().first()
+    if sync_run is None:
+        return None
+    return sync_run.finished_at or sync_run.started_at
+
+
+def _order_poll_window(db: Session, settings: Settings) -> tuple[datetime, datetime]:
+    now = datetime.now(timezone.utc)
+    last_success = _last_successful_order_sync_time(db)
+    if last_success is None:
+        start = now - timedelta(hours=settings.order_sync_initial_lookback_hours)
+    else:
+        start = last_success - timedelta(minutes=settings.order_sync_overlap_minutes)
+    return start, now + timedelta(minutes=1)
+
+
+def _load_retryable_pending_order_ids(
+    db: Session,
+    *,
+    marketplace: str,
+    exclude_order_ids: set[str],
+) -> list[str]:
+    stmt = (
+        select(Order.marketplace_order_id)
+        .where(
+            Order.marketplace == marketplace,
+            Order.marketplace_order_id.not_in(exclude_order_ids),
+            Order.status.in_(("pending", "supplier_order_created")),
+            Order.error_message.in_(("awaiting_digiseller_unique_code", "supplier_order_not_ready")),
+        )
+        .order_by(Order.created_at)
+        .limit(200)
+    )
+    return [str(order_id) for order_id in db.execute(stmt).scalars().all()]
+
+
 def sync_orders(
     *,
     db: Session,
@@ -1043,7 +1145,6 @@ def sync_orders(
     supplier_client: SupplierOrderClientProtocol,
     marketplace_clients: dict[str, MarketplaceOrderClientProtocol],
 ) -> dict[str, Any]:
-    _ = settings
     stats: dict[str, Any] = {
         "status": "ok",
         "orders_detected": 0,
@@ -1054,10 +1155,14 @@ def sync_orders(
         "errors": 0,
         "details": [],
     }
+    date_start, date_finish = _order_poll_window(db, settings)
 
     for marketplace, marketplace_client in marketplace_clients.items():
         try:
-            sales = marketplace_client.get_latest_sales()
+            sales = marketplace_client.get_latest_sales(
+                date_start=date_start,
+                date_finish=date_finish,
+            )
         except Exception as exc:  # noqa: BLE001 - one marketplace should not block the other.
             stats["errors"] += 1
             stats["details"].append(
@@ -1069,12 +1174,32 @@ def sync_orders(
             )
             continue
 
+        seen_order_ids: set[str] = set()
         for raw_sale in sales:
             stats["orders_detected"] += 1
+            summary = _normalize_marketplace_sale(marketplace, raw_sale)
+            if summary.order_id:
+                seen_order_ids.add(summary.order_id)
             _process_raw_sale(
                 db=db,
                 marketplace=marketplace,
                 raw_sale=raw_sale,
+                supplier_client=supplier_client,
+                marketplace_client=marketplace_client,
+                stats=stats,
+            )
+
+        pending_order_ids = _load_retryable_pending_order_ids(
+            db,
+            marketplace=marketplace,
+            exclude_order_ids=seen_order_ids,
+        )
+        for marketplace_order_id in pending_order_ids:
+            stats["orders_detected"] += 1
+            _process_raw_sale(
+                db=db,
+                marketplace=marketplace,
+                raw_sale={"marketplace_order_id": marketplace_order_id},
                 supplier_client=supplier_client,
                 marketplace_client=marketplace_client,
                 stats=stats,
@@ -1133,6 +1258,8 @@ def _build_marketplace_clients(settings: Settings) -> dict[str, MarketplaceOrder
             seller_id=settings.digiseller_seller_id,
             task_poll_timeout_seconds=settings.digiseller_task_poll_timeout_seconds,
             task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
+            sales_page_size=settings.digiseller_sales_page_size,
+            sales_max_pages=settings.digiseller_sales_max_pages,
         )
     if settings.ggsel_api_key:
         clients["ggsel"] = GGSELClient(

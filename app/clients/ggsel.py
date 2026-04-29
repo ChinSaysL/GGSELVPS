@@ -907,7 +907,13 @@ class GGSELClient(BaseAPIClient):
                     normalized.setdefault(target_key, value)
         return normalized
 
-    def get_latest_sales(self) -> list[dict[str, Any]]:
+    def get_latest_sales(
+        self,
+        *,
+        date_start: datetime | None = None,
+        date_finish: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        _ = (date_start, date_finish)
         response = self._request_json(
             method="GET",
             path=self._build_path("/api/seller-last-sales"),

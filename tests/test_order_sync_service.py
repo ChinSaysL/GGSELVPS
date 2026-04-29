@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from dataclasses import dataclass, field
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
@@ -94,7 +95,15 @@ class FakeMarketplaceOrderClient:
     order_payloads: dict[str, dict[str, Any]] = field(default_factory=dict)
     messages: list[tuple[str, str]] = field(default_factory=list)
 
-    def get_latest_sales(self) -> list[dict[str, Any]]:
+    latest_sales_windows: list[tuple[datetime | None, datetime | None]] = field(default_factory=list)
+
+    def get_latest_sales(
+        self,
+        *,
+        date_start: datetime | None = None,
+        date_finish: datetime | None = None,
+    ) -> list[dict[str, Any]]:
+        self.latest_sales_windows.append((date_start, date_finish))
         return self.sales
 
     def get_order(self, order_id: str) -> dict[str, Any]:
@@ -112,6 +121,7 @@ class FakeMarketplaceOrderClient:
 @dataclass
 class FakeDigisellerOrderClient(FakeMarketplaceOrderClient):
     delivered_unique_codes: list[str] = field(default_factory=list)
+    chat_messages: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
 
     def verify_unique_code(self, unique_code: str) -> dict[str, Any]:
         return {
@@ -127,6 +137,9 @@ class FakeDigisellerOrderClient(FakeMarketplaceOrderClient):
     def mark_unique_code_delivered(self, unique_code: str) -> dict[str, Any]:
         self.delivered_unique_codes.append(unique_code)
         return {"retval": 0}
+
+    def get_buyer_messages(self, order_id: str) -> list[dict[str, Any]]:
+        return self.chat_messages.get(order_id, [])
 
 
 def _add_linked_offer(
@@ -738,3 +751,91 @@ def test_digiseller_order_with_unique_code_in_detail_delivers_in_sync(
     assert order.status == "delivered"
     assert len(supplier_client.create_calls) == 1
     assert marketplace_client.delivered_unique_codes == ["UNIQUE-CODE-0002"]
+
+
+def test_digiseller_order_with_unique_code_in_chat_delivers_in_sync(
+    db_session: Session,
+) -> None:
+    _add_linked_offer(db_session, marketplace="digiseller", offer_id="5850465")
+    sale = {
+        "invoice_id": "9001",
+        "id_goods": "5850465",
+        "date_pay": "2026-04-27 10:00:00",
+        "amount": "5.00",
+    }
+    supplier_client = FakeSupplierOrderClient()
+    marketplace_client = FakeDigisellerOrderClient(
+        sales=[sale],
+        order_payloads={"9001": sale},
+        chat_messages={
+            "9001": [
+                {
+                    "id": 1,
+                    "message": "hello, unique code is E5E8B7E1369947A3",
+                    "buyer": 1,
+                    "seller": 0,
+                    "deleted": 0,
+                    "date_written": "2026-04-27 10:01:00",
+                }
+            ]
+        },
+    )
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"digiseller": marketplace_client},
+    )
+    order = db_session.execute(select(Order)).scalars().one()
+
+    assert stats["orders_delivered"] == 1
+    assert order.status == "delivered"
+    assert len(supplier_client.create_calls) == 1
+    assert marketplace_client.delivered_unique_codes == ["E5E8B7E1369947A3"]
+
+
+def test_order_sync_rechecks_local_pending_unique_code_orders_without_recent_sale(
+    db_session: Session,
+) -> None:
+    supplier = _add_linked_offer(db_session, marketplace="digiseller", offer_id="5850465")
+    offer = db_session.execute(select(MarketplaceOffer)).scalars().one()
+    db_session.add(
+        Order(
+            marketplace="digiseller",
+            marketplace_order_id="9001",
+            marketplace_offer_id=offer.id,
+            supplier_product_id=supplier.id,
+            status="pending",
+            error_message="awaiting_digiseller_unique_code",
+        )
+    )
+    db_session.commit()
+
+    supplier_client = FakeSupplierOrderClient()
+    marketplace_client = FakeDigisellerOrderClient(
+        sales=[],
+        order_payloads={
+            "9001": {
+                "retval": 0,
+                "content": {
+                    "item_id": 5850465,
+                    "query_string": "?uniquecode=UNIQUE-CODE-0003",
+                },
+            }
+        },
+    )
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"digiseller": marketplace_client},
+    )
+    order = db_session.execute(select(Order)).scalars().one()
+
+    assert stats["orders_detected"] == 1
+    assert stats["orders_delivered"] == 1
+    assert order.status == "delivered"
+    assert len(supplier_client.create_calls) == 1
+    assert marketplace_client.delivered_unique_codes == ["UNIQUE-CODE-0003"]

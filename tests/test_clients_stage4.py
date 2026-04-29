@@ -1068,6 +1068,40 @@ def test_digiseller_send_buyer_message_uses_order_as_dialog_id() -> None:
     assert captured["json"] == {"message": "hello", "files": []}
 
 
+def test_digiseller_get_buyer_messages_reads_order_chat() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api/debates/v2"):
+            captured["query"] = dict(request.url.params)
+            return httpx.Response(
+                status_code=200,
+                json=[
+                    {
+                        "id": 56627081,
+                        "message": "unique code is E5E8B7E1369947A3",
+                        "buyer": 1,
+                        "seller": 0,
+                    }
+                ],
+            )
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = DigisellerClient(base_url="https://api.digiseller.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    messages = client.get_buyer_messages("9001")
+    client.close()
+
+    assert captured["query"] == {
+        "token": "secret",
+        "id_i": "9001",
+        "hidden": "0",
+        "count": "50",
+    }
+    assert messages[0]["message"] == "unique code is E5E8B7E1369947A3"
+
+
 def test_digiseller_get_latest_sales_reads_official_rows_payload() -> None:
     captured: dict[str, Any] = {}
 

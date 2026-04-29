@@ -68,6 +68,10 @@ class Settings(BaseSettings):
     default_currency: Literal["USD", "RUB"] = "RUB"
 
     order_poll_interval_seconds: int = 60
+    order_sync_initial_lookback_hours: int = 24
+    order_sync_overlap_minutes: int = 10
+    digiseller_sales_page_size: int = 5000
+    digiseller_sales_max_pages: int = 3
     product_sync_interval_minutes: int = 60
     stock_sync_interval_minutes: int = 5
     price_sync_interval_minutes: int = 60
@@ -107,6 +111,10 @@ class Settings(BaseSettings):
 
         interval_fields = (
             "order_poll_interval_seconds",
+            "order_sync_initial_lookback_hours",
+            "order_sync_overlap_minutes",
+            "digiseller_sales_page_size",
+            "digiseller_sales_max_pages",
             "product_sync_interval_minutes",
             "stock_sync_interval_minutes",
             "price_sync_interval_minutes",

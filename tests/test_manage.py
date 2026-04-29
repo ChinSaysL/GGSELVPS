@@ -31,6 +31,38 @@ def test_parse_args_accepts_auto_link_command() -> None:
     assert args.command == "auto-link"
 
 
+def test_print_order_sync_result_prioritizes_pending_and_hides_unlinked(capsys) -> None:
+    manage._print_order_sync_result(
+        {
+            "status": "ok",
+            "orders_detected": 64,
+            "orders_processed": 0,
+            "supplier_orders_created": 0,
+            "orders_delivered": 0,
+            "skipped": 64,
+            "errors": 0,
+            "details": [
+                {
+                    "action": "skipped",
+                    "marketplace_order_id": "288765912",
+                    "reason": "marketplace_offer_not_linked",
+                },
+                {
+                    "action": "skipped",
+                    "marketplace_order_id": "290877840",
+                    "reason": "awaiting_digiseller_unique_code",
+                },
+            ],
+        }
+    )
+
+    output = capsys.readouterr().out
+    assert "Pending linked orders" in output
+    assert "order=290877840" in output
+    assert "marketplace_offer_not_linked" not in output
+    assert "order=288765912" not in output
+
+
 def test_parse_gengine_shop_reference_from_url() -> None:
     reference = manage._parse_gengine_reference(
         "https://b2b.g-engine.net/en/shop/5/playstation-store-wallet-turkey"

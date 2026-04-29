@@ -160,6 +160,7 @@ treat `shipped` as fulfilled without a gift-card code.
 
 `POST /sync/orders` polls configured marketplaces for paid sales. For each linked paid order it:
 - matches the marketplace product and option/variant to a local `ProductMapping`
+- polls incrementally from the last successful order-sync run, with a small overlap, instead of re-scanning all historical marketplace sales every time
 - creates one G-Engine order for the mapped supplier row, including buyer input fields when the marketplace order provides them
 - stores the supplier order ID before delivery so retries do not buy the same marketplace order twice
 - delivers returned codes through the marketplace order correspondence and stores only masked codes locally
@@ -170,7 +171,12 @@ Digiseller unique-code products require a second buyer-side step. Configure the 
 https://YOUR_PUBLIC_HOST/delivery/digiseller
 ```
 
-Digiseller appends the `uniquecode` query parameter. The endpoint verifies that code with Digiseller, reuses the existing local order if the poller already bought it, delivers the G-Engine result to the buyer chat, then marks the unique code as delivered.
+Digiseller appends the `uniquecode` query parameter. The endpoint verifies that code with Digiseller, reuses the existing local order if one exists, buys from G-Engine only after verification, delivers the G-Engine result to the buyer chat, then marks the unique code as delivered. If the buyer already pasted the unique code into the Digiseller order chat, order sync also checks recent buyer chat messages and verifies any code-like token before using it.
+
+Order polling scale knobs:
+- `ORDER_SYNC_INITIAL_LOOKBACK_HOURS` controls the first/recovery polling window when no successful order-sync checkpoint exists.
+- `ORDER_SYNC_OVERLAP_MINUTES` adds overlap after the last successful checkpoint so late marketplace writes are not missed.
+- `DIGISELLER_SALES_PAGE_SIZE` and `DIGISELLER_SALES_MAX_PAGES` cap Digiseller sales pagination per run.
 
 GGSEL delivery happens during `POST /sync/orders` as soon as a paid sale is detected. There is no unique-code gate for GGSEL.
 
