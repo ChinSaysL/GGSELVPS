@@ -804,6 +804,98 @@ def test_ggsel_gengine_gift_order_uses_common_supplier_flow(
     assert "Your game is ready to be delivered!" in marketplace_client.messages[1][1]
 
 
+def test_gengine_gift_delivery_uses_linked_ru_cis_region_for_cis_marketplace_option(
+    db_session: Session,
+) -> None:
+    raw_payload_json = (
+        '{"source_type":"gift","gift_app_id":"1238840",'
+        '"gift_package_id":"432909","gift_region":"RU+CIS"}'
+    )
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="gift:1238840:432909:RU-CIS",
+        title="Battlefield 1 Revolution",
+        category="Games, Steam Gifts",
+        denomination="RU+CIS",
+        region="RU+CIS",
+        cost_usd=Decimal("2.19"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json=raw_payload_json,
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="ggsel",
+        marketplace_offer_id="102260467",
+        supplier_product_id=supplier.id,
+        title="Battlefield Test",
+        price=Decimal("100.00"),
+        currency="RUB",
+        is_enabled=True,
+        requires_buyer_input=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+    db_session.add(
+        ProductMapping(
+            supplier_product_id=supplier.id,
+            marketplace_offer_id=offer.id,
+            enabled=True,
+            marketplace_variant_id=222003,
+            marketplace_variant_name="CIS",
+        )
+    )
+    db_session.commit()
+
+    sale = {
+        "invoice_id": "9010",
+        "id_goods": "102260467",
+        "date_pay": "2026-04-27 10:00:00",
+        "amount": "100.00",
+        "options": [
+            {"name": "Country", "user_data": "CIS", "user_data_id": 222003},
+            {
+                "name": "Quick-Invite Steam URL",
+                "user_data": "https://steamcommunity.com/invite/abc",
+                "user_data_id": None,
+            },
+        ],
+    }
+    supplier_client = FakeSupplierOrderClient(
+        create_response={"supplier_order_id": "gift:9010", "status": "delivered"}
+    )
+    marketplace_client = FakeMarketplaceOrderClient(sales=[sale], order_payloads={"9010": sale})
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"ggsel": marketplace_client},
+    )
+
+    order = db_session.execute(select(Order)).scalars().one()
+    assert stats["orders_delivered"] == 1
+    assert order.status == "delivered"
+    assert supplier_client.create_calls == [
+        {
+            "product_id": "gift:1238840:432909:RU-CIS",
+            "quantity": 1,
+            "buyer_inputs": {"quick_invite_steam_url": "https://steamcommunity.com/invite/abc"},
+            "external_order_id": "ggsel:9010",
+            "product_payload": {
+                "source_type": "gift",
+                "gift_app_id": "1238840",
+                "gift_package_id": "432909",
+                "gift_region": "RU+CIS",
+            },
+        }
+    ]
+    assert len(marketplace_client.messages) == 2
+    assert "Your game is ready to be delivered!" in marketplace_client.messages[1][1]
+
+
 def test_supplier_cancelled_order_needs_manual_review_and_retry_can_recreate(
     db_session: Session,
 ) -> None:

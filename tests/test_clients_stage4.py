@@ -214,6 +214,45 @@ def test_gengine_create_gift_order_uses_gifts_endpoint_without_pay_step() -> Non
     ]
 
 
+def test_gengine_create_gift_order_prefers_payload_region_for_cis_alias() -> None:
+    captured: list[dict[str, Any]] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content.decode("utf-8") or "{}") if request.content else None
+        captured.append({"method": request.method, "path": request.url.path, "body": body})
+        if request.url.path.endswith("/gifts/orders"):
+            return httpx.Response(status_code=200, json={"id": 9002, "status": "accepted"})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    response = client.create_order(
+        "gift:1238840:432909:RU-CIS",
+        buyer_inputs={"quick_invite_steam_url": "https://steamcommunity.com/invite/abc"},
+        external_order_id="ggsel:9002",
+        product_payload={
+            "source_type": "gift",
+            "gift_package_id": "432909",
+            "gift_region": "RU+CIS",
+        },
+    )
+    client.close()
+
+    assert response == {"id": 9002, "status": "accepted", "supplier_order_id": "gift:9002"}
+    assert captured == [
+        {
+            "method": "POST",
+            "path": "/v2.1/gifts/orders",
+            "body": {
+                "invite_url": "https://steamcommunity.com/invite/abc",
+                "package_id": 432909,
+                "region": "RU+CIS",
+            },
+        }
+    ]
+
+
 def test_gengine_gift_status_uses_gifts_endpoint() -> None:
     captured: list[dict[str, Any]] = []
 
