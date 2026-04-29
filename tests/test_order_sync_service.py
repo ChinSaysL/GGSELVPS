@@ -683,6 +683,7 @@ def test_digiseller_order_waits_for_unique_code_then_delivers(db_session: Sessio
 
     assert sync_stats["supplier_orders_created"] == 0
     assert sync_stats["orders_delivered"] == 0
+    assert sync_stats["details"][0]["marketplace_order_id"] == "9001"
     assert pending_status == "pending"
     assert pending_error == "awaiting_digiseller_unique_code"
     assert pending_create_calls == []
@@ -697,3 +698,43 @@ def test_digiseller_order_waits_for_unique_code_then_delivers(db_session: Sessio
     assert "Спасибо за вашу покупку!" in marketplace_client.messages[0][1]
     assert "ABCD-EFGH-1234" in marketplace_client.messages[1][1]
     assert "Ваша подарочная карта доставлена." in marketplace_client.messages[1][1]
+
+
+def test_digiseller_order_with_unique_code_in_detail_delivers_in_sync(
+    db_session: Session,
+) -> None:
+    _add_linked_offer(db_session, marketplace="digiseller", offer_id="5850465")
+    sale = {
+        "invoice_id": "9001",
+        "id_goods": "5850465",
+        "date_pay": "2026-04-27 10:00:00",
+        "amount": "5.00",
+    }
+    supplier_client = FakeSupplierOrderClient()
+    marketplace_client = FakeDigisellerOrderClient(
+        sales=[sale],
+        order_payloads={
+            "9001": {
+                "retval": 0,
+                "content": {
+                    "item_id": 5850465,
+                    "query_string": "?uniquecode=UNIQUE-CODE-0002",
+                },
+            }
+        },
+    )
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"digiseller": marketplace_client},
+    )
+    order = db_session.execute(select(Order)).scalars().one()
+
+    assert stats["orders_delivered"] == 1
+    assert stats["supplier_orders_created"] == 1
+    assert order.marketplace_order_id == "9001"
+    assert order.status == "delivered"
+    assert len(supplier_client.create_calls) == 1
+    assert marketplace_client.delivered_unique_codes == ["UNIQUE-CODE-0002"]

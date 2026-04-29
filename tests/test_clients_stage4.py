@@ -1085,7 +1085,7 @@ def test_digiseller_get_latest_sales_reads_official_rows_payload() -> None:
                     "page": 1,
                     "rows": [
                         {
-                            "invoice_id": 290877840,
+                            "invoice_id": 123456789,
                             "product_id": 5856640,
                             "product_name": "STEAM USD",
                             "date_pay": "2026-04-29 02:05:00",
@@ -1112,7 +1112,7 @@ def test_digiseller_get_latest_sales_reads_official_rows_payload() -> None:
     assert captured["body"]["rows"] == 5000
     assert sales == [
         {
-            "invoice_id": 290877840,
+            "invoice_id": 123456789,
             "product_id": 5856640,
             "product_name": "STEAM USD",
             "date_pay": "2026-04-29 02:05:00",
@@ -1255,7 +1255,7 @@ def test_ggsel_get_latest_sales_reads_sales_payload_and_flattens_product() -> No
                     "sales": [
                         {
                             "date": "2026-04-29 02:05:00",
-                            "invoice_id": 290877840,
+                            "invoice_id": 123456789,
                             "product": {
                                 "id": 5856640,
                                 "name": "STEAM USD",
@@ -1280,7 +1280,7 @@ def test_ggsel_get_latest_sales_reads_sales_payload_and_flattens_product() -> No
     assert sales == [
         {
             "date": "2026-04-29 02:05:00",
-            "invoice_id": 290877840,
+            "invoice_id": 123456789,
             "product": {"id": 5856640, "name": "STEAM USD", "price_usd": 7.57},
             "product_id": 5856640,
             "product_name": "STEAM USD",

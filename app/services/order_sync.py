@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from urllib.parse import parse_qs
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -290,10 +291,23 @@ def _extract_variant_text(payload: dict[str, Any]) -> str | None:
 def _extract_unique_code(payload: dict[str, Any], explicit: str | None) -> str | None:
     if explicit and explicit.strip():
         return explicit.strip()
-    return _first_non_empty_str(
+    direct = _first_non_empty_str(
         payload,
         ("unique_code", "uniquecode", "uniqueCode", "code_unique", "unique_code_value"),
     )
+    if direct:
+        return direct
+
+    query_string = _first_non_empty_str(payload, ("query_string", "queryString"))
+    if query_string:
+        parsed = parse_qs(query_string.lstrip("?"), keep_blank_values=False)
+        for key in ("uniquecode", "unique_code", "uniqueCode"):
+            values = parsed.get(key)
+            if values:
+                value = str(values[0]).strip()
+                if value:
+                    return value
+    return None
 
 
 def _sale_is_paid(payload: dict[str, Any]) -> bool:
@@ -841,7 +855,12 @@ def _process_normalized_sale(
     if order.status == "delivered":
         stats["skipped"] += 1
         stats["details"].append(
-            {"action": "skipped", "order_id": order.id, "reason": "order_already_delivered"}
+            {
+                "action": "skipped",
+                "order_id": order.id,
+                "marketplace_order_id": order.marketplace_order_id,
+                "reason": "order_already_delivered",
+            }
         )
         return
 
@@ -856,7 +875,12 @@ def _process_normalized_sale(
         db.commit()
         stats["skipped"] += 1
         stats["details"].append(
-            {"action": "skipped", "order_id": order.id, "reason": verification_error}
+            {
+                "action": "skipped",
+                "order_id": order.id,
+                "marketplace_order_id": order.marketplace_order_id,
+                "reason": verification_error,
+            }
         )
         return
     sale = verified_sale
@@ -869,6 +893,7 @@ def _process_normalized_sale(
                 {
                     "action": "skipped",
                     "order_id": order.id,
+                    "marketplace_order_id": order.marketplace_order_id,
                     "reason": f"supplier_purchase_not_retryable:{order.status}",
                 }
             )
@@ -887,7 +912,12 @@ def _process_normalized_sale(
             db.commit()
             stats["errors"] += 1
             stats["details"].append(
-                {"action": "error", "order_id": order.id, "reason": f"supplier_purchase_failed:{exc}"}
+                {
+                    "action": "error",
+                    "order_id": order.id,
+                    "marketplace_order_id": order.marketplace_order_id,
+                    "reason": f"supplier_purchase_failed:{exc}",
+                }
             )
             return
         db.add(order)
@@ -916,7 +946,12 @@ def _process_normalized_sale(
             db.commit()
             stats["skipped"] += 1
             stats["details"].append(
-                {"action": "skipped", "order_id": order.id, "reason": "supplier_order_not_ready"}
+                {
+                    "action": "skipped",
+                    "order_id": order.id,
+                    "marketplace_order_id": order.marketplace_order_id,
+                    "reason": "supplier_order_not_ready",
+                }
             )
             return
 
@@ -935,7 +970,12 @@ def _process_normalized_sale(
         db.commit()
         stats["errors"] += 1
         stats["details"].append(
-            {"action": "error", "order_id": order.id, "reason": f"delivery_failed:{exc}"}
+            {
+                "action": "error",
+                "order_id": order.id,
+                "marketplace_order_id": order.marketplace_order_id,
+                "reason": f"delivery_failed:{exc}",
+            }
         )
         return
 
@@ -948,7 +988,12 @@ def _process_normalized_sale(
     else:
         stats["skipped"] += 1
         stats["details"].append(
-            {"action": "skipped", "order_id": order.id, "reason": order.error_message}
+            {
+                "action": "skipped",
+                "order_id": order.id,
+                "marketplace_order_id": order.marketplace_order_id,
+                "reason": order.error_message,
+            }
         )
 
 
