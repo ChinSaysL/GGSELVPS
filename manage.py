@@ -1679,6 +1679,27 @@ def _extract_marketplace_snapshot_fields(payload: dict[str, Any]) -> dict[str, A
             ):
                 denomination = option_label
 
+    if not detected_requires_buyer_input:
+        source_type = str(payload.get("source_type") or "").strip().lower()
+        if source_type == "recharge" or payload.get("recharge_product_id"):
+            param_keys_raw = payload.get("recharge_param_keys")
+            if not isinstance(param_keys_raw, list) or not param_keys_raw:
+                raw_params = payload.get("params")
+                if isinstance(raw_params, list):
+                    param_keys_raw = [
+                        item.get("param_key")
+                        for item in raw_params
+                        if isinstance(item, dict) and item.get("param_key") is not None
+                    ]
+            if isinstance(param_keys_raw, list):
+                for key in param_keys_raw:
+                    normalized = "".join(c.lower() for c in str(key) if c.isalnum())
+                    if normalized != "quantity":
+                        detected_requires_buyer_input = True
+                        if detected_buyer_input_label is None:
+                            detected_buyer_input_label = str(key).strip() or None
+                        break
+
     return {
         "title": title,
         "denomination": denomination,
