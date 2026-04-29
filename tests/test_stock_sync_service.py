@@ -675,6 +675,62 @@ def test_stock_sync_controls_ggsel_variants_instead_of_disabling_whole_offer(
     )
 
 
+def test_stock_sync_skips_ggsel_managed_quantity_without_stock_api(
+    db_session: Session,
+) -> None:
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="gift:1238840:432909:ua",
+        title="Battlefield 1",
+        category="Games, Steam Gifts",
+        denomination="UA",
+        region="ua",
+        cost_usd=Decimal("1.50"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json="{}",
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="ggsel",
+        marketplace_offer_id="102260467",
+        supplier_product_id=supplier.id,
+        title="Battlefield Test",
+        price=Decimal("167.60"),
+        currency="RUB",
+        is_enabled=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+
+    db_session.add(
+        ProductMapping(
+            supplier_product_id=supplier.id,
+            marketplace_offer_id=offer.id,
+            enabled=True,
+            manage_stock_quantity=True,
+        )
+    )
+    db_session.commit()
+
+    client = FakeDigisellerStockClient()
+    stats = sync_offer_stock(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_balance_client=FakeSupplierBalanceClient({"balance": "50.00"}),
+        marketplace_clients={"ggsel": client},
+    )
+
+    assert stats["errors"] == 0
+    assert any(
+        item.get("reason") == "stock_quantity_update_not_supported_by_marketplace"
+        for item in stats["details"]
+        if isinstance(item, dict)
+    )
+
+
 def test_stock_sync_disables_digiseller_parent_when_variant_control_fails(
     db_session: Session,
 ) -> None:

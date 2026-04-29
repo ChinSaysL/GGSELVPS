@@ -986,6 +986,13 @@ def test_price_sync_updates_ggsel_variant_group_with_single_api_call(
     variant_rates = {int(item["variant_id"]): Decimal(str(item["rate"])) for item in variants}
     assert variant_rates[19472011] == Decimal("0.0")
     assert variant_rates[19472020] > Decimal("0")
+    details_by_variant = {
+        item["variant_id"]: item
+        for item in result["details"]
+        if isinstance(item, dict) and item.get("variant_id") is not None
+    }
+    assert details_by_variant[19472011]["variant_price_modifier"] == "0.0"
+    assert Decimal(details_by_variant[19472020]["variant_price_modifier"]) > Decimal("0")
 
 
 def test_price_sync_updates_digiseller_runtime_quantity_variants(

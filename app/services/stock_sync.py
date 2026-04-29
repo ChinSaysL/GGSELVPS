@@ -1017,14 +1017,25 @@ def sync_offer_stock(
             continue
         marketplace = offer.marketplace.lower()
         client = marketplace_clients.get(marketplace)
-        if client is None or not hasattr(client, "set_offer_stock"):
-            continue
 
         managed = [
             mapping for mapping in group
             if mapping.manage_stock_quantity and mapping.supplier_product is not None
         ]
         if not managed:
+            continue
+        if client is None or not hasattr(client, "set_offer_stock"):
+            for mapping in managed:
+                detail = _base_detail(
+                    mapping=mapping,
+                    offer=offer,
+                    supplier=mapping.supplier_product,
+                )
+                _skip_detail(
+                    stats,
+                    detail,
+                    reason="stock_quantity_update_not_supported_by_marketplace",
+                )
             continue
 
         mapping = managed[0]

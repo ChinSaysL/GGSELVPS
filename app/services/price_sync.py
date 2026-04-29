@@ -657,6 +657,17 @@ def _marketplace_variant_payload(
     return base_price, variants
 
 
+def _variant_rates_by_id(variant_payload: list[dict[str, Any]]) -> dict[int, Decimal]:
+    rates: dict[int, Decimal] = {}
+    for item in variant_payload:
+        variant_id = _parse_int_token(item.get("variant_id"))
+        rate = _to_decimal(item.get("rate"))
+        if variant_id is None or rate is None:
+            continue
+        rates[int(variant_id)] = rate
+    return rates
+
+
 def sync_offer_prices(
     *,
     db: Session,
@@ -944,6 +955,7 @@ def sync_offer_prices(
                 continue
 
             base_price, variant_payload = _marketplace_variant_payload(plans)
+            variant_rates = _variant_rates_by_id(variant_payload)
             plan_currency = plans[0][2].currency
             client = marketplace_clients.get(marketplace)
             if client is None:
@@ -987,6 +999,11 @@ def sync_offer_prices(
                             "group_base_price": _decimal_to_str(base_price),
                             "variant_id": grouped_mapping.marketplace_variant_id,
                             "variant_name": grouped_mapping.marketplace_variant_name,
+                            "variant_price_modifier": _decimal_to_str(
+                                variant_rates.get(int(grouped_mapping.marketplace_variant_id))
+                                if grouped_mapping.marketplace_variant_id is not None
+                                else None
+                            ),
                             "marketplace_commission_percent": _decimal_to_str(
                                 grouped_plan.marketplace_commission_percent
                             ),
@@ -1091,6 +1108,11 @@ def sync_offer_prices(
                             "variant_id": grouped_mapping.marketplace_variant_id,
                             "variant_name": grouped_mapping.marketplace_variant_name,
                             "variant_mode": True,
+                            "variant_price_modifier": _decimal_to_str(
+                                variant_rates.get(int(grouped_mapping.marketplace_variant_id))
+                                if grouped_mapping.marketplace_variant_id is not None
+                                else None
+                            ),
                             "task_id": group_task_id,
                             "marketplace_commission_percent": _decimal_to_str(
                                 grouped_plan.marketplace_commission_percent
@@ -1122,6 +1144,11 @@ def sync_offer_prices(
                         "variant_id": grouped_mapping.marketplace_variant_id,
                         "variant_name": grouped_mapping.marketplace_variant_name,
                         "variant_mode": True,
+                        "variant_price_modifier": _decimal_to_str(
+                            variant_rates.get(int(grouped_mapping.marketplace_variant_id))
+                            if grouped_mapping.marketplace_variant_id is not None
+                            else None
+                        ),
                         "marketplace_commission_percent": _decimal_to_str(
                             grouped_plan.marketplace_commission_percent
                         ),

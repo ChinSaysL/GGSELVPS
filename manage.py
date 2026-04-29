@@ -330,12 +330,22 @@ def _print_price_sync_result(result: dict[str, Any]) -> None:
         old_price = item.get("old_price")
         recommended_price = item.get("recommended_price")
         currency = item.get("currency")
+        variant_id = item.get("variant_id")
+        variant_name = item.get("variant_name")
+        group_base_price = item.get("group_base_price")
+        variant_price_modifier = item.get("variant_price_modifier")
         reason = item.get("reason")
 
         line = (
             f"- {action}: {marketplace}:{marketplace_offer_id} | {title} "
             f"{denomination or ''} | {old_price} -> {recommended_price} {currency or ''}"
         )
+        if variant_id is not None:
+            line += f" | variant={variant_name or variant_id}"
+        if group_base_price is not None:
+            line += f" | base={group_base_price}"
+        if variant_price_modifier is not None:
+            line += f" | modifier={variant_price_modifier}"
         if reason:
             line += f" | reason={reason}"
         print(line)
@@ -3644,6 +3654,22 @@ def action_manual_link() -> int:
             print("Note: price sync does not change option visibility or default selections.")
             details = sync_result.get("details")
             if isinstance(details, list):
+                updated_variant_details = [
+                    item
+                    for item in details
+                    if isinstance(item, dict)
+                    and item.get("action") == "updated"
+                    and item.get("variant_mode")
+                ]
+                if updated_variant_details:
+                    print("Updated variant price modifiers (first 10):")
+                    for item in updated_variant_details[:10]:
+                        print(
+                            f"- {item.get('variant_name') or item.get('variant_id')} | "
+                            f"target={item.get('recommended_price')} {item.get('currency') or ''} | "
+                            f"base={item.get('group_base_price')} | "
+                            f"modifier={item.get('variant_price_modifier')}"
+                        )
                 skip_details = [
                     item for item in details if isinstance(item, dict) and item.get("action") == "skipped"
                 ]

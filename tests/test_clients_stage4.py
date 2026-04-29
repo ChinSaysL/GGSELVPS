@@ -1617,6 +1617,61 @@ def test_ggsel_set_offer_variant_visible_edits_target_variant() -> None:
     assert captured["json"]["visible"] is False
 
 
+def test_ggsel_set_offer_variant_visible_uses_product_data_options() -> None:
+    captured: dict[str, Any] = {"paths": []}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["paths"].append(request.url.path)
+        if request.url.path.endswith("/api_sellers/api/products/102260467/data"):
+            return httpx.Response(
+                status_code=200,
+                json={
+                    "retval": 0,
+                    "product": {
+                        "id": 102260467,
+                        "options": [
+                            {
+                                "name": 777,
+                                "label": "Country",
+                                "variants": [
+                                    {
+                                        "value": 19224615,
+                                        "text": "CIS",
+                                        "default": 0,
+                                        "modify": "1",
+                                        "modify_type": "priceplus",
+                                        "modify_value": "76.23",
+                                        "num_in_stock": 0,
+                                        "visible": 1,
+                                    }
+                                ],
+                            }
+                        ],
+                    },
+                },
+            )
+        if request.url.path.endswith("/api_sellers/api/products/options/777/variants/19224615"):
+            captured["query"] = dict(request.url.params)
+            captured["json"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(status_code=200, json={"retval": 0})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GGSELClient(base_url="https://seller.ggsel.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    result = client.set_offer_variant_visible("102260467", 19224615, False)
+    client.close()
+
+    assert result["status"] == "ok"
+    assert result["option_id"] == 777
+    assert result["variant_id"] == 19224615
+    assert captured["query"]["token"] == "secret"
+    assert captured["json"]["text"] == "CIS"
+    assert captured["json"]["modify_value"] == "76.23"
+    assert captured["json"]["visible"] is False
+    assert "/api_sellers/api/products/options/list/102260467" not in captured["paths"]
+
+
 def test_ggsel_send_buyer_message_uses_prefixed_debates_endpoint() -> None:
     captured: dict[str, Any] = {}
 
@@ -1909,7 +1964,17 @@ def test_ggsel_set_offer_price_supports_variants_payload() -> None:
         {
             "product_id": 5850465,
             "price": 7.15,
-            "variants": [{"variant_id": 19472020, "rate": 6.60, "type": 2}],
+            "variants": [
+                {
+                    "variant_id": 19472020,
+                    "value": 19472020,
+                    "rate": 6.60,
+                    "type": 2,
+                    "modify": 1,
+                    "modify_type": "PricePlus",
+                    "modify_value": "6.6",
+                }
+            ],
         }
     ]
 
@@ -1960,7 +2025,17 @@ def test_ggsel_set_offer_price_uses_apilogin_token_when_seller_id_is_configured(
         {
             "product_id": 102249445,
             "price": 610.55,
-            "variants": [{"variant_id": 18944509, "rate": 0.0, "type": 2}],
+            "variants": [
+                {
+                    "variant_id": 18944509,
+                    "value": 18944509,
+                    "rate": 0.0,
+                    "type": 2,
+                    "modify": 1,
+                    "modify_type": "PricePlus",
+                    "modify_value": "0.0",
+                }
+            ],
         }
     ]
 

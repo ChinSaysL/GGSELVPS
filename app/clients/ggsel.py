@@ -419,7 +419,7 @@ class GGSELClient(BaseAPIClient):
     def _extract_option_id(payload: object) -> int | None:
         if not isinstance(payload, dict):
             return None
-        for key in ("id", "option_id", "optionId"):
+        for key in ("id", "option_id", "optionId", "name"):
             raw = payload.get(key)
             if raw is None:
                 continue
@@ -433,7 +433,7 @@ class GGSELClient(BaseAPIClient):
     def _extract_variant_id(payload: object) -> int | None:
         if not isinstance(payload, dict):
             return None
-        for key in ("variant_id", "variantId", "id"):
+        for key in ("variant_id", "variantId", "value", "id"):
             raw = payload.get(key)
             if raw is None:
                 continue
@@ -459,6 +459,82 @@ class GGSELClient(BaseAPIClient):
             if text in {"0", "false", "no", "off"}:
                 return False
         return None
+
+    @staticmethod
+    def _first_payload_value(payload: dict[str, Any], keys: tuple[str, ...]) -> Any | None:
+        for key in keys:
+            value = payload.get(key)
+            if value not in (None, ""):
+                return value
+        return None
+
+    @staticmethod
+    def _parse_int(value: object, *, default: int) -> int:
+        if value is None:
+            return default
+        try:
+            return int(str(value).strip())
+        except ValueError:
+            return default
+
+    @staticmethod
+    def _variant_type_name(value: object) -> str:
+        if isinstance(value, int):
+            return {
+                0: "PercentPlus",
+                1: "PercentMinus",
+                2: "PricePlus",
+                3: "PriceMinus",
+            }.get(value, "PricePlus")
+
+        text = str(value or "").strip()
+        compact = text.replace("_", "").replace("-", "").replace(" ", "").lower()
+        if compact in {"percentplus", "0"}:
+            return "PercentPlus"
+        if compact in {"percentminus", "1"}:
+            return "PercentMinus"
+        if compact in {"priceminus", "3"}:
+            return "PriceMinus"
+        return "PricePlus"
+
+    @classmethod
+    def _normalize_price_update_variant(cls, variant: dict[str, Any]) -> dict[str, Any]:
+        normalized = dict(variant)
+        variant_id = cls._extract_variant_id(normalized)
+        if variant_id is not None:
+            # GGSEL product info exposes option value ids as `value`, while the
+            # bulk price endpoint is Digiseller-compatible and commonly accepts
+            # `variant_id`. Send both names so either binder can target the row.
+            normalized["variant_id"] = int(variant_id)
+            normalized["value"] = int(variant_id)
+
+        rate = normalized.get("rate")
+        if rate is not None:
+            normalized.setdefault("modify", 1)
+            normalized.setdefault("modify_value", str(rate))
+
+        type_value = normalized.get("type", 2)
+        normalized["type"] = type_value
+        normalized.setdefault("modify_type", cls._variant_type_name(type_value))
+        return normalized
+
+    @classmethod
+    def _option_variants(cls, option: dict[str, Any]) -> list[dict[str, Any]]:
+        for key in ("variants", "values", "items", "options"):
+            value = option.get(key)
+            if isinstance(value, list):
+                return [item for item in value if isinstance(item, dict)]
+        return []
+
+    @classmethod
+    def _offer_options(cls, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        product = payload.get("product")
+        if isinstance(product, dict):
+            payload = product
+        options = payload.get("options")
+        if not isinstance(options, list):
+            return []
+        return [item for item in options if isinstance(item, dict)]
 
     def _list_product_option_ids(self, product_id: str, *, token: str) -> list[int]:
         try:
@@ -487,6 +563,25 @@ class GGSELClient(BaseAPIClient):
                 option_ids.append(option_id)
         return option_ids
 
+    def _find_variant_payload_from_product_data(
+        self,
+        *,
+        product_id: str,
+        variant_id: int,
+    ) -> tuple[int, dict[str, Any]] | None:
+        product = self.get_offer_by_id(product_id)
+        if not isinstance(product, dict):
+            return None
+
+        for option in self._offer_options(product):
+            option_id = self._extract_option_id(option)
+            if option_id is None:
+                continue
+            for variant in self._option_variants(option):
+                if self._extract_variant_id(variant) == variant_id:
+                    return option_id, variant
+        return None
+
     def _get_product_option(self, option_id: int, *, token: str) -> dict[str, Any]:
         response = self._request_json(
             method="GET",
@@ -509,18 +604,60 @@ class GGSELClient(BaseAPIClient):
         variant_id: int,
         token: str,
     ) -> tuple[int, dict[str, Any]]:
+        product_data_match = self._find_variant_payload_from_product_data(
+            product_id=product_id,
+            variant_id=variant_id,
+        )
+        if product_data_match is not None:
+            return product_data_match
+
         option_ids = self._list_product_option_ids(product_id, token=token)
         for option_id in option_ids:
             option = self._get_product_option(option_id, token=token)
-            variants = option.get("variants")
-            if not isinstance(variants, list):
-                continue
-            for variant in variants:
-                if not isinstance(variant, dict):
-                    continue
+            for variant in self._option_variants(option):
                 if self._extract_variant_id(variant) == variant_id:
                     return option_id, variant
         raise APIRequestError(f"GGSEL variant {variant_id} was not found on product {product_id}.")
+
+    @classmethod
+    def _build_variant_update_payload(
+        cls,
+        variant: dict[str, Any],
+        *,
+        visible: bool,
+        is_default: bool,
+    ) -> dict[str, Any]:
+        payload: dict[str, Any] = {}
+
+        name = variant.get("name")
+        text = variant.get("text")
+        if name is not None:
+            payload["name"] = name
+        if text is not None:
+            payload["text"] = text
+
+        rate = cls._first_payload_value(variant, ("rate", "modify_value", "modify_value_default"))
+        if rate is None:
+            rate = 0
+        type_value = cls._first_payload_value(variant, ("type", "modify_type"))
+        if type_value is None:
+            type_value = "priceplus"
+
+        payload["type"] = type_value
+        payload["rate"] = rate
+        payload["modify_type"] = variant.get("modify_type") or cls._variant_type_name(type_value)
+        payload["modify_value"] = str(rate)
+        if variant.get("modify") not in (None, ""):
+            payload["modify"] = variant.get("modify")
+        if variant.get("modify_value_default") not in (None, ""):
+            payload["modify_value_default"] = variant.get("modify_value_default")
+        if variant.get("num_in_stock") not in (None, ""):
+            payload["num_in_stock"] = variant.get("num_in_stock")
+
+        payload["default"] = is_default
+        payload["visible"] = bool(visible)
+        payload["order"] = cls._parse_int(variant.get("order"), default=1)
+        return payload
 
     def set_offer_variant_state(
         self,
@@ -545,14 +682,11 @@ class GGSELClient(BaseAPIClient):
         if visible_matches and default_matches:
             return {"status": "ok", "unchanged": True}
 
-        payload: dict[str, Any] = {
-            "name": variant.get("name"),
-            "type": variant.get("type", "priceplus"),
-            "rate": variant.get("rate", 0),
-            "default": target_default,
-            "visible": bool(visible),
-            "order": int(variant.get("order", 1)),
-        }
+        payload = self._build_variant_update_payload(
+            variant,
+            visible=visible,
+            is_default=target_default,
+        )
         response = self._request_json(
             method="POST",
             path=self._build_path(f"/api/products/options/{option_id}/variants/{variant_id}"),
@@ -781,7 +915,11 @@ class GGSELClient(BaseAPIClient):
             "price": float(price),
         }
         if variants:
-            request_item["variants"] = variants
+            request_item["variants"] = [
+                self._normalize_price_update_variant(variant)
+                for variant in variants
+                if isinstance(variant, dict)
+            ]
         request_payload: list[dict[str, Any]] = [request_item]
         last_auth_error: APIRequestError | None = None
         refresh_rounds = (False, True) if self.seller_id else (False,)
@@ -817,57 +955,6 @@ class GGSELClient(BaseAPIClient):
                 task_id=task_id,
                 token=self._get_access_token(),
             )
-            task_status.setdefault("task_id", task_id)
-            return task_status
-        return response
-
-    def set_offer_stock(self, offer_id: str, stock: int) -> dict[str, Any]:
-        # GGSEL Seller API v1 does not document a stock-update endpoint.
-        # This targets /api/product/edit/stock by analogy with the documented
-        # /api/product/edit/prices endpoint.  If GGSEL returns 4xx, the stock
-        # sync catches the exception and logs it as a non-fatal error.
-        request_payload: list[dict[str, Any]] = [
-            {"product_id": int(offer_id), "stock": max(0, stock)}
-        ]
-        last_auth_error: APIRequestError | None = None
-        refresh_rounds = (False, True) if self.seller_id else (False,)
-        for force_refresh in refresh_rounds:
-            token = self._get_access_token(force_refresh=force_refresh)
-            try:
-                response = self._request_json(
-                    method="POST",
-                    path=self._build_path("/api/product/edit/stock"),
-                    params={"token": token},
-                    json_body=request_payload,
-                )
-            except APIRequestError as exc:
-                if "HTTP 401" in str(exc) or "HTTP 403" in str(exc):
-                    last_auth_error = exc
-                    continue
-                raise
-            if not isinstance(response, dict):
-                return {"status": "ok", "stock": stock}
-            task_id = self._extract_task_id(response)
-            if task_id:
-                task_status = self._wait_for_price_update_task(task_id=task_id, token=token)
-                task_status.setdefault("task_id", task_id)
-                return task_status
-            return response
-
-        if last_auth_error is not None:
-            raise last_auth_error
-        token = self._get_access_token()
-        response = self._request_json(
-            method="POST",
-            path=self._build_path("/api/product/edit/stock"),
-            params={"token": token},
-            json_body=request_payload,
-        )
-        if not isinstance(response, dict):
-            return {"status": "ok", "stock": stock}
-        task_id = self._extract_task_id(response)
-        if task_id:
-            task_status = self._wait_for_price_update_task(task_id=task_id, token=token)
             task_status.setdefault("task_id", task_id)
             return task_status
         return response
