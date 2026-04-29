@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from decimal import Decimal, ROUND_UP
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -507,35 +508,38 @@ class GGSELClient(BaseAPIClient):
     def _variant_type_name(value: object) -> str:
         if isinstance(value, int):
             return {
-                0: "PercentPlus",
-                1: "PercentMinus",
-                2: "PricePlus",
-                3: "PriceMinus",
-            }.get(value, "PricePlus")
+                0: "percentplus",
+                1: "percentminus",
+                2: "priceplus",
+                3: "priceminus",
+            }.get(value, "priceplus")
 
         text = str(value or "").strip()
         compact = text.replace("_", "").replace("-", "").replace(" ", "").lower()
         if compact in {"percentplus", "0"}:
-            return "PercentPlus"
+            return "percentplus"
         if compact in {"percentminus", "1"}:
-            return "PercentMinus"
+            return "percentminus"
         if compact in {"priceminus", "3"}:
-            return "PriceMinus"
-        return "PricePlus"
+            return "priceminus"
+        return "priceplus"
 
     @classmethod
     def _normalize_price_update_variant(cls, variant: dict[str, Any]) -> dict[str, Any]:
-        # GGSEL schema uses `value` for variant ID, `modify_type` (string) and
-        # `modify_value` (string) for the price modifier — not `variant_id`/`type`/`rate`.
         variant_id = cls._extract_variant_id(variant)
         type_value = variant.get("type", 2)
         rate = variant.get("rate", 0)
         out: dict[str, Any] = {
+            "type": type_value,
+            "rate": rate,
+            "modify": variant.get("modify", 1),
             "modify_type": cls._variant_type_name(type_value),
             "modify_value": str(rate),
         }
         if variant_id is not None:
-            out["value"] = int(variant_id)
+            variant_value = int(variant_id)
+            out["variant_id"] = variant_value
+            out["value"] = variant_value
         return out
 
     @classmethod
@@ -961,9 +965,10 @@ class GGSELClient(BaseAPIClient):
         variants: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         _ = currency
+        price_value = Decimal(str(price)).quantize(Decimal("0.01"), rounding=ROUND_UP)
         request_item: dict[str, Any] = {
             "product_id": int(offer_id),
-            "price": float(price),
+            "price": float(price_value),
         }
         if variants:
             request_item["variants"] = [

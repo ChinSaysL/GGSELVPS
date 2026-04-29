@@ -1939,6 +1939,25 @@ def test_ggsel_set_offer_price_uses_bulk_endpoint_and_waits_for_task() -> None:
     assert captured["status_query"]["taskId"] == "ggsel-task-123"
 
 
+def test_ggsel_set_offer_price_rounds_price_up_to_cents() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api_sellers/api/product/edit/prices"):
+            captured["price_json"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(status_code=200, json={"status": "ok"})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GGSELClient(base_url="https://seller.ggsel.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    result = client.set_offer_price(offer_id="5850465", price=12.345, currency="USD")
+    client.close()
+
+    assert result == {"status": "ok"}
+    assert captured["price_json"] == [{"product_id": 5850465, "price": 12.35}]
+
+
 def test_ggsel_set_offer_price_supports_variants_payload() -> None:
     captured: dict[str, Any] = {}
 
@@ -1968,10 +1987,10 @@ def test_ggsel_set_offer_price_supports_variants_payload() -> None:
                 {
                     "variant_id": 19472020,
                     "value": 19472020,
-                    "rate": 6.60,
                     "type": 2,
+                    "rate": 6.6,
                     "modify": 1,
-                    "modify_type": "PricePlus",
+                    "modify_type": "priceplus",
                     "modify_value": "6.6",
                 }
             ],
@@ -2029,10 +2048,10 @@ def test_ggsel_set_offer_price_uses_apilogin_token_when_seller_id_is_configured(
                 {
                     "variant_id": 18944509,
                     "value": 18944509,
-                    "rate": 0.0,
                     "type": 2,
+                    "rate": 0.0,
                     "modify": 1,
-                    "modify_type": "PricePlus",
+                    "modify_type": "priceplus",
                     "modify_value": "0.0",
                 }
             ],
