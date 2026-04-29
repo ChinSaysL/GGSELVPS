@@ -1693,7 +1693,42 @@ def _variant_match_key(text: str | None) -> str:
     return _normalize_search_text(text or "")
 
 
+def _gift_region_match_key(value: object) -> str | None:
+    normalized = _normalize_search_text(value)
+    if not normalized:
+        return None
+    compact = normalized.replace(" ", "")
+    if re.fullmatch(r"[a-z]{2,5}", compact):
+        return compact
+    return None
+
+
+def _product_gift_region_key(product: Any) -> str | None:
+    payload = _raw_payload_dict(product)
+    source_type = str(payload.get("source_type") or "").strip().lower()
+    supplier_id = str(getattr(product, "supplier_product_id", "") or "").strip().lower()
+    if source_type not in {"gift", "gifts"} and not supplier_id.startswith(("gift:", "gifts:")):
+        return None
+
+    candidates = (
+        getattr(product, "denomination", None),
+        getattr(product, "region", None),
+        payload.get("gift_region"),
+        payload.get("region"),
+        payload.get("country"),
+        payload.get("country_code"),
+    )
+    for candidate in candidates:
+        key = _gift_region_match_key(candidate)
+        if key is not None:
+            return key
+    return None
+
+
 def _product_variant_key(product: Any) -> str:
+    gift_region_key = _product_gift_region_key(product)
+    if gift_region_key is not None:
+        return gift_region_key
     signature = _product_denomination_signature(product)
     if signature:
         return signature

@@ -679,6 +679,67 @@ def test_products_matching_variant_exact_ignores_fuzzy_results() -> None:
     assert matches == []
 
 
+def test_auto_match_option_entries_matches_gengine_gift_regions() -> None:
+    products = [
+        SimpleNamespace(
+            id=10,
+            title="Battlefield 1 Revolution",
+            category="Games, Steam Gifts",
+            denomination="UA",
+            region="UA",
+            supplier_product_id="gift:1238840:432909:UA",
+            raw_payload_json='{"source_type":"gift","gift_region":"UA"}',
+        ),
+        SimpleNamespace(
+            id=11,
+            title="Battlefield 1 Revolution",
+            category="Games, Steam Gifts",
+            denomination="KZ",
+            region="KZ",
+            supplier_product_id="gift:1238840:432909:KZ",
+            raw_payload_json='{"source_type":"gift","gift_region":"KZ"}',
+        ),
+        SimpleNamespace(
+            id=12,
+            title="Battlefield 1 Revolution",
+            category="Games, Steam Gifts",
+            denomination="CIS",
+            region="CIS",
+            supplier_product_id="gift:1238840:432909:CIS",
+            raw_payload_json='{"source_type":"gift","gift_region":"CIS"}',
+        ),
+        SimpleNamespace(
+            id=13,
+            title="Battlefield 1 Revolution",
+            category="Games, Steam Gifts",
+            denomination="US",
+            region="US",
+            supplier_product_id="gift:1238840:432909:US",
+            raw_payload_json='{"source_type":"gift","gift_region":"US"}',
+        ),
+    ]
+    option_entries = [
+        {"option_label": "Country", "variant_value": "UA"},
+        {"option_label": "Country", "variant_value": "KZ"},
+        {"option_label": "Country", "variant_value": "CIS"},
+        {"option_label": "Country", "variant_value": "US"},
+    ]
+
+    matches, unmatched, ambiguous = manage._auto_match_option_entries_to_products(
+        products,
+        option_entries,
+    )
+
+    assert [(item["entry"]["variant_value"], item["product"].id) for item in matches] == [
+        ("UA", 10),
+        ("KZ", 11),
+        ("CIS", 12),
+        ("US", 13),
+    ]
+    assert unmatched == []
+    assert ambiguous == []
+
+
 def test_auto_select_single_offer_uses_snapshot_title() -> None:
     reference = manage.GEngineProductReference(
         kind="recharge",
