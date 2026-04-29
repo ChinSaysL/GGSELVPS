@@ -227,6 +227,7 @@ def sync_products(
         "manual_link_required": 0,
         "skipped": 0,
         "provider_unavailable": 0,
+        "new_products": [],
         "details": [],
     }
 
@@ -260,6 +261,21 @@ def sync_products(
         _supplier_product, change_type = _upsert_supplier_product(db, normalized)
         stats["products_imported"] += 1
         stats[f"supplier_products_{change_type}"] += 1
+        if change_type == "created":
+            stats["new_products"].append(
+                {
+                    "local_id": _supplier_product.id,
+                    "supplier_product_id": normalized.supplier_product_id,
+                    "title": normalized.title,
+                    "category": normalized.category,
+                    "denomination": normalized.denomination,
+                    "region": normalized.region,
+                    "cost_usd": str(normalized.cost_usd),
+                    "stock": normalized.supplier_stock,
+                    "source_type": _first_non_empty_str(raw, ("source_type",)),
+                    "is_available": normalized.is_available,
+                }
+            )
         log_event(
             logger,
             "product_sync.product_upserted",

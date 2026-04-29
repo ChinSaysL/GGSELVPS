@@ -69,7 +69,7 @@ Cache path is controlled by `USD_RUB_RATE_CACHE_PATH`.
 
 There are intentionally no listing template, category, or publish-switch settings. Marketplace listings are created manually outside this app.
 
-For automatic price updates, set `SCHEDULER_ENABLED=true` and `PRICE_SYNC_INTERVAL_MINUTES=60`.
+For automatic price updates, set `SCHEDULER_ENABLED=true` and `PRICE_SYNC_INTERVAL_MINUTES=5`.
 `python manage.py sync-prices` is a manual immediate trigger, while the scheduler handles recurring runs.
 
 ## Management menu

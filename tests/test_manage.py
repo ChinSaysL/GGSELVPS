@@ -63,6 +63,56 @@ def test_print_order_sync_result_prioritizes_pending_and_hides_unlinked(capsys) 
     assert "order=288765912" not in output
 
 
+def test_print_product_sync_result_shows_new_products(capsys) -> None:
+    manage._print_product_sync_result(
+        {
+            "status": "ok",
+            "supplier": "gengine",
+            "marketplace": "ggsel",
+            "products_received": 2,
+            "products_imported": 2,
+            "supplier_products_created": 1,
+            "supplier_products_updated": 1,
+            "manual_link_required": 2,
+            "skipped": 0,
+            "provider_unavailable": 0,
+            "new_products": [
+                {
+                    "local_id": 546,
+                    "supplier_product_id": "gift:1238840:432909:ua",
+                    "title": "Battlefield 1 Revolution",
+                    "denomination": "ua",
+                    "region": "ua",
+                    "cost_usd": "1.496",
+                    "stock": "unlimited",
+                    "source_type": "gift",
+                }
+            ],
+            "details": [],
+        }
+    )
+
+    output = capsys.readouterr().out
+    assert "New products imported" in output
+    assert "local 546" in output
+    assert "gift:1238840:432909:ua" in output
+    assert "Battlefield 1 Revolution" in output
+    assert "cost_usd=1.496" in output
+
+
+def test_print_product_sync_result_says_no_new_products(capsys) -> None:
+    manage._print_product_sync_result(
+        {
+            "status": "ok",
+            "supplier_products_created": 0,
+            "new_products": [],
+        }
+    )
+
+    output = capsys.readouterr().out
+    assert "New products imported: none" in output
+
+
 def test_parse_gengine_shop_reference_from_url() -> None:
     reference = manage._parse_gengine_reference(
         "https://b2b.g-engine.net/en/shop/5/playstation-store-wallet-turkey"

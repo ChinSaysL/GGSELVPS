@@ -61,6 +61,14 @@ class SupplierRefreshClientProtocol(Protocol):
         include_unpriced: bool = False,
     ) -> list[dict[str, Any]]: ...
 
+    def list_gift_app_products(
+        self,
+        app_id: str,
+        *,
+        fallback_title: str | None = None,
+        source_slug: str | None = None,
+    ) -> list[dict[str, Any]]: ...
+
     def close(self) -> None: ...
 
 
@@ -154,6 +162,28 @@ def _supplier_refresh_reference(
 
     payload = _load_json_object(supplier_product.raw_payload_json)
     source_type = _first_payload_value(payload, ("source_type",))
+    supplier_product_id = str(supplier_product.supplier_product_id or "").strip()
+    supplier_product_id_prefix = supplier_product_id.split(":", maxsplit=1)[0]
+    if (
+        source_type in {"gift", "gifts"}
+        or supplier_product_id_prefix in {"gift", "gifts"}
+        or _first_payload_value(payload, ("gift_app_id", "gift_id")) is not None
+    ):
+        product_id = _first_payload_value(payload, ("gift_app_id", "gift_id", "base_product_id"))
+        if product_id is None and supplier_product_id_prefix in {"gift", "gifts"}:
+            parts = supplier_product_id.split(":")
+            if len(parts) >= 2 and parts[1]:
+                product_id = parts[1]
+        if product_id is None:
+            return None
+        source_slug = _first_payload_value(payload, ("source_slug", "slug"))
+        return _SupplierRefreshReference(
+            kind="gift",
+            product_id=product_id,
+            fallback_title=supplier_product.title,
+            source_slug=source_slug,
+        )
+
     if source_type == "recharge" or _first_payload_value(payload, ("recharge_product_id",)) is not None:
         product_id = _first_payload_value(payload, ("recharge_product_id", "service_id"))
         if product_id is None:
@@ -241,6 +271,12 @@ def _refresh_linked_supplier_products(
                     fallback_title=reference.fallback_title,
                     source_slug=reference.source_slug,
                     include_unpriced=False,
+                )
+            elif reference.kind == "gift":
+                products = supplier_client.list_gift_app_products(
+                    reference.product_id,
+                    fallback_title=reference.fallback_title,
+                    source_slug=reference.source_slug,
                 )
             else:
                 products = supplier_client.list_product_denominations(

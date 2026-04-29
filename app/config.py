@@ -74,7 +74,7 @@ class Settings(BaseSettings):
     digiseller_sales_max_pages: int = 3
     product_sync_interval_minutes: int = 60
     stock_sync_interval_minutes: int = 5
-    price_sync_interval_minutes: int = 60
+    price_sync_interval_minutes: int = 5
     scheduler_enabled: bool = False
 
     log_level: str = "INFO"

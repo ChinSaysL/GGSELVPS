@@ -205,7 +205,7 @@ def action_check_config() -> int:
         missing.append("GENGINE_API_KEY")
     if not settings.scheduler_enabled:
         warnings.append(
-            "SCHEDULER_ENABLED is false, so automatic hourly price sync is disabled."
+            "SCHEDULER_ENABLED is false, so automatic recurring price sync is disabled."
         )
     if settings.digiseller_api_key and not settings.digiseller_seller_id:
         warnings.append(
@@ -292,9 +292,73 @@ def action_sync_products() -> int:
         print(f"Product sync failed: {exc}")
         return 1
 
-    for key, value in result.items():
-        print(f"{key}: {value}")
+    _print_product_sync_result(result)
     return 0
+
+
+def _print_product_sync_result(result: dict[str, Any]) -> None:
+    summary_keys = (
+        "status",
+        "supplier",
+        "marketplace",
+        "products_received",
+        "products_imported",
+        "supplier_products_created",
+        "supplier_products_updated",
+        "manual_link_required",
+        "skipped",
+        "provider_unavailable",
+    )
+    for key in summary_keys:
+        if key in result:
+            print(f"{key}: {result[key]}")
+
+    new_products = result.get("new_products")
+    if isinstance(new_products, list) and new_products:
+        print("\nNew products imported (first 25):")
+        for item in new_products[:25]:
+            if not isinstance(item, dict):
+                continue
+            local_id = item.get("local_id")
+            supplier_id = item.get("supplier_product_id")
+            title = item.get("title")
+            denomination = item.get("denomination")
+            region = item.get("region")
+            cost_usd = item.get("cost_usd")
+            stock = item.get("stock")
+            source_type = item.get("source_type")
+            line = f"- local {local_id} | supplier_id={supplier_id} | {title}"
+            if denomination:
+                line += f" | denomination={denomination}"
+            if region:
+                line += f" | region={region}"
+            if cost_usd is not None:
+                line += f" | cost_usd={cost_usd}"
+            if stock:
+                line += f" | stock={stock}"
+            if source_type:
+                line += f" | source={source_type}"
+            print(line)
+        if len(new_products) > 25:
+            print(f"...and {len(new_products) - 25} more new products.")
+    elif int(result.get("supplier_products_created") or 0) == 0:
+        print("\nNew products imported: none")
+
+    details = result.get("details")
+    if not isinstance(details, list) or not details:
+        return
+
+    skipped = [item for item in details if isinstance(item, dict) and item.get("action") == "skipped"]
+    if not skipped:
+        return
+    print("\nSkipped rows (first 10):")
+    for item in skipped[:10]:
+        print(
+            f"- reason={item.get('reason')} | supplier_id={item.get('supplier_product_id')} "
+            f"| title={item.get('title')} | cost_usd={item.get('cost_usd')}"
+        )
+    if len(skipped) > 10:
+        print(f"...and {len(skipped) - 10} more skipped rows.")
 
 
 def _print_price_sync_result(result: dict[str, Any]) -> None:
@@ -380,8 +444,8 @@ def action_price_preview() -> int:
 def action_sync_prices() -> int:
     _print_header("Price Sync (Manual Trigger)")
     print(
-        "This triggers price sync immediately. For automatic hourly sync, keep "
-        "SCHEDULER_ENABLED=true and PRICE_SYNC_INTERVAL_MINUTES=60."
+        "This triggers price sync immediately. For automatic recurring sync, keep "
+        "SCHEDULER_ENABLED=true and PRICE_SYNC_INTERVAL_MINUTES=5."
     )
     if sys.stdin.isatty() and not _ask_bool("Update marketplace prices now (live mode)?", default=True):
         print("Cancelled.")

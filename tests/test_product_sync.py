@@ -125,6 +125,20 @@ def test_product_sync_imports_supplier_products_without_creating_offers(
     assert result["manual_link_required"] == 1
     assert result["mappings_created"] == 0
     assert result["skipped"] == 0
+    assert result["new_products"] == [
+        {
+            "local_id": suppliers[0].id,
+            "supplier_product_id": "101",
+            "title": "Steam Gift Card 10 USD",
+            "category": "Gift Cards",
+            "denomination": None,
+            "region": None,
+            "cost_usd": "5.50",
+            "stock": "300+",
+            "source_type": None,
+            "is_available": True,
+        }
+    ]
     assert len(suppliers) == 1
     assert len(offers) == 0
     assert len(mappings) == 0
@@ -181,6 +195,7 @@ def test_product_sync_second_run_updates_supplier_without_touching_offers(
     assert second_result["offers_updated"] == 0
     assert second_result["offers_skipped"] == 1
     assert second_result["manual_link_required"] == 1
+    assert second_result["new_products"] == []
     assert suppliers[0].title == "PSN Card 20 USD Updated"
     assert suppliers[0].cost_usd == Decimal("11.50")
 

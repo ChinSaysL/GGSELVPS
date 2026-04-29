@@ -80,6 +80,18 @@ class FakeSupplierRefreshClient:
             raise self.error
         return self.products_by_id.get(f"recharge:{service_id}", [])
 
+    def list_gift_app_products(
+        self,
+        app_id: str,
+        *,
+        fallback_title: str | None = None,
+        source_slug: str | None = None,
+    ) -> list[dict[str, Any]]:
+        _ = (fallback_title, source_slug)
+        if self.error is not None:
+            raise self.error
+        return self.products_by_id.get(f"gift:{app_id}", [])
+
     def close(self) -> None:
         return None
 
@@ -692,6 +704,201 @@ def test_price_sync_refreshes_recharge_service_cost_before_preview(
     assert result["supplier_products_refreshed"] == 1
     assert result["prices_previewed"] == 1
     assert supplier.cost_usd == Decimal("1.25")
+
+
+def test_price_sync_refreshes_gift_variant_denominations_before_push(
+    db_session: Session,
+) -> None:
+    supplier_ua = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="gift:1238840:432909:ua",
+        title="Battlefield 1 Revolution",
+        category="Games, Steam Gifts",
+        denomination="ua",
+        region="ua",
+        cost_usd=Decimal("40.00"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json=(
+            '{"id":"gift:1238840:432909:ua","source_type":"gift",'
+            '"gift_app_id":"1238840","gift_package_id":"432909",'
+            '"gift_region":"ua","source_slug":"battlefield-1","base_product_id":"1238840"}'
+        ),
+    )
+    supplier_kz = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="gift:1238840:432909:kz",
+        title="Battlefield 1 Revolution",
+        category="Games, Steam Gifts",
+        denomination="kz",
+        region="kz",
+        cost_usd=Decimal("40.00"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json=(
+            '{"id":"gift:1238840:432909:kz","source_type":"gift",'
+            '"gift_app_id":"1238840","gift_package_id":"432909",'
+            '"gift_region":"kz","source_slug":"battlefield-1","base_product_id":"1238840"}'
+        ),
+    )
+    supplier_cis = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="gift:1238840:432909:ge",
+        title="Battlefield 1 Revolution",
+        category="Games, Steam Gifts",
+        denomination="ge",
+        region="ge",
+        cost_usd=Decimal("40.00"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json=(
+            '{"id":"gift:1238840:432909:ge","source_type":"gift",'
+            '"gift_app_id":"1238840","gift_package_id":"432909",'
+            '"gift_region":"ge","gift_zone":"CIS",'
+            '"source_slug":"battlefield-1","base_product_id":"1238840"}'
+        ),
+    )
+    db_session.add_all([supplier_ua, supplier_kz, supplier_cis])
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="ggsel",
+        marketplace_offer_id="102260467",
+        supplier_product_id=supplier_ua.id,
+        title="Battlefield Test",
+        price=Decimal("4000.00"),
+        currency="USD",
+        is_enabled=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+
+    db_session.add_all(
+        [
+            ProductMapping(
+                supplier_product_id=supplier_ua.id,
+                marketplace_offer_id=offer.id,
+                enabled=True,
+                marketplace_variant_id=19224613,
+                marketplace_variant_name="UA",
+            ),
+            ProductMapping(
+                supplier_product_id=supplier_kz.id,
+                marketplace_offer_id=offer.id,
+                enabled=True,
+                marketplace_variant_id=19224614,
+                marketplace_variant_name="KZ",
+            ),
+            ProductMapping(
+                supplier_product_id=supplier_cis.id,
+                marketplace_offer_id=offer.id,
+                enabled=True,
+                marketplace_variant_id=19224615,
+                marketplace_variant_name="CIS",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    supplier_client = FakeSupplierRefreshClient(
+        {
+            "gift:1238840": [
+                {
+                    "id": "gift:1238840:432909:ua",
+                    "title": "Battlefield 1 Revolution",
+                    "category": "Games, Steam Gifts",
+                    "denomination": "ua",
+                    "region": "ua",
+                    "cost_usd": "1.496",
+                    "stock": "unlimited",
+                    "source_type": "gift",
+                    "gift_app_id": "1238840",
+                    "gift_package_id": "432909",
+                    "gift_region": "ua",
+                    "base_product_id": "1238840",
+                },
+                {
+                    "id": "gift:1238840:432909:kz",
+                    "title": "Battlefield 1 Revolution",
+                    "category": "Games, Steam Gifts",
+                    "denomination": "kz",
+                    "region": "kz",
+                    "cost_usd": "1.859",
+                    "stock": "unlimited",
+                    "source_type": "gift",
+                    "gift_app_id": "1238840",
+                    "gift_package_id": "432909",
+                    "gift_region": "kz",
+                    "base_product_id": "1238840",
+                },
+                {
+                    "id": "gift:1238840:432909:ge",
+                    "title": "Battlefield 1 Revolution",
+                    "category": "Games, Steam Gifts",
+                    "denomination": "ge",
+                    "region": "ge",
+                    "cost_usd": "2.189",
+                    "stock": "unlimited",
+                    "source_type": "gift",
+                    "gift_app_id": "1238840",
+                    "gift_package_id": "432909",
+                    "gift_region": "ge",
+                    "gift_zone": "CIS",
+                    "base_product_id": "1238840",
+                },
+            ]
+        }
+    )
+    marketplace_client = FakeMarketplacePriceClient()
+
+    result = sync_offer_prices(
+        db=db_session,
+        settings=_settings_for_tests(default_currency="USD"),
+        marketplace_clients={"ggsel": marketplace_client},
+        supplier_client=supplier_client,
+        dry_run=False,
+        refresh_supplier_prices=True,
+    )
+
+    db_session.refresh(supplier_ua)
+    db_session.refresh(supplier_kz)
+    db_session.refresh(supplier_cis)
+
+    expected_ua = calculate_compounded_price(
+        Decimal("1.496"),
+        markup_percent=get_markup_percent(Decimal("1.496")),
+        fee_percent=Decimal("0"),
+    )
+    expected_kz = calculate_compounded_price(
+        Decimal("1.859"),
+        markup_percent=get_markup_percent(Decimal("1.859")),
+        fee_percent=Decimal("0"),
+    )
+    expected_cis = calculate_compounded_price(
+        Decimal("2.189"),
+        markup_percent=get_markup_percent(Decimal("2.189")),
+        fee_percent=Decimal("0"),
+    )
+
+    assert result["supplier_refresh_products_checked"] == 1
+    assert result["supplier_products_refreshed"] == 3
+    assert result["prices_updated"] == 3
+    assert supplier_ua.cost_usd == Decimal("1.496")
+    assert supplier_kz.cost_usd == Decimal("1.859")
+    assert supplier_cis.cost_usd == Decimal("2.189")
+    assert offer.price == expected_ua
+    assert len(marketplace_client.calls) == 1
+    offer_id, base_price, currency, variants = marketplace_client.calls[0]
+    assert offer_id == "102260467"
+    assert Decimal(str(base_price)) == expected_ua
+    assert currency == "USD"
+    assert variants is not None
+    variant_rates = {int(item["variant_id"]): Decimal(str(item["rate"])) for item in variants}
+    assert variant_rates == {
+        19224613: Decimal("0.0"),
+        19224614: (expected_kz - expected_ua).quantize(Decimal("0.01")),
+        19224615: (expected_cis - expected_ua).quantize(Decimal("0.01")),
+    }
 
 
 def test_price_sync_keeps_manual_recharge_cost_when_service_has_no_priced_rows(
