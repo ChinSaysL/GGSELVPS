@@ -362,12 +362,38 @@ class GGSELClient(BaseAPIClient):
         )
 
     def set_offer_enabled(self, offer_id: str, enabled: bool) -> dict[str, Any]:
-        _ = (offer_id, enabled)
-        # TODO: Seller API docs used here do not expose an explicit enable/disable endpoint.
-        raise NotImplementedError(
-            "GGSEL set_offer_enabled is not implemented. "
-            "Please provide the exact GGSEL endpoint or field to toggle availability."
-        )
+        # GGSEL API v1 has no dedicated offer-level enable/disable endpoint.
+        # When enabling, individual variants are already controlled by set_offer_variant_state.
+        # When disabling entirely, force-hide all variants as a safety net.
+        if enabled:
+            return {"status": "ok"}
+        token = self._get_access_token()
+        product = self.get_offer_by_id(offer_id)
+        if not isinstance(product, dict):
+            raise APIRequestError(f"GGSEL product {offer_id} not found for status update.")
+        updated = 0
+        for option in self._offer_options(product):
+            option_id = self._extract_option_id(option)
+            if option_id is None:
+                continue
+            for variant in self._option_variants(option):
+                variant_id = self._extract_variant_id(variant)
+                if variant_id is None:
+                    continue
+                current_default = self._extract_bool(variant, ("is_default", "default"))
+                payload = self._build_variant_update_payload(
+                    variant,
+                    visible=False,
+                    is_default=bool(current_default) if current_default is not None else False,
+                )
+                self._request_json(
+                    method="POST",
+                    path=self._build_path(f"/api/products/options/{option_id}/variants/{variant_id}"),
+                    params={"token": token},
+                    json_body=payload,
+                )
+                updated += 1
+        return {"status": "ok", "variants_updated": updated}
 
     @staticmethod
     def _response_is_success(response: dict[str, Any]) -> bool:
@@ -499,24 +525,14 @@ class GGSELClient(BaseAPIClient):
 
     @classmethod
     def _normalize_price_update_variant(cls, variant: dict[str, Any]) -> dict[str, Any]:
-        normalized = dict(variant)
-        variant_id = cls._extract_variant_id(normalized)
+        variant_id = cls._extract_variant_id(variant)
+        out: dict[str, Any] = {"type": variant.get("type", 2)}
         if variant_id is not None:
-            # GGSEL product info exposes option value ids as `value`, while the
-            # bulk price endpoint is Digiseller-compatible and commonly accepts
-            # `variant_id`. Send both names so either binder can target the row.
-            normalized["variant_id"] = int(variant_id)
-            normalized["value"] = int(variant_id)
-
-        rate = normalized.get("rate")
+            out["variant_id"] = int(variant_id)
+        rate = variant.get("rate")
         if rate is not None:
-            normalized.setdefault("modify", 1)
-            normalized.setdefault("modify_value", str(rate))
-
-        type_value = normalized.get("type", 2)
-        normalized["type"] = type_value
-        normalized.setdefault("modify_type", cls._variant_type_name(type_value))
-        return normalized
+            out["rate"] = rate
+        return out
 
     @classmethod
     def _option_variants(cls, option: dict[str, Any]) -> list[dict[str, Any]]:
@@ -717,6 +733,37 @@ class GGSELClient(BaseAPIClient):
             visible=visible,
             is_default=None,
         )
+
+    def set_offer_stock(self, offer_id: str, quantity: int) -> dict[str, Any]:
+        token = self._get_access_token()
+        product = self.get_offer_by_id(offer_id)
+        if not isinstance(product, dict):
+            raise APIRequestError(f"GGSEL product {offer_id} not found for stock update.")
+        updated = 0
+        for option in self._offer_options(product):
+            option_id = self._extract_option_id(option)
+            if option_id is None:
+                continue
+            for variant in self._option_variants(option):
+                variant_id = self._extract_variant_id(variant)
+                if variant_id is None:
+                    continue
+                current_visible = self._extract_bool(variant, ("visible", "is_visible"))
+                current_default = self._extract_bool(variant, ("is_default", "default"))
+                payload = self._build_variant_update_payload(
+                    variant,
+                    visible=bool(current_visible) if current_visible is not None else True,
+                    is_default=bool(current_default) if current_default is not None else False,
+                )
+                payload["num_in_stock"] = quantity
+                self._request_json(
+                    method="POST",
+                    path=self._build_path(f"/api/products/options/{option_id}/variants/{variant_id}"),
+                    params={"token": token},
+                    json_body=payload,
+                )
+                updated += 1
+        return {"status": "ok", "variants_updated": updated}
 
     @staticmethod
     def _extract_task_id(response: dict[str, Any]) -> str | None:
