@@ -801,6 +801,29 @@ def _is_unfixed_recharge_product(product: Any) -> bool:
     return str(payload.get("service_type") or payload.get("type") or "").strip().lower() == "unfixed"
 
 
+def _recharge_non_quantity_param_keys(product: Any) -> list[str]:
+    payload = _raw_payload_dict(product)
+    source_type = str(payload.get("source_type") or "").strip().lower()
+    if source_type != "recharge" and "recharge_product_id" not in payload:
+        return []
+    param_keys_raw = payload.get("recharge_param_keys")
+    if not isinstance(param_keys_raw, list) or not param_keys_raw:
+        raw_params = payload.get("params")
+        if isinstance(raw_params, list):
+            param_keys_raw = [
+                item.get("param_key")
+                for item in raw_params
+                if isinstance(item, dict) and item.get("param_key") is not None
+            ]
+    if not isinstance(param_keys_raw, list):
+        return []
+    return [
+        str(key).strip()
+        for key in param_keys_raw
+        if "".join(c.lower() for c in str(key) if c.isalnum()) != "quantity"
+    ]
+
+
 def _recharge_default_quantity(payload: dict[str, Any]) -> str | None:
     default_params = payload.get("recharge_default_params")
     if not isinstance(default_params, dict):
@@ -1678,27 +1701,6 @@ def _extract_marketplace_snapshot_fields(payload: dict[str, Any]) -> dict[str, A
                 and _extract_denomination_signature(option_label)
             ):
                 denomination = option_label
-
-    if not detected_requires_buyer_input:
-        source_type = str(payload.get("source_type") or "").strip().lower()
-        if source_type == "recharge" or payload.get("recharge_product_id"):
-            param_keys_raw = payload.get("recharge_param_keys")
-            if not isinstance(param_keys_raw, list) or not param_keys_raw:
-                raw_params = payload.get("params")
-                if isinstance(raw_params, list):
-                    param_keys_raw = [
-                        item.get("param_key")
-                        for item in raw_params
-                        if isinstance(item, dict) and item.get("param_key") is not None
-                    ]
-            if isinstance(param_keys_raw, list):
-                for key in param_keys_raw:
-                    normalized = "".join(c.lower() for c in str(key) if c.isalnum())
-                    if normalized != "quantity":
-                        detected_requires_buyer_input = True
-                        if detected_buyer_input_label is None:
-                            detected_buyer_input_label = str(key).strip() or None
-                        break
 
     return {
         "title": title,
@@ -3591,6 +3593,12 @@ def action_manual_link() -> int:
         if snapshot and snapshot.get("detected_buyer_input_label")
         else None
     )
+    if not detected_requires_buyer_input:
+        non_qty_keys = _recharge_non_quantity_param_keys(primary_product)
+        if non_qty_keys:
+            detected_requires_buyer_input = True
+            if detected_buyer_input_label is None:
+                detected_buyer_input_label = non_qty_keys[0]
     requires_buyer_input_default = bool(snapshot.get("requires_buyer_input")) if snapshot else False
     if detected_requires_buyer_input:
         requires_buyer_input_default = True
