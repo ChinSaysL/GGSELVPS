@@ -53,6 +53,7 @@ class MarketplaceOffer(Base):
     price: Mapped[Decimal] = mapped_column(Numeric(12, 2))
     currency: Mapped[str] = mapped_column(String(10), default="RUB", nullable=False)
     is_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    manually_disabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     requires_buyer_input: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     buyer_input_label: Mapped[str | None] = mapped_column(String(255), nullable=True)
     buyer_input_help: Mapped[str | None] = mapped_column(Text, nullable=True)

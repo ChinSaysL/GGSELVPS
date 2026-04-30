@@ -105,6 +105,10 @@ def _run_sqlite_migrations() -> None:
             "ALTER TABLE marketplace_offers ADD COLUMN buyer_input_label VARCHAR(255)"
         ),
         "buyer_input_help": "ALTER TABLE marketplace_offers ADD COLUMN buyer_input_help TEXT",
+        "manually_disabled": (
+            "ALTER TABLE marketplace_offers "
+            "ADD COLUMN manually_disabled BOOLEAN NOT NULL DEFAULT 0"
+        ),
     }
 
     with engine.begin() as connection:

@@ -68,6 +68,12 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
         "manual-retries",
         "List manual-review orders and optionally queue selected retries.",
     ),
+    MenuAction(
+        "21",
+        "Halt/resume offers",
+        "offer-halts",
+        "Manually stop or resume linked marketplace offers.",
+    ),
 )
 
 VALID_MARKETPLACES = ("digiseller", "ggsel")
@@ -779,6 +785,143 @@ def action_manual_retries() -> int:
     return 0 if result.get("errors", 0) == 0 else 1
 
 
+def _parse_offer_halt_selection(raw_value: str, available_ids: Sequence[int]) -> list[int]:
+    available = list(dict.fromkeys(int(value) for value in available_ids))
+    text = raw_value.strip().lower()
+    if not text:
+        return []
+    if text == "all":
+        return available
+
+    selected: list[int] = []
+    for token in re.split(r"[\s,]+", text):
+        if not token:
+            continue
+        try:
+            offer_id = int(token)
+        except ValueError:
+            return []
+        if offer_id not in available:
+            return []
+        if offer_id not in selected:
+            selected.append(offer_id)
+    return selected
+
+
+def _print_offer_halt_rows(offers: Sequence[Any]) -> None:
+    if not offers:
+        print("No linked offers found.")
+        return
+
+    print("Linked offers:")
+    for offer in offers:
+        print(
+            f"- local_id={getattr(offer, 'id', None)} | "
+            f"marketplace={getattr(offer, 'marketplace', None)} | "
+            f"offer={getattr(offer, 'marketplace_offer_id', None)} | "
+            f"enabled={getattr(offer, 'is_enabled', None)} | "
+            f"manual_halt={getattr(offer, 'manually_disabled', False)} | "
+            f"title={getattr(offer, 'title', '')}"
+        )
+
+
+def action_offer_halts() -> int:
+    _print_header("Halt / Resume Offers")
+    print(
+        "Manual halt is persistent. Stock sync will keep halted offers disabled even "
+        "when supplier balance and stock say they are sellable."
+    )
+    try:
+        from sqlalchemy import desc, select
+
+        from app.db import SessionLocal, init_db
+        from app.models import MarketplaceOffer
+        from app.services.stock_sync import run_stock_sync
+    except ImportError as exc:
+        print(f"Could not import app dependencies: {exc}")
+        print("Run: python -m pip install -r requirements.txt")
+        return 1
+
+    init_db()
+    with SessionLocal() as db:
+        offers = list(
+            db.execute(
+                select(MarketplaceOffer).order_by(
+                    desc(MarketplaceOffer.updated_at),
+                    desc(MarketplaceOffer.id),
+                )
+            )
+            .scalars()
+            .all()
+        )
+        _print_offer_halt_rows(offers)
+
+        if not offers:
+            return 0
+        if not sys.stdin.isatty():
+            print(
+                "\nListing only because stdin is not interactive. Run this command with a TTY "
+                "to halt or resume offers."
+            )
+            return 0
+
+        raw_action = _ask_text("Action: halt or resume", default="halt").strip().lower()
+        if raw_action not in {"halt", "resume"}:
+            print("Action must be 'halt' or 'resume'.")
+            return 1
+
+        available_ids = [int(offer.id) for offer in offers]
+        raw_selection = _ask_text(
+            "Local offer IDs (comma-separated, 'all', or blank to cancel)",
+            default="",
+            required=False,
+        )
+        selected_ids = _parse_offer_halt_selection(raw_selection, available_ids)
+        if not selected_ids:
+            print("No offers selected.")
+            return 0
+
+        if not _ask_bool(f"{raw_action.capitalize()} selected offers?", default=False):
+            print("Cancelled.")
+            return 0
+
+        selected_marketplace_offer_ids: set[str] = set()
+        manual_halt = raw_action == "halt"
+        for offer_id in selected_ids:
+            offer = db.get(MarketplaceOffer, offer_id)
+            if offer is None:
+                print(f"- local_id={offer_id}: missing")
+                continue
+            offer.manually_disabled = manual_halt
+            if manual_halt:
+                offer.is_enabled = False
+            db.add(offer)
+            selected_marketplace_offer_ids.add(str(offer.marketplace_offer_id))
+            print(
+                f"- local_id={offer.id} {offer.marketplace}:{offer.marketplace_offer_id} "
+                f"manual_halt={offer.manually_disabled}"
+            )
+        db.commit()
+
+    if not selected_marketplace_offer_ids:
+        print("No offers updated.")
+        return 0
+
+    default_sync = raw_action == "halt"
+    if not _ask_bool("Run live stock sync now to enforce this on marketplaces?", default=default_sync):
+        print("Local manual halt flags updated. The next stock sync will enforce marketplace state.")
+        return 0
+
+    try:
+        result = run_stock_sync(force_marketplace_offer_ids=selected_marketplace_offer_ids)
+    except Exception as exc:  # noqa: BLE001 - CLI should show a readable failure.
+        print(f"Stock sync failed: {exc}")
+        return 1
+
+    _print_stock_sync_result(result)
+    return 0 if result.get("errors", 0) == 0 else 1
+
+
 def _print_stock_sync_result(result: dict[str, Any]) -> None:
     for key in (
         "status",
@@ -1466,7 +1609,7 @@ def action_list_offers() -> int:
             f"[{offer.id}] {offer.marketplace}:{offer.marketplace_offer_id} | "
             f"supplier_product_id={offer.supplier_product_id} | "
             f"price={_format_money(offer.price)} {offer.currency} | enabled={offer.is_enabled} | "
-            f"buyer_input={offer.requires_buyer_input}"
+            f"manual_halt={offer.manually_disabled} | buyer_input={offer.requires_buyer_input}"
         )
     return 0
 
@@ -4003,6 +4146,7 @@ COMMANDS: dict[str, Callable[[], int]] = {
     "sync-orders": action_sync_orders,
     "digiseller-code": action_digiseller_code,
     "manual-retries": action_manual_retries,
+    "offer-halts": action_offer_halts,
     "list-products": action_list_products,
     "list-offers": action_list_offers,
     "manual-link": action_manual_link,

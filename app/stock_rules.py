@@ -87,16 +87,16 @@ def evaluate_stock_status(
     required_balance = required_balance_for_product(supplier_cost_usd)
     usable_balance = _to_decimal(usable_balance_usd)
 
-    if not mapping_enabled:
-        return StockDecision(
-            in_stock=False,
-            reason="mapping_disabled",
-            required_balance_usd=required_balance,
-        )
     if manually_disabled:
         return StockDecision(
             in_stock=False,
             reason="manually_disabled",
+            required_balance_usd=required_balance,
+        )
+    if not mapping_enabled:
+        return StockDecision(
+            in_stock=False,
+            reason="mapping_disabled",
             required_balance_usd=required_balance,
         )
     if not supplier_is_available:

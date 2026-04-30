@@ -71,3 +71,17 @@ def test_disabled_mapping_keeps_product_out_of_stock() -> None:
     )
     assert decision.in_stock is False
     assert decision.reason == "mapping_disabled"
+
+
+def test_manual_disable_takes_priority_over_mapping_state() -> None:
+    decision = evaluate_stock_status(
+        mapping_enabled=False,
+        manually_disabled=True,
+        supplier_is_available=True,
+        supplier_stock="300+",
+        usable_balance_usd=Decimal("999.99"),
+        supplier_cost_usd=Decimal("5.50"),
+        has_positive_profit=True,
+    )
+    assert decision.in_stock is False
+    assert decision.reason == "manually_disabled"

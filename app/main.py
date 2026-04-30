@@ -58,6 +58,7 @@ class ManualOfferLinkRequest(BaseModel):
     price: Decimal
     currency: str = "RUB"
     offer_enabled: bool = False
+    manually_disabled: bool | None = None
     requires_buyer_input: bool = False
     buyer_input_label: str | None = None
     buyer_input_help: str | None = None
@@ -162,6 +163,7 @@ def list_offers(
                 "price": _serialize_decimal(offer.price),
                 "currency": offer.currency,
                 "is_enabled": offer.is_enabled,
+                "manually_disabled": offer.manually_disabled,
                 "requires_buyer_input": offer.requires_buyer_input,
                 "buyer_input_label": offer.buyer_input_label,
                 "buyer_input_help": offer.buyer_input_help,
@@ -327,6 +329,36 @@ def disable_mapping(mapping_id: int, db: Session = Depends(get_db)) -> dict[str,
     return _set_mapping_enabled(mapping_id, False, db)
 
 
+def _set_offer_manual_halt(offer_id: int, manually_disabled: bool, db: Session) -> dict[str, Any]:
+    offer = db.get(MarketplaceOffer, offer_id)
+    if offer is None:
+        raise HTTPException(status_code=404, detail="Offer not found.")
+    offer.manually_disabled = manually_disabled
+    if manually_disabled:
+        offer.is_enabled = False
+    db.add(offer)
+    db.commit()
+    db.refresh(offer)
+    return {
+        "status": "ok",
+        "offer_id": offer.id,
+        "marketplace": offer.marketplace,
+        "marketplace_offer_id": offer.marketplace_offer_id,
+        "manually_disabled": offer.manually_disabled,
+        "is_enabled": offer.is_enabled,
+    }
+
+
+@app.post("/offers/{offer_id}/halt")
+def halt_offer(offer_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    return _set_offer_manual_halt(offer_id, True, db)
+
+
+@app.post("/offers/{offer_id}/resume")
+def resume_offer(offer_id: int, db: Session = Depends(get_db)) -> dict[str, Any]:
+    return _set_offer_manual_halt(offer_id, False, db)
+
+
 @app.post("/sync/orders")
 def sync_orders() -> dict[str, Any]:
     return run_order_sync()
@@ -401,6 +433,7 @@ def manual_link_offer(
     offer_created = False
 
     if offer is None:
+        manually_disabled = bool(payload.manually_disabled)
         offer = MarketplaceOffer(
             marketplace=payload.marketplace,
             marketplace_offer_id=payload.marketplace_offer_id,
@@ -408,7 +441,8 @@ def manual_link_offer(
             title=payload.title,
             price=payload.price,
             currency=payload.currency.upper(),
-            is_enabled=payload.offer_enabled,
+            is_enabled=payload.offer_enabled and not manually_disabled,
+            manually_disabled=manually_disabled,
             requires_buyer_input=payload.requires_buyer_input,
             buyer_input_label=payload.buyer_input_label,
             buyer_input_help=payload.buyer_input_help,
@@ -423,6 +457,10 @@ def manual_link_offer(
         offer.price = payload.price
         offer.currency = payload.currency.upper()
         offer.is_enabled = payload.offer_enabled
+        if payload.manually_disabled is not None:
+            offer.manually_disabled = payload.manually_disabled
+        if offer.manually_disabled:
+            offer.is_enabled = False
         offer.requires_buyer_input = payload.requires_buyer_input
         offer.buyer_input_label = payload.buyer_input_label
         offer.buyer_input_help = payload.buyer_input_help
@@ -484,6 +522,7 @@ def manual_link_offer(
             "price": _serialize_decimal(offer.price),
             "currency": offer.currency,
             "is_enabled": offer.is_enabled,
+            "manually_disabled": offer.manually_disabled,
             "requires_buyer_input": offer.requires_buyer_input,
             "buyer_input_label": offer.buyer_input_label,
             "buyer_input_help": offer.buyer_input_help,

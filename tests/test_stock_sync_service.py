@@ -235,6 +235,57 @@ def test_stock_sync_disables_single_offer_when_unfulfillable(db_session: Session
     assert offer.is_enabled is False
 
 
+def test_stock_sync_keeps_manually_halted_offer_disabled(db_session: Session) -> None:
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="7",
+        title="Steam RU+CIS",
+        category="Games, Steam",
+        denomination="Steam Key RU+CIS",
+        region=None,
+        cost_usd=Decimal("3.00"),
+        supplier_stock="300+",
+        is_available=True,
+        raw_payload_json="{}",
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="digiseller",
+        marketplace_offer_id="718",
+        supplier_product_id=supplier.id,
+        title="Steam RU+CIS",
+        price=Decimal("6.00"),
+        currency="USD",
+        is_enabled=True,
+        manually_disabled=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+
+    mapping = ProductMapping(
+        supplier_product_id=supplier.id,
+        marketplace_offer_id=offer.id,
+        enabled=True,
+    )
+    db_session.add(mapping)
+    db_session.commit()
+
+    client = FakeDigisellerStockClient()
+    stats = sync_offer_stock(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_balance_client=FakeSupplierBalanceClient({"balance": "200.00"}),
+        marketplace_clients={"digiseller": client},
+    )
+
+    assert stats["errors"] == 0
+    assert client.offer_calls == [("718", False)]
+    assert offer.is_enabled is False
+    assert stats["details"][0]["stock_reason"] == "manually_disabled"
+
+
 def test_stock_sync_forced_offer_ids_filters_out_other_marketplaces(db_session: Session) -> None:
     supplier_a = SupplierProduct(
         supplier="gengine",

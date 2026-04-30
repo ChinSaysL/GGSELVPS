@@ -94,6 +94,7 @@ python manage.py sync-prices
 python manage.py sync-stock
 python manage.py sync-orders
 python manage.py manual-retries
+python manage.py offer-halts
 python manage.py digiseller-code
 python manage.py list-products
 python manage.py manual-link
@@ -142,6 +143,10 @@ For GGSEL live writes, set `GGSEL_API_KEY` to the seller API key/token accepted 
 - for GGSEL mappings with `marketplace_variant_id`, uses the same option-variant visibility flow so one unavailable denomination does not disable the whole product
 - enforces whole-offer enable/disable on every stock sync instead of trusting the local cached `is_enabled` flag
 - whole-product GGSEL enable/disable remains disabled until GGSEL exposes or confirms a stock/status endpoint; stock sync skips that parent toggle after variant updates
+
+Use `python manage.py offer-halts` for products you no longer want to sell. This sets a local
+`manually_disabled` flag that stock sync treats as an absolute stop, so the app will keep the
+marketplace product disabled instead of re-enabling it when G-Engine balance/stock looks healthy.
 
 Supported G-Engine link shapes include:
 - `https://b2b.g-engine.net/en/shop/5/playstation-store-wallet-turkey`
@@ -321,6 +326,8 @@ docker compose logs -f
 - `POST /sync/orders`
 - `GET /orders`
 - `POST /orders/{id}/retry`
+- `POST /offers/{id}/halt`
+- `POST /offers/{id}/resume`
 - `POST /mappings/import`
 - `POST /mappings/{id}/enable`
 - `POST /mappings/{id}/disable`

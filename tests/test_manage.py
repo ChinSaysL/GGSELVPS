@@ -36,6 +36,11 @@ def test_parse_args_accepts_manual_retries_command() -> None:
     assert args.command == "manual-retries"
 
 
+def test_parse_args_accepts_offer_halts_command() -> None:
+    args = manage.parse_args(["offer-halts"])
+    assert args.command == "offer-halts"
+
+
 def test_parse_manual_retry_selection_accepts_all_and_ids() -> None:
     assert manage._parse_manual_retry_selection("all", [4, 5]) == [4, 5]
     assert manage._parse_manual_retry_selection("4, 5 4", [4, 5]) == [4, 5]
@@ -67,6 +72,37 @@ def test_print_manual_retry_orders_shows_action_and_reason(capsys) -> None:
     assert "supplier_order=gift:9001" in output
     assert "action=retry_delivery_or_recreate" in output
     assert "reason=supplier_order_terminal:canceled" in output
+
+
+def test_parse_offer_halt_selection_accepts_all_and_ids() -> None:
+    assert manage._parse_offer_halt_selection("all", [7, 8]) == [7, 8]
+    assert manage._parse_offer_halt_selection("7,8,7", [7, 8]) == [7, 8]
+
+
+def test_parse_offer_halt_selection_rejects_unknown_or_invalid_ids() -> None:
+    assert manage._parse_offer_halt_selection("999", [7, 8]) == []
+    assert manage._parse_offer_halt_selection("seven", [7, 8]) == []
+
+
+def test_print_offer_halt_rows_shows_manual_halt(capsys) -> None:
+    manage._print_offer_halt_rows(
+        [
+            SimpleNamespace(
+                id=7,
+                marketplace="digiseller",
+                marketplace_offer_id="5858158",
+                is_enabled=False,
+                manually_disabled=True,
+                title="vituber melody",
+            )
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert "local_id=7" in output
+    assert "offer=5858158" in output
+    assert "manual_halt=True" in output
+    assert "vituber melody" in output
 
 
 def test_print_order_sync_result_prioritizes_pending_and_hides_unlinked(capsys) -> None:

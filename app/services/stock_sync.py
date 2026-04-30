@@ -172,6 +172,9 @@ def _base_detail(
         "cost_usd": str(supplier.cost_usd) if supplier is not None else None,
         "variant_id": mapping.marketplace_variant_id,
         "variant_name": mapping.marketplace_variant_name,
+        "manually_disabled": bool(getattr(offer, "manually_disabled", False))
+        if offer is not None
+        else False,
     }
 
 
@@ -527,6 +530,7 @@ def sync_offer_stock(
                 continue
             decision = evaluate_stock_status(
                 mapping_enabled=mapping.enabled,
+                manually_disabled=offer.manually_disabled,
                 supplier_is_available=supplier.is_available,
                 supplier_stock=supplier.supplier_stock,
                 usable_balance_usd=usable_balance_usd,
@@ -610,6 +614,7 @@ def sync_offer_stock(
             for variant_id, quantity, variant_value in runtime_variants:
                 decision = evaluate_stock_status(
                     mapping_enabled=runtime_mapping.enabled,
+                    manually_disabled=offer.manually_disabled,
                     supplier_is_available=runtime_supplier.is_available,
                     supplier_stock=runtime_supplier.supplier_stock,
                     usable_balance_usd=usable_balance_usd,
@@ -1023,6 +1028,15 @@ def sync_offer_stock(
             if mapping.manage_stock_quantity and mapping.supplier_product is not None
         ]
         if not managed:
+            continue
+        if offer.manually_disabled:
+            for mapping in managed:
+                detail = _base_detail(
+                    mapping=mapping,
+                    offer=offer,
+                    supplier=mapping.supplier_product,
+                )
+                _skip_detail(stats, detail, reason="manual_halt_stock_quantity_skipped")
             continue
         if client is None or not hasattr(client, "set_offer_stock"):
             for mapping in managed:
