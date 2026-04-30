@@ -31,6 +31,44 @@ def test_parse_args_accepts_auto_link_command() -> None:
     assert args.command == "auto-link"
 
 
+def test_parse_args_accepts_manual_retries_command() -> None:
+    args = manage.parse_args(["manual-retries"])
+    assert args.command == "manual-retries"
+
+
+def test_parse_manual_retry_selection_accepts_all_and_ids() -> None:
+    assert manage._parse_manual_retry_selection("all", [4, 5]) == [4, 5]
+    assert manage._parse_manual_retry_selection("4, 5 4", [4, 5]) == [4, 5]
+
+
+def test_parse_manual_retry_selection_rejects_unknown_or_invalid_ids() -> None:
+    assert manage._parse_manual_retry_selection("999", [4, 5]) == []
+    assert manage._parse_manual_retry_selection("four", [4, 5]) == []
+
+
+def test_print_manual_retry_orders_shows_action_and_reason(capsys) -> None:
+    manage._print_manual_retry_orders(
+        [
+            SimpleNamespace(
+                id=4,
+                marketplace="digiseller",
+                marketplace_order_id="290979940",
+                status="needs_manual_review",
+                supplier_order_id="gift:9001",
+                error_message="supplier_order_terminal:canceled",
+                updated_at=None,
+            )
+        ]
+    )
+
+    output = capsys.readouterr().out
+    assert "local_id=4" in output
+    assert "order=290979940" in output
+    assert "supplier_order=gift:9001" in output
+    assert "action=retry_delivery_or_recreate" in output
+    assert "reason=supplier_order_terminal:canceled" in output
+
+
 def test_print_order_sync_result_prioritizes_pending_and_hides_unlinked(capsys) -> None:
     manage._print_order_sync_result(
         {

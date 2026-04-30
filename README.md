@@ -93,6 +93,8 @@ python manage.py price-preview
 python manage.py sync-prices
 python manage.py sync-stock
 python manage.py sync-orders
+python manage.py manual-retries
+python manage.py digiseller-code
 python manage.py list-products
 python manage.py manual-link
 python manage.py manual-link-example
@@ -173,11 +175,12 @@ treat `shipped` as fulfilled without a gift-card code.
 - stores the supplier order ID before delivery so retries do not buy the same marketplace order twice
 - delivers returned codes through the marketplace order correspondence and stores only masked codes locally
 
-If G-Engine is temporarily unavailable while creating or polling a supplier order, order sync sends
-one buyer message saying the provider is currently down and the order will be delivered when it is
-active again. The local order stays retryable (`pending` before a supplier order exists,
-`supplier_order_created` after one exists), so later order-sync runs continue automatically without
-creating duplicate deliveries.
+If G-Engine is temporarily unavailable while polling an already-created supplier order, order sync
+sends one buyer message saying the provider is currently down and the order will be delivered when
+it is active again. The local order stays `supplier_order_created`, so later order-sync runs continue
+delivery without creating a duplicate purchase. If G-Engine fails while the supplier purchase is
+being created, the order moves to `needs_manual_review` because the app cannot prove whether
+G-Engine accepted the purchase.
 
 Digiseller paid sales are detected during `POST /sync/orders`, but the service does not buy from
 G-Engine until the buyer's Digiseller unique code is verified. Do not point Digiseller buyers at
@@ -187,9 +190,10 @@ as pending and asks the buyer to paste the unique code in chat. Later sync runs 
 chat messages, verify any code-like token with Digiseller, then create the G-Engine order and
 deliver it. `python manage.py digiseller-code` is still available as a manual rescue command.
 
-If an older unpaid G-Engine supplier order was left in `canceled`, `cancelled`, or `expired`, a
-later Digiseller sync can clear that dead supplier order ID and create a fresh G-Engine order once.
-Other supplier terminal states stay in manual review to avoid duplicate purchases.
+Supplier terminal states such as `canceled`, `cancelled`, or `expired` stay in manual review to
+avoid duplicate purchases. Use `python manage.py manual-retries` to list those orders, queue a
+specific local order ID for retry, and optionally run live order sync after the explicit
+confirmation.
 
 Order polling scale knobs:
 - `ORDER_SYNC_INITIAL_LOOKBACK_HOURS` controls the first/recovery polling window when no successful order-sync checkpoint exists.

@@ -62,6 +62,12 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
         "digiseller-code",
         "Verify a Digiseller buyer unique code and deliver the linked order.",
     ),
+    MenuAction(
+        "20",
+        "Manual retry orders",
+        "manual-retries",
+        "List manual-review orders and optionally queue selected retries.",
+    ),
 )
 
 VALID_MARKETPLACES = ("digiseller", "ggsel")
@@ -74,6 +80,7 @@ ORDER_SYNC_PENDING_REASONS = {
 ORDER_SYNC_HIDDEN_SKIP_REASONS = {
     "marketplace_offer_not_linked",
 }
+MANUAL_RETRY_STATUSES = {"failed", "needs_manual_review"}
 
 
 def _is_order_sync_pending_reason(reason: object) -> bool:
@@ -627,6 +634,149 @@ def _print_order_sync_result(result: dict[str, Any]) -> None:
                     f"- order={item.get('marketplace_order_id') or item.get('order_id')} | "
                     f"reason={item.get('reason')}"
                 )
+
+
+def _manual_retry_action(order: Any) -> str:
+    supplier_order_id = getattr(order, "supplier_order_id", None)
+    if supplier_order_id:
+        return "retry_delivery_or_recreate"
+    return "retry_processing"
+
+
+def _print_manual_retry_orders(orders: Sequence[Any]) -> None:
+    if not orders:
+        print("No manual-review orders are currently retryable.")
+        return
+
+    print("Manual-review orders:")
+    for order in orders:
+        updated_at = getattr(order, "updated_at", None)
+        updated_text = updated_at.isoformat() if hasattr(updated_at, "isoformat") else str(updated_at or "")
+        print(
+            f"- local_id={getattr(order, 'id', None)} | "
+            f"marketplace={getattr(order, 'marketplace', None)} | "
+            f"order={getattr(order, 'marketplace_order_id', None)} | "
+            f"status={getattr(order, 'status', None)} | "
+            f"supplier_order={getattr(order, 'supplier_order_id', None) or '-'} | "
+            f"action={_manual_retry_action(order)}"
+        )
+        error_message = str(getattr(order, "error_message", "") or "").strip()
+        if error_message:
+            print(f"  reason={error_message}")
+        if updated_text:
+            print(f"  updated_at={updated_text}")
+
+
+def _parse_manual_retry_selection(raw_value: str, available_ids: Sequence[int]) -> list[int]:
+    available = list(dict.fromkeys(int(value) for value in available_ids))
+    text = raw_value.strip().lower()
+    if not text:
+        return []
+    if text == "all":
+        return available
+
+    selected: list[int] = []
+    for token in re.split(r"[\s,]+", text):
+        if not token:
+            continue
+        try:
+            order_id = int(token)
+        except ValueError:
+            return []
+        if order_id not in available:
+            return []
+        if order_id not in selected:
+            selected.append(order_id)
+    return selected
+
+
+def action_manual_retries() -> int:
+    _print_header("Manual Retry Orders")
+    print(
+        "This lists orders held for manual review. Queueing a retry may create a new "
+        "G-Engine purchase if the previous supplier order was cancelled/expired."
+    )
+    try:
+        from sqlalchemy import desc, select
+
+        from app.db import SessionLocal
+        from app.models import Order
+        from app.services.order_sync import get_retry_action, retry_order, run_order_sync
+    except ImportError as exc:
+        print(f"Could not import app dependencies: {exc}")
+        print("Run: python -m pip install -r requirements.txt")
+        return 1
+
+    with SessionLocal() as db:
+        orders = list(
+            db.execute(
+                select(Order)
+                .where(Order.status.in_(MANUAL_RETRY_STATUSES))
+                .order_by(desc(Order.updated_at), desc(Order.id))
+            )
+            .scalars()
+            .all()
+        )
+        retryable_orders = [
+            order for order in orders if get_retry_action(order.status, order.supplier_order_id) != "none"
+        ]
+        _print_manual_retry_orders(retryable_orders)
+
+        if not retryable_orders:
+            return 0
+        if not sys.stdin.isatty():
+            print(
+                "\nListing only because stdin is not interactive. Run this command with a TTY "
+                "or use POST /orders/{id}/retry for a specific local_id."
+            )
+            return 0
+
+        available_ids = [int(order.id) for order in retryable_orders]
+        raw_selection = _ask_text(
+            "Local IDs to queue for retry (comma-separated, 'all', or blank to cancel)",
+            default="",
+            required=False,
+        )
+        selected_ids = _parse_manual_retry_selection(raw_selection, available_ids)
+        if not selected_ids:
+            print("No orders queued.")
+            return 0
+
+        print(f"Selected local IDs: {', '.join(str(order_id) for order_id in selected_ids)}")
+        if not _ask_bool("Queue selected orders for retry?", default=False):
+            print("Cancelled.")
+            return 0
+
+        queued = 0
+        for order_id in selected_ids:
+            order = db.get(Order, order_id)
+            if order is None:
+                print(f"- local_id={order_id}: missing")
+                continue
+            result = retry_order(order, db)
+            print(
+                f"- local_id={order_id} order={order.marketplace_order_id}: "
+                f"{result.get('status')} {result.get('action') or result.get('reason') or ''}".strip()
+            )
+            if result.get("status") == "queued":
+                queued += 1
+
+    if queued == 0:
+        print("No orders were queued.")
+        return 0
+
+    print(f"\nQueued {queued} order(s). They will run on the next order sync.")
+    if not _ask_bool("Run live order sync now to execute queued retries?", default=False):
+        return 0
+
+    try:
+        result = run_order_sync()
+    except Exception as exc:  # noqa: BLE001 - CLI should show a readable failure.
+        print(f"Order sync failed: {exc}")
+        return 1
+
+    _print_order_sync_result(result)
+    return 0 if result.get("errors", 0) == 0 else 1
 
 
 def _print_stock_sync_result(result: dict[str, Any]) -> None:
@@ -3852,6 +4002,7 @@ COMMANDS: dict[str, Callable[[], int]] = {
     "sync-stock": action_sync_stock,
     "sync-orders": action_sync_orders,
     "digiseller-code": action_digiseller_code,
+    "manual-retries": action_manual_retries,
     "list-products": action_list_products,
     "list-offers": action_list_offers,
     "manual-link": action_manual_link,
