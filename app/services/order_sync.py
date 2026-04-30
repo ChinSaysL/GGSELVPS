@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any, Literal, Protocol, cast
 from urllib.parse import parse_qs
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, selectinload
 
@@ -126,6 +126,7 @@ _RECREATABLE_SUPPLIER_TERMINAL_ERRORS = (
 )
 _DIGISELLER_UNIQUE_CODE_WAIT_PREFIX = "awaiting_digiseller_unique_code"
 _DIGISELLER_UNIQUE_CODE_PROMPT_SENT_MARKER = "prompt_sent"
+_SUPPLIER_PURCHASE_STATUS_UNKNOWN = "supplier_purchase_status_unknown"
 
 
 def _supplier_order_can_be_recreated(error_message: str | None) -> bool:
@@ -133,7 +134,10 @@ def _supplier_order_can_be_recreated(error_message: str | None) -> bool:
 
 
 def _sale_allows_supplier_recreate(sale: NormalizedMarketplaceSale) -> bool:
-    return sale.marketplace == "digiseller" and bool(sale.unique_code)
+    # Automatic recreation can buy the same marketplace order twice if the
+    # supplier reports a Steam gift as cancelled/expired after the first buy.
+    _ = sale
+    return False
 
 
 def _awaiting_digiseller_unique_code(reason: str | None) -> bool:
@@ -579,6 +583,21 @@ def _get_or_create_order(
     return order
 
 
+def _claim_order_for_supplier_purchase(db: Session, order: Order) -> bool:
+    result = db.execute(
+        update(Order)
+        .where(
+            Order.id == order.id,
+            Order.status == "pending",
+            Order.supplier_order_id.is_(None),
+        )
+        .values(status="processing", error_message=None)
+    )
+    db.commit()
+    db.refresh(order)
+    return int(getattr(result, "rowcount", 0) or 0) == 1
+
+
 def _first_path_value(payload: dict[str, Any], paths: tuple[tuple[str, ...], ...]) -> object | None:
     for path in paths:
         current: object = payload
@@ -941,6 +960,17 @@ def _preverify_digiseller_unique_code(
         verification_payload,
         unique_code=unique_code,
     )
+    verified_sale = replace(
+        verified_sale,
+        order_id=sale.order_id or verified_sale.order_id,
+        offer_id=sale.offer_id or verified_sale.offer_id,
+        variant_id=sale.variant_id if sale.variant_id is not None else verified_sale.variant_id,
+        variant_text=sale.variant_text or verified_sale.variant_text,
+        buyer_id=sale.buyer_id or verified_sale.buyer_id,
+        sale_price=sale.sale_price or verified_sale.sale_price,
+        quantity=sale.quantity or verified_sale.quantity,
+        buyer_inputs={**sale.buyer_inputs, **verified_sale.buyer_inputs},
+    )
     verified_sale.raw_payload["_digiseller_unique_code_preverified"] = True
     return verified_sale, None
 
@@ -1098,6 +1128,21 @@ def _process_normalized_sale(
         return
     sale = verified_sale
 
+    if (
+        order.status == "needs_manual_review"
+        and _supplier_order_can_be_recreated(order.error_message)
+    ):
+        stats["skipped"] += 1
+        stats["details"].append(
+            {
+                "action": "skipped",
+                "order_id": order.id,
+                "marketplace_order_id": order.marketplace_order_id,
+                "reason": "supplier_order_terminal_requires_manual_retry",
+            }
+        )
+        return
+
     create_response: dict[str, Any] | None = None
     if (
         allow_supplier_recreate
@@ -1133,6 +1178,17 @@ def _process_normalized_sale(
                 }
             )
             return
+        if not _claim_order_for_supplier_purchase(db, order):
+            stats["skipped"] += 1
+            stats["details"].append(
+                {
+                    "action": "skipped",
+                    "order_id": order.id,
+                    "marketplace_order_id": order.marketplace_order_id,
+                    "reason": f"supplier_purchase_already_claimed:{order.status}",
+                }
+            )
+            return
         try:
             create_response = _create_supplier_purchase(
                 order=order,
@@ -1142,19 +1198,33 @@ def _process_normalized_sale(
             )
         except Exception as exc:  # noqa: BLE001 - keep other paid orders moving.
             if is_temporary_provider_error(exc):
-                _defer_for_provider_unavailable(
-                    db=db,
+                product_title, _product_kind = _delivery_message_context(offer, mapping, sale)
+                notice_sent = _send_provider_unavailable_notice(
                     order=order,
                     sale=sale,
-                    offer=offer,
-                    mapping=mapping,
                     marketplace_client=marketplace_client,
+                    product_title=product_title,
                     stats=stats,
-                    retry_status="pending",
+                )
+                order.status = "needs_manual_review"
+                order.error_message = f"{_SUPPLIER_PURCHASE_STATUS_UNKNOWN}:{exc}"
+                if notice_sent:
+                    order.error_message = f"{order.error_message};buyer_notified"
+                db.add(order)
+                db.commit()
+                stats["provider_unavailable"] += 1
+                stats["errors"] += 1
+                stats["details"].append(
+                    {
+                        "action": "error",
+                        "order_id": order.id,
+                        "marketplace_order_id": order.marketplace_order_id,
+                        "reason": _SUPPLIER_PURCHASE_STATUS_UNKNOWN,
+                    }
                 )
                 return
-            order.status = "failed"
-            order.error_message = str(exc)
+            order.status = "needs_manual_review"
+            order.error_message = f"{_SUPPLIER_PURCHASE_STATUS_UNKNOWN}:{exc}"
             db.add(order)
             db.commit()
             stats["errors"] += 1
@@ -1163,7 +1233,7 @@ def _process_normalized_sale(
                     "action": "error",
                     "order_id": order.id,
                     "marketplace_order_id": order.marketplace_order_id,
-                    "reason": f"supplier_purchase_failed:{exc}",
+                    "reason": f"{_SUPPLIER_PURCHASE_STATUS_UNKNOWN}:{exc}",
                 }
             )
             return
@@ -1379,14 +1449,6 @@ def _load_retryable_pending_order_ids(
         and_(Order.status == "pending", Order.supplier_order_id.is_(None)),
     ]
     statuses = ["pending", "supplier_order_created"]
-    if marketplace == "digiseller":
-        statuses.append("needs_manual_review")
-        retry_conditions.append(
-            and_(
-                Order.status == "needs_manual_review",
-                Order.error_message.in_(_RECREATABLE_SUPPLIER_TERMINAL_ERRORS),
-            )
-        )
 
     stmt = (
         select(Order.marketplace_order_id)

@@ -304,7 +304,7 @@ def test_ggsel_delivery_skips_unique_code_verification(db_session: Session) -> N
     assert "Your gift card has been delivered." in marketplace_client.messages[1][1]
 
 
-def test_supplier_provider_down_notifies_once_and_retries_purchase(
+def test_supplier_provider_down_during_purchase_requires_manual_retry(
     db_session: Session,
 ) -> None:
     _add_linked_offer(
@@ -344,14 +344,27 @@ def test_supplier_provider_down_notifies_once_and_retries_purchase(
     order = db_session.execute(select(Order)).scalars().one()
     assert first_stats["status"] == "partial"
     assert first_stats["provider_unavailable"] == 1
-    assert second_stats["provider_unavailable"] == 1
-    assert order.status == "pending"
+    assert first_stats["errors"] == 1
+    assert second_stats["provider_unavailable"] == 0
+    assert order.status == "needs_manual_review"
     assert order.supplier_order_id is None
-    assert order.error_message == SUPPLIER_PROVIDER_UNAVAILABLE_NOTIFIED
+    assert str(order.error_message).startswith("supplier_purchase_status_unknown:")
     assert len(marketplace_client.messages) == 1
     assert "Our provider is currently down" in marketplace_client.messages[0][1]
 
     supplier_up = FakeSupplierOrderClient()
+    auto_stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_up,
+        marketplace_clients={"ggsel": marketplace_client},
+    )
+
+    db_session.refresh(order)
+    assert auto_stats["orders_delivered"] == 0
+    assert supplier_up.create_calls == []
+    assert retry_order(order, db_session) == {"status": "queued", "action": "retry_processing"}
+
     recovered_stats = sync_orders(
         db=db_session,
         settings=_settings_for_tests(),
@@ -1400,7 +1413,7 @@ def test_existing_pending_digiseller_order_without_prompt_marker_gets_prompted_o
     assert "please paste your unique code" in marketplace_client.messages[0][1]
 
 
-def test_digiseller_unique_code_recreates_cancelled_supplier_order(
+def test_digiseller_unique_code_does_not_recreate_cancelled_supplier_order(
     db_session: Session,
 ) -> None:
     supplier = _add_linked_offer(db_session, marketplace="digiseller", offer_id="5850465")
@@ -1436,17 +1449,18 @@ def test_digiseller_unique_code_recreates_cancelled_supplier_order(
     )
 
     order = db_session.execute(select(Order)).scalars().one()
-    assert stats["status"] == "ok"
+    assert stats["status"] == "pending"
     assert stats["errors"] == 0
-    assert stats["supplier_orders_created"] == 1
-    assert stats["orders_delivered"] == 1
-    assert order.status == "delivered"
-    assert order.supplier_order_id == "ge-new-1"
-    assert len(supplier_client.create_calls) == 1
-    assert marketplace_client.delivered_unique_codes == ["UNIQUE-CODE-0004"]
+    assert stats["supplier_orders_created"] == 0
+    assert stats["orders_delivered"] == 0
+    assert stats["details"][-1]["reason"] == "supplier_order_terminal_requires_manual_retry"
+    assert order.status == "needs_manual_review"
+    assert order.supplier_order_id == "7473"
+    assert len(supplier_client.create_calls) == 0
+    assert marketplace_client.delivered_unique_codes == []
 
 
-def test_digiseller_unique_code_recreates_supplier_order_cancelled_during_status_check(
+def test_digiseller_unique_code_does_not_recreate_supplier_order_cancelled_during_status_check(
     db_session: Session,
 ) -> None:
     supplier = _add_linked_offer(db_session, marketplace="digiseller", offer_id="5850465")
@@ -1483,14 +1497,15 @@ def test_digiseller_unique_code_recreates_supplier_order_cancelled_during_status
     )
 
     order = db_session.execute(select(Order)).scalars().one()
-    assert stats["status"] == "ok"
-    assert stats["errors"] == 0
-    assert stats["supplier_orders_created"] == 1
-    assert stats["orders_delivered"] == 1
-    assert order.status == "delivered"
-    assert order.supplier_order_id == "ge-new-2"
-    assert len(supplier_client.create_calls) == 1
-    assert marketplace_client.delivered_unique_codes == ["UNIQUE-CODE-0005"]
+    assert stats["status"] == "partial"
+    assert stats["errors"] == 1
+    assert stats["supplier_orders_created"] == 0
+    assert stats["orders_delivered"] == 0
+    assert order.status == "needs_manual_review"
+    assert order.supplier_order_id == "7473"
+    assert order.error_message == "supplier_order_terminal:canceled"
+    assert len(supplier_client.create_calls) == 0
+    assert marketplace_client.delivered_unique_codes == []
 
 
 def test_digiseller_order_with_unique_code_in_detail_delivers_in_sync(
