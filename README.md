@@ -194,6 +194,7 @@ Other supplier terminal states stay in manual review to avoid duplicate purchase
 Order polling scale knobs:
 - `ORDER_SYNC_INITIAL_LOOKBACK_HOURS` controls the first/recovery polling window when no successful order-sync checkpoint exists.
 - `ORDER_SYNC_OVERLAP_MINUTES` adds overlap after the last successful checkpoint so late marketplace writes are not missed.
+- `ORDER_SYNC_FUTURE_WINDOW_MINUTES` extends the poll end time to tolerate marketplace/server clock skew.
 - `DIGISELLER_SALES_PAGE_SIZE` and `DIGISELLER_SALES_MAX_PAGES` cap Digiseller sales pagination per run.
 
 GGSEL delivery happens during `POST /sync/orders` as soon as a linked paid sale is detected.

@@ -1361,7 +1361,7 @@ def _order_poll_window(db: Session, settings: Settings) -> tuple[datetime, datet
         start = now - timedelta(hours=settings.order_sync_initial_lookback_hours)
     else:
         start = last_success - timedelta(minutes=settings.order_sync_overlap_minutes)
-    return start, now + timedelta(minutes=1)
+    return start, now + timedelta(minutes=settings.order_sync_future_window_minutes)
 
 
 def _load_retryable_pending_order_ids(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Generator
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -1685,3 +1685,28 @@ def test_order_sync_rechecks_pending_unique_code_chat_lookup_failures(
     assert order.status == "delivered"
     assert len(supplier_client.create_calls) == 1
     assert marketplace_client.delivered_unique_codes == ["E5E8B7E1369947A3"]
+
+
+def test_order_sync_poll_window_includes_configured_future_skew(
+    db_session: Session,
+) -> None:
+    supplier_client = FakeSupplierOrderClient()
+    marketplace_client = FakeMarketplaceOrderClient(sales=[])
+    settings = Settings(
+        _env_file=None,
+        scheduler_enabled=False,
+        order_sync_initial_lookback_hours=24,
+        order_sync_future_window_minutes=360,
+    )
+
+    sync_orders(
+        db=db_session,
+        settings=settings,
+        supplier_client=supplier_client,
+        marketplace_clients={"digiseller": marketplace_client},
+    )
+
+    date_start, date_finish = marketplace_client.latest_sales_windows[0]
+    assert date_start is not None
+    assert date_finish is not None
+    assert date_finish - datetime.now(date_finish.tzinfo) > timedelta(hours=5, minutes=55)
