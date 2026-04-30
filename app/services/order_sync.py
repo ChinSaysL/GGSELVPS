@@ -124,6 +124,8 @@ _RECREATABLE_SUPPLIER_TERMINAL_ERRORS = (
     "supplier_order_terminal:cancelled",
     "supplier_order_terminal:expired",
 )
+_DIGISELLER_UNIQUE_CODE_WAIT_PREFIX = "awaiting_digiseller_unique_code"
+_DIGISELLER_UNIQUE_CODE_PROMPT_SENT_MARKER = "prompt_sent"
 
 
 def _supplier_order_can_be_recreated(error_message: str | None) -> bool:
@@ -132,6 +134,21 @@ def _supplier_order_can_be_recreated(error_message: str | None) -> bool:
 
 def _sale_allows_supplier_recreate(sale: NormalizedMarketplaceSale) -> bool:
     return sale.marketplace == "digiseller" and bool(sale.unique_code)
+
+
+def _awaiting_digiseller_unique_code(reason: str | None) -> bool:
+    return str(reason or "").startswith(_DIGISELLER_UNIQUE_CODE_WAIT_PREFIX)
+
+
+def _digiseller_unique_code_prompt_was_sent(reason: str | None) -> bool:
+    return _DIGISELLER_UNIQUE_CODE_PROMPT_SENT_MARKER in str(reason or "").split(";")
+
+
+def _mark_digiseller_unique_code_prompt_sent(reason: str | None) -> str:
+    text = str(reason or _DIGISELLER_UNIQUE_CODE_WAIT_PREFIX)
+    if _digiseller_unique_code_prompt_was_sent(text):
+        return text
+    return f"{text};{_DIGISELLER_UNIQUE_CODE_PROMPT_SENT_MARKER}"
 
 
 def _to_decimal(value: object) -> Decimal | None:
@@ -1046,12 +1063,11 @@ def _process_normalized_sale(
     if verified_sale is None:
         order.status = "needs_manual_review" if verification_error == "digiseller_unique_code_does_not_match_order" else "pending"
         order.error_message = verification_error
-        db.add(order)
-        db.commit()
-        if (
-            verification_error == "awaiting_digiseller_unique_code"
-            and not str(prev_error_message or "").startswith("awaiting_digiseller_unique_code")
-        ):
+        waiting_for_code = _awaiting_digiseller_unique_code(verification_error)
+        prompt_was_sent = _digiseller_unique_code_prompt_was_sent(prev_error_message)
+        if waiting_for_code and prompt_was_sent:
+            order.error_message = _mark_digiseller_unique_code_prompt_sent(verification_error)
+        if waiting_for_code and not prompt_was_sent:
             buyer_id = sale.buyer_id or order.buyer_id or ""
             try:
                 marketplace_client.send_buyer_message(
@@ -1059,6 +1075,7 @@ def _process_normalized_sale(
                     buyer_id,
                     build_unique_code_request_message(),
                 )
+                order.error_message = _mark_digiseller_unique_code_prompt_sent(verification_error)
             except Exception as exc:  # noqa: BLE001 - prompt must not block the pending state.
                 stats["details"].append(
                     {
@@ -1067,6 +1084,8 @@ def _process_normalized_sale(
                         "reason": str(exc),
                     }
                 )
+        db.add(order)
+        db.commit()
         stats["skipped"] += 1
         stats["details"].append(
             {

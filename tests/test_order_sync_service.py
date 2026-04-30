@@ -1295,9 +1295,107 @@ def test_digiseller_paid_order_waits_until_buyer_posts_unique_code(db_session: S
     assert repeat_stats["orders_delivered"] == 0
     assert repeat_stats["skipped"] == 1
     assert pending_order.status == "pending"
-    assert pending_order.error_message == "awaiting_digiseller_unique_code"
+    assert pending_order.error_message == "awaiting_digiseller_unique_code;prompt_sent"
     assert len(supplier_client.create_calls) == 0
     assert marketplace_client.delivered_unique_codes == []
+    assert len(marketplace_client.messages) == 1
+    assert "please paste your unique code" in marketplace_client.messages[0][1]
+
+
+def test_digiseller_paid_order_prompts_even_when_chat_lookup_fails(
+    db_session: Session,
+) -> None:
+    _add_linked_offer(db_session, marketplace="digiseller", offer_id="5850465")
+    sale = {
+        "invoice_id": "9001",
+        "id_goods": "5850465",
+        "date_pay": "2026-04-27 10:00:00",
+        "amount": "5.00",
+    }
+
+    class ChatLookupFailingDigisellerClient(FakeDigisellerOrderClient):
+        def get_buyer_messages(self, order_id: str) -> list[dict[str, Any]]:
+            _ = order_id
+            raise APIRequestError("Digiseller returned HTTP 403 for GET /api/debates/v2")
+
+    supplier_client = FakeSupplierOrderClient()
+    marketplace_client = ChatLookupFailingDigisellerClient(
+        sales=[sale],
+        order_payloads={"9001": sale},
+    )
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"digiseller": marketplace_client},
+    )
+
+    order = db_session.execute(select(Order)).scalars().one()
+    assert stats["supplier_orders_created"] == 0
+    assert stats["orders_delivered"] == 0
+    assert str(stats["details"][-1]["reason"]).startswith(
+        "awaiting_digiseller_unique_code_chat_lookup_failed"
+    )
+    assert order.status == "pending"
+    assert str(order.error_message).startswith("awaiting_digiseller_unique_code_chat_lookup_failed")
+    assert str(order.error_message).endswith(";prompt_sent")
+    assert supplier_client.create_calls == []
+    assert len(marketplace_client.messages) == 1
+    assert "please paste your unique code" in marketplace_client.messages[0][1]
+
+
+def test_existing_pending_digiseller_order_without_prompt_marker_gets_prompted_once(
+    db_session: Session,
+) -> None:
+    supplier = _add_linked_offer(db_session, marketplace="digiseller", offer_id="5850465")
+    offer = db_session.execute(select(MarketplaceOffer)).scalars().one()
+    db_session.add(
+        Order(
+            marketplace="digiseller",
+            marketplace_order_id="9001",
+            marketplace_offer_id=offer.id,
+            supplier_product_id=supplier.id,
+            status="pending",
+            error_message="awaiting_digiseller_unique_code",
+        )
+    )
+    db_session.commit()
+
+    supplier_client = FakeSupplierOrderClient()
+    marketplace_client = FakeDigisellerOrderClient(
+        sales=[],
+        order_payloads={
+            "9001": {
+                "retval": 0,
+                "content": {
+                    "inv": 9001,
+                    "item_id": 5850465,
+                },
+            }
+        },
+    )
+
+    first_stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"digiseller": marketplace_client},
+    )
+    second_stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"digiseller": marketplace_client},
+    )
+
+    order = db_session.execute(select(Order)).scalars().one()
+    assert first_stats["orders_detected"] == 1
+    assert first_stats["orders_delivered"] == 0
+    assert second_stats["orders_delivered"] == 0
+    assert order.status == "pending"
+    assert order.error_message == "awaiting_digiseller_unique_code;prompt_sent"
+    assert supplier_client.create_calls == []
     assert len(marketplace_client.messages) == 1
     assert "please paste your unique code" in marketplace_client.messages[0][1]
 
