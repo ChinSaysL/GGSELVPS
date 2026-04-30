@@ -375,6 +375,36 @@ def _unique_code_candidates_from_text(text: str) -> list[str]:
     return candidates
 
 
+def _message_bool(value: object) -> bool | None:
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "buyer", "customer", "client"}:
+        return True
+    if text in {"0", "false", "no", "seller", "vendor", "merchant"}:
+        return False
+    return None
+
+
+def _message_is_from_buyer(message: dict[str, Any]) -> bool:
+    for key in ("buyer", "is_buyer", "from_buyer", "isBuyer", "fromBuyer"):
+        parsed = _message_bool(message.get(key))
+        if parsed is not None:
+            return parsed
+
+    for key in ("seller", "is_seller", "from_seller", "isSeller", "fromSeller"):
+        parsed = _message_bool(message.get(key))
+        if parsed is not None:
+            return not parsed
+
+    for key in ("role", "author", "sender", "sender_type", "senderType", "side"):
+        parsed = _message_bool(message.get(key))
+        if parsed is not None:
+            return parsed
+
+    # Verification with Digiseller still gates delivery, so unknown-origin chat
+    # rows are worth scanning when the buyer sends the code before our prompt.
+    return True
+
+
 def _unique_code_candidates_from_messages(messages: list[dict[str, Any]]) -> list[str]:
     candidates: list[str] = []
     ordered_messages = sorted(
@@ -385,7 +415,7 @@ def _unique_code_candidates_from_messages(messages: list[dict[str, Any]]) -> lis
     for message in ordered_messages:
         if str(message.get("deleted") or "0").strip().lower() in {"1", "true", "yes"}:
             continue
-        if str(message.get("buyer") or "").strip().lower() not in {"1", "true", "yes"}:
+        if not _message_is_from_buyer(message):
             continue
         text = str(message.get("message") or message.get("text") or "").strip()
         for candidate in _unique_code_candidates_from_text(text):

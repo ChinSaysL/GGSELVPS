@@ -1590,6 +1590,49 @@ def test_digiseller_order_with_unique_code_in_chat_delivers_in_sync(
     assert marketplace_client.delivered_unique_codes == ["E5E8B7E1369947A3"]
 
 
+def test_digiseller_code_posted_before_prompt_delivers_without_prompt(
+    db_session: Session,
+) -> None:
+    _add_linked_offer(db_session, marketplace="digiseller", offer_id="5850465")
+    sale = {
+        "invoice_id": "9001",
+        "id_goods": "5850465",
+        "date_pay": "2026-04-27 10:00:00",
+        "amount": "5.00",
+    }
+    supplier_client = FakeSupplierOrderClient()
+    marketplace_client = FakeDigisellerOrderClient(
+        sales=[sale],
+        order_payloads={"9001": sale},
+        chat_messages={
+            "9001": [
+                {
+                    "id": 1,
+                    "message": "6E547DD6ADA24250",
+                    "seller": 0,
+                    "deleted": 0,
+                    "date_written": "2026-04-27 10:00:05",
+                }
+            ]
+        },
+    )
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"digiseller": marketplace_client},
+    )
+    order = db_session.execute(select(Order)).scalars().one()
+
+    assert stats["orders_delivered"] == 1
+    assert order.status == "delivered"
+    assert len(supplier_client.create_calls) == 1
+    assert marketplace_client.delivered_unique_codes == ["6E547DD6ADA24250"]
+    assert len(marketplace_client.messages) == 2
+    assert all("please paste your unique code" not in message for _, message in marketplace_client.messages)
+
+
 def test_order_sync_rechecks_local_pending_unique_code_orders_without_recent_sale(
     db_session: Session,
 ) -> None:
