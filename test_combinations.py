@@ -9,7 +9,7 @@ try:
     token = client._get_access_token()
     res = client._request_json("POST", "/api_sellers/api/product/edit/prices", params={"token": token}, json_body=[{"product_id": 102260467, "price": "10.00"}])
     print("String OK:", res)
-except Exception as e:
+except Exception:
     import traceback
     traceback.print_exc()
 
@@ -17,7 +17,7 @@ try:
     print("Testing wrapper object...")
     res = client._request_json("POST", "/api_sellers/api/product/edit/prices", params={"token": token}, json_body={"products": [{"product_id": 102260467, "price": 10.0}]})
     print("Wrapper OK:", res)
-except Exception as e:
+except Exception:
     import traceback
     traceback.print_exc()
 

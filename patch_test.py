@@ -1,6 +1,4 @@
-﻿import sys
-import re
-
+﻿
 content = open("tests/test_clients_stage4.py", "r", encoding="utf-8").read()
 
 content = content.replace('''    def handler(request: httpx.Request) -> httpx.Response:

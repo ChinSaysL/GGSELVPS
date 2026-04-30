@@ -738,13 +738,13 @@ class GEngineClient(BaseAPIClient):
         default_params: dict[str, Any],
     ) -> str | None:
         normalized_param = cls._normalize_param_key(param_key)
-        for key, value in default_params.items():
-            if cls._normalize_param_key(key) == normalized_param and value not in {None, ""}:
-                return str(value).strip()
-
         for key, value in buyer_inputs.items():
             if cls._normalize_param_key(key) == normalized_param and value:
                 return value
+
+        for key, value in default_params.items():
+            if cls._normalize_param_key(key) == normalized_param and value not in {None, ""}:
+                return str(value).strip()
 
         if normalized_param == "account" and buyer_inputs:
             for key, value in buyer_inputs.items():

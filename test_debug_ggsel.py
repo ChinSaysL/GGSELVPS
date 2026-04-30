@@ -10,7 +10,7 @@ print("Base price...")
 try:
     res = client.set_offer_price("102260467", 10.0, "USD", variants=None)
     print("Base OK:", res)
-except Exception as e:
+except Exception:
     import traceback
     traceback.print_exc()
 

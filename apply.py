@@ -1,6 +1,4 @@
-﻿import sys
-import json
-import re
+﻿import re
 
 content = open("tests/test_clients_stage4.py", "r", encoding="utf-8").read()
 

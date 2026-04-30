@@ -179,24 +179,23 @@ active again. The local order stays retryable (`pending` before a supplier order
 `supplier_order_created` after one exists), so later order-sync runs continue automatically without
 creating duplicate deliveries.
 
-Digiseller unique-code products require a second buyer-side step. Configure the Digiseller product's automatic code verification URL to:
+Digiseller and GGSEL delivery both happen during `POST /sync/orders` as soon as a linked paid
+sale is detected. Do not point Digiseller buyers at the VPS as an automatic payment or delivery
+redirect; the service only needs seller API polling. If a Digiseller unique code is available in
+the order payload or through the manual `python manage.py digiseller-code` rescue command, the
+service can still verify it and mark it delivered, but normal paid-order fulfillment does not
+depend on that code.
 
-```text
-https://YOUR_PUBLIC_HOST/delivery/digiseller
-```
-
-Digiseller appends the `uniquecode` query parameter. The endpoint verifies that code with Digiseller, reuses the existing local order if one exists, buys from G-Engine only after verification, delivers the G-Engine result to the buyer chat, then marks the unique code as delivered. If the buyer already pasted the unique code into the Digiseller order chat, order sync also checks recent buyer chat messages and verifies any code-like token before using it.
-
-The scheduled order sync uses the same automated checks. Pending Digiseller unique-code orders are rechecked on later runs, including after temporary buyer-chat lookup failures. `python manage.py digiseller-code` is only a manual rescue command for cases where the code is not available through the callback, order detail, or buyer chat.
-
-If an older unpaid G-Engine supplier order was left in `canceled`, `cancelled`, or `expired`, a verified Digiseller unique-code flow clears that dead supplier order ID and creates a fresh G-Engine order once. Other supplier terminal states stay in manual review to avoid duplicate purchases.
+If an older unpaid G-Engine supplier order was left in `canceled`, `cancelled`, or `expired`, a
+later Digiseller sync can clear that dead supplier order ID and create a fresh G-Engine order once.
+Other supplier terminal states stay in manual review to avoid duplicate purchases.
 
 Order polling scale knobs:
 - `ORDER_SYNC_INITIAL_LOOKBACK_HOURS` controls the first/recovery polling window when no successful order-sync checkpoint exists.
 - `ORDER_SYNC_OVERLAP_MINUTES` adds overlap after the last successful checkpoint so late marketplace writes are not missed.
 - `DIGISELLER_SALES_PAGE_SIZE` and `DIGISELLER_SALES_MAX_PAGES` cap Digiseller sales pagination per run.
 
-GGSEL delivery happens during `POST /sync/orders` as soon as a paid sale is detected. There is no unique-code gate for GGSEL.
+There is no unique-code gate for GGSEL.
 
 ## Local setup (test PC)
 

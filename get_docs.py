@@ -10,7 +10,8 @@ conn.sendall(b"GET /docs/en/seller-api-v-1 HTTP/1.1\r\nHost: seller.ggsel.com\r\
 resp = b""
 while True:
     data = conn.recv(8192)
-    if not data: break
+    if not data:
+        break
     resp += data
 html = resp.decode("utf-8", "ignore")
 prices = re.findall(r'.{0,300}prices?.{0,1000}', html, re.IGNORECASE | re.DOTALL)

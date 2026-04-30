@@ -1171,7 +1171,85 @@ def test_ggsel_quantity_based_recharge_order_scales_cost_and_supplier_quantity(
     }
 
 
-def test_digiseller_order_waits_for_unique_code_then_delivers(db_session: Session) -> None:
+def test_digiseller_recharge_amount_option_becomes_gengine_quantity(
+    db_session: Session,
+) -> None:
+    raw_payload_json = (
+        '{"source_type":"recharge","recharge_product_id":"1",'
+        '"recharge_param_keys":["Account","Quantity"],'
+        '"recharge_quantity_source":"marketplace_quantity",'
+        '"recharge_quantity_multiplier":"1"}'
+    )
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="recharge:1",
+        title="Steam Wallet USD",
+        category="Recharge",
+        denomination="Variable USD | Marketplace quantity x 1",
+        region=None,
+        cost_usd=Decimal("1.00"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json=raw_payload_json,
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="digiseller",
+        marketplace_offer_id="5850465",
+        supplier_product_id=supplier.id,
+        title="Steam USD top up",
+        price=Decimal("5.50"),
+        currency="USD",
+        is_enabled=True,
+        requires_buyer_input=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+    db_session.add(
+        ProductMapping(
+            supplier_product_id=supplier.id,
+            marketplace_offer_id=offer.id,
+            enabled=True,
+            marketplace_variant_id=19472011,
+            marketplace_variant_name="$5 USD",
+        )
+    )
+    db_session.commit()
+
+    sale = {
+        "invoice_id": "9007",
+        "id_goods": "5850465",
+        "date_pay": "2026-04-27 10:00:00",
+        "amount": "5.50",
+        "cnt_goods": "1",
+        "options": [
+            {"name": "Amount", "user_data": "$5 USD", "user_data_id": 19472011},
+            {"name": "Account", "user_data": "steam_friend_123", "user_data_id": None},
+        ],
+    }
+    supplier_client = FakeSupplierOrderClient(
+        create_response={"id": 7007, "status": "shipped", "supplier_order_id": "recharge:7007"}
+    )
+    marketplace_client = FakeDigisellerOrderClient(sales=[sale], order_payloads={"9007": sale})
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"digiseller": marketplace_client},
+    )
+
+    assert stats["orders_delivered"] == 1
+    assert supplier_client.create_calls[0]["quantity"] == 1
+    assert supplier_client.create_calls[0]["buyer_inputs"] == {
+        "account": "steam_friend_123",
+        "quantity": "5",
+    }
+
+
+def test_digiseller_paid_order_delivers_without_unique_code(db_session: Session) -> None:
     _add_linked_offer(db_session, marketplace="digiseller", offer_id="5850465")
     sale = {
         "invoice_id": "9001",
@@ -1188,18 +1266,6 @@ def test_digiseller_order_waits_for_unique_code_then_delivers(db_session: Sessio
         supplier_client=supplier_client,
         marketplace_clients={"digiseller": marketplace_client},
     )
-    pending_order = db_session.execute(select(Order)).scalars().one()
-    pending_status = pending_order.status
-    pending_error = pending_order.error_message
-    pending_create_calls = list(supplier_client.create_calls)
-
-    delivery_stats = process_digiseller_unique_code(
-        unique_code="UNIQUE-CODE-0001",
-        db=db_session,
-        settings=_settings_for_tests(),
-        supplier_client=supplier_client,
-        marketplace_client=marketplace_client,
-    )
     repeat_stats = sync_orders(
         db=db_session,
         settings=_settings_for_tests(),
@@ -1208,18 +1274,13 @@ def test_digiseller_order_waits_for_unique_code_then_delivers(db_session: Sessio
     )
     delivered_order = db_session.execute(select(Order)).scalars().one()
 
-    assert sync_stats["supplier_orders_created"] == 0
-    assert sync_stats["orders_delivered"] == 0
-    assert sync_stats["details"][0]["marketplace_order_id"] == "9001"
-    assert pending_status == "pending"
-    assert pending_error == "awaiting_digiseller_unique_code"
-    assert pending_create_calls == []
-    assert delivery_stats["orders_delivered"] == 1
+    assert sync_stats["supplier_orders_created"] == 1
+    assert sync_stats["orders_delivered"] == 1
     assert repeat_stats["orders_delivered"] == 0
     assert repeat_stats["skipped"] == 1
     assert delivered_order.status == "delivered"
     assert len(supplier_client.create_calls) == 1
-    assert marketplace_client.delivered_unique_codes == ["UNIQUE-CODE-0001"]
+    assert marketplace_client.delivered_unique_codes == []
     assert len(marketplace_client.messages) == 2
     assert "Thank you for your purchase!" in marketplace_client.messages[0][1]
     assert "Спасибо за вашу покупку!" in marketplace_client.messages[0][1]
@@ -1360,7 +1421,7 @@ def test_digiseller_order_with_unique_code_in_detail_delivers_in_sync(
     assert marketplace_client.delivered_unique_codes == ["UNIQUE-CODE-0002"]
 
 
-def test_digiseller_order_with_unique_code_in_chat_delivers_in_sync(
+def test_digiseller_order_with_unique_code_only_in_chat_delivers_without_gate(
     db_session: Session,
 ) -> None:
     _add_linked_offer(db_session, marketplace="digiseller", offer_id="5850465")
@@ -1399,7 +1460,7 @@ def test_digiseller_order_with_unique_code_in_chat_delivers_in_sync(
     assert stats["orders_delivered"] == 1
     assert order.status == "delivered"
     assert len(supplier_client.create_calls) == 1
-    assert marketplace_client.delivered_unique_codes == ["E5E8B7E1369947A3"]
+    assert marketplace_client.delivered_unique_codes == []
 
 
 def test_order_sync_rechecks_local_pending_unique_code_orders_without_recent_sale(
@@ -1427,7 +1488,6 @@ def test_order_sync_rechecks_local_pending_unique_code_orders_without_recent_sal
                 "retval": 0,
                 "content": {
                     "item_id": 5850465,
-                    "query_string": "?uniquecode=UNIQUE-CODE-0003",
                 },
             }
         },
@@ -1445,7 +1505,7 @@ def test_order_sync_rechecks_local_pending_unique_code_orders_without_recent_sal
     assert stats["orders_delivered"] == 1
     assert order.status == "delivered"
     assert len(supplier_client.create_calls) == 1
-    assert marketplace_client.delivered_unique_codes == ["UNIQUE-CODE-0003"]
+    assert marketplace_client.delivered_unique_codes == []
 
 
 def test_order_sync_rechecks_pending_unique_code_chat_lookup_failures(
@@ -1501,4 +1561,4 @@ def test_order_sync_rechecks_pending_unique_code_chat_lookup_failures(
     assert stats["orders_delivered"] == 1
     assert order.status == "delivered"
     assert len(supplier_client.create_calls) == 1
-    assert marketplace_client.delivered_unique_codes == ["E5E8B7E1369947A3"]
+    assert marketplace_client.delivered_unique_codes == []
