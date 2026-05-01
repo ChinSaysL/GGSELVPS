@@ -3,7 +3,11 @@
     "allow": [
       "Bash(.venv/Scripts/python.exe -m pytest tests/test_stock_rules.py -v)",
       "Bash(.venv/Scripts/pytest tests/ -v)",
-      "WebFetch(domain:seller.ggsel.com)"
+      "WebFetch(domain:seller.ggsel.com)",
+      "Bash(xargs -0 grep -l \"set_offer_stock\")",
+      "Bash(grep -n \"def set_offer_stock\" c:\\\\\\\\Users\\\\\\\\Abdou\\\\\\\\Documents\\\\\\\\VPS\\\\\\\\app\\\\\\\\clients\\\\\\\\digiseller.py)",
+      "Bash(.venv/Scripts/pytest tests/test_clients_stage4.py -k \"ggsel_set_offer_stock\" -v)",
+      "Bash(.venv/Scripts/pytest tests/test_stock_sync_service.py -k \"ggsel\" -v)"
     ]
   }
 }

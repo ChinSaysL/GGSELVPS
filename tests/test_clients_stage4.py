@@ -1703,6 +1703,51 @@ def test_ggsel_set_offer_variant_visible_uses_product_data_options() -> None:
     assert "/api_sellers/api/products/options/list/102260467" not in captured["paths"]
 
 
+def test_ggsel_set_offer_stock_sends_unit_cnt_max_and_min() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api_sellers/api/product/edit/prices"):
+            captured["query"] = dict(request.url.params)
+            captured["json"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(status_code=200, json={"retval": 0})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GGSELClient(base_url="https://seller.ggsel.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    result = client.set_offer_stock("102263901", 1700, min_purchase_quantity=55)
+    client.close()
+
+    assert result.get("retval") == 0
+    assert len(captured["json"]) == 1
+    item = captured["json"][0]
+    assert item["product_id"] == 102263901
+    assert item["unit_cnt_max"] == 1700
+    assert item["unit_cnt_min"] == 55
+    assert "price" not in item
+
+
+def test_ggsel_set_offer_stock_omits_unit_cnt_min_when_not_set() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/api_sellers/api/product/edit/prices"):
+            captured["json"] = json.loads(request.content.decode("utf-8"))
+            return httpx.Response(status_code=200, json={"retval": 0})
+        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+
+    client = GGSELClient(base_url="https://seller.ggsel.com", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    client.set_offer_stock("102263901", 500)
+    client.close()
+
+    item = captured["json"][0]
+    assert item["unit_cnt_max"] == 500
+    assert "unit_cnt_min" not in item
+
+
 def test_ggsel_send_buyer_message_uses_prefixed_debates_endpoint() -> None:
     captured: dict[str, Any] = {}
 

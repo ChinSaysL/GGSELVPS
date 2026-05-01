@@ -31,6 +31,7 @@ class FakeDigisellerStockClient:
     offer_calls: list[tuple[str, bool]] = field(default_factory=list)
     variant_calls: list[tuple[str, int, bool]] = field(default_factory=list)
     variant_state_calls: list[tuple[str, int, bool, bool | None]] = field(default_factory=list)
+    stock_calls: list[tuple[str, int, int | None]] = field(default_factory=list)
     variant_state_error_ids: set[int] = field(default_factory=set)
     offer_error: Exception | None = None
     offer_payload_by_id: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -62,6 +63,16 @@ class FakeDigisellerStockClient:
         if variant_id in self.variant_state_error_ids:
             raise RuntimeError(f"variant {variant_id} update failed")
         self.variant_state_calls.append((offer_id, variant_id, visible, is_default))
+        return {"status": "ok"}
+
+    def set_offer_stock(
+        self,
+        offer_id: str,
+        stock_qty: int,
+        *,
+        min_purchase_quantity: int | None = None,
+    ) -> dict[str, Any]:
+        self.stock_calls.append((offer_id, stock_qty, min_purchase_quantity))
         return {"status": "ok"}
 
     def close(self) -> None:
@@ -726,9 +737,26 @@ def test_stock_sync_controls_ggsel_variants_instead_of_disabling_whole_offer(
     )
 
 
-def test_stock_sync_skips_ggsel_managed_quantity_without_stock_api(
+def test_stock_sync_skips_managed_quantity_when_client_has_no_stock_api(
     db_session: Session,
 ) -> None:
+    class _NoStockAPIClient:
+        def set_offer_enabled(self, offer_id: str, enabled: bool) -> dict[str, Any]:
+            return {"status": "ok"}
+
+        def set_offer_variant_state(
+            self,
+            offer_id: str,
+            variant_id: int,
+            *,
+            visible: bool,
+            is_default: bool | None = None,
+        ) -> dict[str, Any]:
+            return {"status": "ok"}
+
+        def close(self) -> None:
+            pass
+
     supplier = SupplierProduct(
         supplier="gengine",
         supplier_product_id="gift:1238840:432909:ua",
@@ -766,12 +794,11 @@ def test_stock_sync_skips_ggsel_managed_quantity_without_stock_api(
     )
     db_session.commit()
 
-    client = FakeDigisellerStockClient()
     stats = sync_offer_stock(
         db=db_session,
         settings=_settings_for_tests(),
         supplier_balance_client=FakeSupplierBalanceClient({"balance": "50.00"}),
-        marketplace_clients={"ggsel": client},
+        marketplace_clients={"ggsel": _NoStockAPIClient()},  # type: ignore[arg-type]
     )
 
     assert stats["errors"] == 0
@@ -780,6 +807,60 @@ def test_stock_sync_skips_ggsel_managed_quantity_without_stock_api(
         for item in stats["details"]
         if isinstance(item, dict)
     )
+
+
+def test_stock_sync_calls_set_offer_stock_for_ggsel(
+    db_session: Session,
+) -> None:
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="recharge:4",
+        title="Steam UAH",
+        category="Recharge",
+        denomination="Variable UAH",
+        region=None,
+        cost_usd=Decimal("0.05"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json="{}",
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="ggsel",
+        marketplace_offer_id="102263901",
+        supplier_product_id=supplier.id,
+        title="Steam UAH top-up",
+        price=Decimal("2.51"),
+        currency="RUB",
+        is_enabled=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+
+    db_session.add(
+        ProductMapping(
+            supplier_product_id=supplier.id,
+            marketplace_offer_id=offer.id,
+            enabled=True,
+            manage_stock_quantity=True,
+            min_purchase_quantity=55,
+        )
+    )
+    db_session.commit()
+
+    client = FakeDigisellerStockClient()
+    stats = sync_offer_stock(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_balance_client=FakeSupplierBalanceClient({"balance": "100.00"}),
+        marketplace_clients={"ggsel": client},
+    )
+
+    # usable = 100 * 0.85 = 85, cost = 0.05 → stock_qty = floor(85 / 0.05) = 1700
+    assert stats["errors"] == 0
+    assert client.stock_calls == [("102263901", 1700, 55)]
 
 
 def test_stock_sync_disables_digiseller_parent_when_variant_control_fails(

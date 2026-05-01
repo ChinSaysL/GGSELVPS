@@ -1070,7 +1070,11 @@ def sync_offer_stock(
             "min_purchase_quantity": mapping.min_purchase_quantity,
         }
         try:
-            cast(Any, client).set_offer_stock(offer.marketplace_offer_id, stock_qty)
+            cast(Any, client).set_offer_stock(
+                offer.marketplace_offer_id,
+                stock_qty,
+                min_purchase_quantity=mapping.min_purchase_quantity,
+            )
             stock_detail["status"] = "ok"
         except Exception as exc:  # noqa: BLE001
             stock_detail["status"] = "error"
