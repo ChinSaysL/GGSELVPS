@@ -202,9 +202,20 @@ def _merge_payloads(*payloads: dict[str, Any]) -> dict[str, Any]:
     return merged
 
 
+_LABEL_KEYWORD_TO_KEY: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("account", "login", "логин", "учетная", "аккаунт", "username", "user_name"), "account"),
+    (("quantity", "qty", "count", "amount", "sum", "колич", "сумм", "amount"), "quantity"),
+    (("currency", "curr", "валют"), "currency"),
+)
+
+
 def _normalize_input_key(value: str | None, fallback: str) -> str:
-    text = str(value or "").strip().lower()
-    text = re.sub(r"[^a-z0-9]+", "_", text)
+    raw = str(value or "").strip()
+    lowered = raw.lower()
+    for keywords, mapped_key in _LABEL_KEYWORD_TO_KEY:
+        if any(kw in lowered for kw in keywords):
+            return mapped_key
+    text = re.sub(r"[^a-z0-9]+", "_", lowered)
     text = text.strip("_")
     return text or fallback
 
@@ -261,7 +272,9 @@ def _extract_buyer_inputs(payload: dict[str, Any]) -> dict[str, str]:
 
     buyer_info = payload.get("buyer_info")
     if isinstance(buyer_info, dict):
-        for raw_key in ("account", "info"):
+        # buyer_info.account is the buyer's payment system ID, not a product input —
+        # prefix it to avoid colliding with the actual product "account" field.
+        for raw_key in ("info",):
             value = buyer_info.get(raw_key)
             if value is None:
                 continue
