@@ -1026,6 +1026,51 @@ class GGSELClient(BaseAPIClient):
             return result
         return {"status": "ok", "response": result}
 
+    def _panel_get_offer_data(self, public_offer_id: str, *, cookies: dict[str, str]) -> dict[str, Any]:
+        # Fast path: ggsel_id = internal_id + 100_000_001 (verified pattern)
+        try:
+            computed = int(public_offer_id) - 100_000_001
+            if computed > 0:
+                resp = self._panel_request("GET", f"/api/v1/offers/{computed}", cookies=cookies)
+                data = resp.get("data", resp)
+                if str(data.get("ggsel_id", "")) == str(public_offer_id):
+                    return data
+        except (ValueError, APIRequestError):
+            pass
+
+        # Fallback: paginate list and match on ggsel_id
+        page = 1
+        while True:
+            resp = self._panel_request("GET", f"/api/v1/offers?page={page}", cookies=cookies)
+            items = resp.get("data", [])
+            if not isinstance(items, list) or not items:
+                break
+            for item in items:
+                if str(item.get("ggsel_id", "")) == str(public_offer_id):
+                    internal_id = item["id"]
+                    full = self._panel_request("GET", f"/api/v1/offers/{internal_id}", cookies=cookies)
+                    return full.get("data", full)
+            page += 1
+
+        raise APIRequestError(f"GGSEL offer {public_offer_id} not found in seller panel.")
+
+    def _panel_request_with_reauth(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        cookies = self._ensure_panel_session()
+        try:
+            return self._panel_request(method, path, json_body=json_body, cookies=cookies)
+        except APIRequestError as exc:
+            if "HTTP 401" not in str(exc):
+                raise
+        self._panel_cookies = {}
+        cookies = self._ensure_panel_session()
+        return self._panel_request(method, path, json_body=json_body, cookies=cookies)
+
     def set_offer_stock(
         self,
         offer_id: str,
@@ -1036,16 +1081,14 @@ class GGSELClient(BaseAPIClient):
         cookies = self._ensure_panel_session()
 
         try:
-            offer_resp = self._panel_request("GET", f"/api/v1/offers/{offer_id}", cookies=cookies)
+            offer_data = self._panel_get_offer_data(offer_id, cookies=cookies)
         except APIRequestError as exc:
-            if "HTTP 401" in str(exc):
-                self._panel_cookies = {}
-                cookies = self._ensure_panel_session()
-                offer_resp = self._panel_request("GET", f"/api/v1/offers/{offer_id}", cookies=cookies)
-            else:
+            if "HTTP 401" not in str(exc):
                 raise
+            self._panel_cookies = {}
+            cookies = self._ensure_panel_session()
+            offer_data = self._panel_get_offer_data(offer_id, cookies=cookies)
 
-        offer_data = offer_resp.get("data", offer_resp)
         internal_id = offer_data.get("id")
         if not internal_id:
             raise APIRequestError(f"GGSEL could not resolve internal offer ID for {offer_id}.")
@@ -1065,26 +1108,11 @@ class GGSELClient(BaseAPIClient):
             }
         }
 
-        try:
-            result = self._panel_request(
-                "PATCH",
-                f"/api/v1/offers/{internal_id}/update_price",
-                json_body=payload,
-                cookies=cookies,
-            )
-        except APIRequestError as exc:
-            if "HTTP 401" in str(exc):
-                self._panel_cookies = {}
-                cookies = self._ensure_panel_session()
-                result = self._panel_request(
-                    "PATCH",
-                    f"/api/v1/offers/{internal_id}/update_price",
-                    json_body=payload,
-                    cookies=cookies,
-                )
-            else:
-                raise
-
+        result = self._panel_request_with_reauth(
+            "PATCH",
+            f"/api/v1/offers/{internal_id}/update_price",
+            json_body=payload,
+        )
         if isinstance(result, dict):
             result.setdefault("status", "ok")
         return result
