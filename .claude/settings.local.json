@@ -9,7 +9,11 @@
       "Bash(.venv/Scripts/pytest tests/test_clients_stage4.py -k \"ggsel_set_offer_stock\" -v)",
       "Bash(.venv/Scripts/pytest tests/test_stock_sync_service.py -k \"ggsel\" -v)",
       "WebFetch(domain:api.digiseller.com)",
-      "Bash(python -m pytest tests/ -x -q)"
+      "Bash(python -m pytest tests/ -x -q)",
+      "Bash(python -m pytest tests/test_order_sync_service.py -x -q)",
+      "Bash(python -m pytest -q)",
+      "Bash(python -m pytest tests/test_stock_sync_service.py -x -q)",
+      "Bash(python -m pytest tests/test_stock_sync_service.py tests/test_order_sync_service.py -q)"
     ]
   }
 }

@@ -371,16 +371,44 @@ class GGSELClient(BaseAPIClient):
             "Please provide the exact GGSEL endpoint for offer updates."
         )
 
+    def _panel_resolve_internal_id(self, public_offer_id: str) -> int:
+        """Return the panel internal offer ID from the public GGSEL offer ID."""
+        # Fast path: verified formula internal_id = ggsel_id - 100_000_001.
+        try:
+            computed = int(public_offer_id) - 100_000_001
+            if computed > 0:
+                return computed
+        except (ValueError, TypeError):
+            pass
+        # Slow path: full panel lookup.
+        cookies = self._ensure_panel_session()
+        offer_data = self._panel_get_offer_data(public_offer_id, cookies=cookies)
+        return int(offer_data["id"])
+
+    def _panel_batch_action(self, public_offer_id: str, *, action: str) -> None:
+        """Execute a panel batch action (pause/activate) on a single offer."""
+        if not self._panel_email:
+            return
+        internal_id = self._panel_resolve_internal_id(public_offer_id)
+        self._panel_request_with_reauth(
+            "POST",
+            f"/api/v1/offers/batch/actions/{action}",
+            json_body={"offer_ids": [internal_id]},
+        )
+
     def set_offer_enabled(self, offer_id: str, enabled: bool) -> dict[str, Any]:
-        # GGSEL API v1 has no dedicated offer-level enable/disable endpoint.
-        # When enabling, individual variants are already controlled by set_offer_variant_state.
-        # When disabling entirely, force-hide all variants as a safety net.
+        # Panel batch activate/pause endpoints handle offer-level enable/disable.
+        # For variant-based offers, also update individual variant visibility.
         if enabled:
+            self._panel_batch_action(offer_id, action="activate")
             return {"status": "ok"}
+        # Disable: pause the offer at the panel level, then hide individual variants
+        # for the seller API (belt-and-suspenders for variant-based offers).
+        self._panel_batch_action(offer_id, action="pause")
         token = self._get_access_token()
         product = self.get_offer_by_id(offer_id)
         if not isinstance(product, dict):
-            raise APIRequestError(f"GGSEL product {offer_id} not found for status update.")
+            return {"status": "ok", "variants_updated": 0}
         updated = 0
         for option in self._offer_options(product):
             option_id = self._extract_option_id(option)

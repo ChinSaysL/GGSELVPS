@@ -1063,12 +1063,31 @@ def sync_offer_stock(
             "offer_id": offer.id,
             "marketplace": offer.marketplace,
             "marketplace_offer_id": offer.marketplace_offer_id,
-            "action": "stock_quantity_update",
             "computed_stock": stock_qty,
             "cost_per_unit_usd": str(supplier.cost_usd),
             "usable_balance_usd": str(usable_balance_usd),
             "min_purchase_quantity": mapping.min_purchase_quantity,
         }
+        if stock_qty == 0:
+            # Marketplaces disallow zero stock; disable the listing instead.
+            stock_detail["action"] = "stock_zero_listing_disabled"
+            if hasattr(client, "set_offer_enabled"):
+                try:
+                    client.set_offer_enabled(offer.marketplace_offer_id, False)
+                    offer.is_enabled = False
+                    offer.last_synced_at = now
+                    db.add(offer)
+                    stock_detail["status"] = "ok"
+                except Exception as exc:  # noqa: BLE001
+                    stock_detail["status"] = "error"
+                    stock_detail["reason"] = str(exc)
+                    stats["errors"] += 1
+            else:
+                stock_detail["status"] = "skipped"
+                stock_detail["reason"] = "no_disable_api"
+            stats["details"].append(stock_detail)
+            continue
+        stock_detail["action"] = "stock_quantity_update"
         try:
             cast(Any, client).set_offer_stock(
                 offer.marketplace_offer_id,

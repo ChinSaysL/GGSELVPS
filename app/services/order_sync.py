@@ -1192,6 +1192,7 @@ def _process_normalized_sale(
         return
 
     create_response: dict[str, Any] | None = None
+    just_created = False
     if (
         allow_supplier_recreate
         and order.supplier_order_id
@@ -1289,14 +1290,7 @@ def _process_normalized_sale(
         db.commit()
         stats["supplier_orders_created"] += 1
         product_title, product_kind = _delivery_message_context(offer, mapping, sale)
-        _send_purchase_acknowledgement(
-            order=order,
-            sale=sale,
-            marketplace_client=marketplace_client,
-            product_title=product_title,
-            product_kind=product_kind,
-            stats=stats,
-        )
+        just_created = True
 
     try:
         _payload, codes, fulfilled, terminal_failure = _load_supplier_delivery_payload(
@@ -1351,6 +1345,15 @@ def _process_normalized_sale(
             return
 
         if not fulfilled:
+            if just_created:
+                _send_purchase_acknowledgement(
+                    order=order,
+                    sale=sale,
+                    marketplace_client=marketplace_client,
+                    product_title=product_title,
+                    product_kind=product_kind,
+                    stats=stats,
+                )
             order.status = "supplier_order_created"
             order.error_message = "supplier_order_not_ready"
             db.add(order)
@@ -1376,6 +1379,15 @@ def _process_normalized_sale(
         )
     except Exception as exc:  # noqa: BLE001 - preserve supplier purchase for delivery retry.
         if is_temporary_provider_error(exc):
+            if just_created:
+                _send_purchase_acknowledgement(
+                    order=order,
+                    sale=sale,
+                    marketplace_client=marketplace_client,
+                    product_title=product_title,
+                    product_kind=product_kind,
+                    stats=stats,
+                )
             _defer_for_provider_unavailable(
                 db=db,
                 order=order,

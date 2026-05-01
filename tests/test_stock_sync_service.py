@@ -863,6 +863,68 @@ def test_stock_sync_calls_set_offer_stock_for_ggsel(
     assert client.stock_calls == [("102263901", 1700, 55)]
 
 
+def test_stock_sync_disables_listing_instead_of_setting_zero_stock(
+    db_session: Session,
+) -> None:
+    """When balance is too low to afford min_purchase_quantity, disable instead of stock=0."""
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="recharge:4",
+        title="Steam UAH",
+        category="Recharge",
+        denomination="Variable UAH",
+        region=None,
+        cost_usd=Decimal("0.05"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json="{}",
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="ggsel",
+        marketplace_offer_id="102263901",
+        supplier_product_id=supplier.id,
+        title="Steam UAH top-up",
+        price=Decimal("2.51"),
+        currency="RUB",
+        is_enabled=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+
+    db_session.add(
+        ProductMapping(
+            supplier_product_id=supplier.id,
+            marketplace_offer_id=offer.id,
+            enabled=True,
+            manage_stock_quantity=True,
+            min_purchase_quantity=300,
+        )
+    )
+    db_session.commit()
+
+    client = FakeDigisellerStockClient()
+    # usable = 10 * 0.85 = 8.50, floor(8.50 / 0.05) = 170 < min_purchase=300 → stock_qty=0
+    stats = sync_offer_stock(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_balance_client=FakeSupplierBalanceClient({"balance": "10.00"}),
+        marketplace_clients={"ggsel": client},
+    )
+
+    assert stats["errors"] == 0
+    assert client.stock_calls == []
+    # First loop enables (balance covers 1 unit); managed stock loop then disables (can't afford min qty).
+    assert ("102263901", False) in client.offer_calls
+    assert any(
+        item.get("action") == "stock_zero_listing_disabled" and item.get("status") == "ok"
+        for item in stats["details"]
+        if isinstance(item, dict)
+    )
+
+
 def test_stock_sync_disables_digiseller_parent_when_variant_control_fails(
     db_session: Session,
 ) -> None:

@@ -245,12 +245,8 @@ def test_ggsel_paid_order_buys_from_gengine_and_delivers_once(db_session: Sessio
             "product_payload": {},
         }
     ]
-    assert len(marketplace_client.messages) == 2
-    purchase_message = marketplace_client.messages[0][1]
-    delivery_message = marketplace_client.messages[1][1]
-    assert "Thank you for your purchase!" in purchase_message
-    assert "Спасибо за вашу покупку!" in purchase_message
-    assert "Product: Steam top up - 250 TRY" in purchase_message
+    assert len(marketplace_client.messages) == 1
+    delivery_message = marketplace_client.messages[0][1]
     assert "Your gift card has been delivered." in delivery_message
     assert "Ваша подарочная карта доставлена." in delivery_message
     assert "Product: Steam top up - 250 TRY" in delivery_message
@@ -300,8 +296,8 @@ def test_ggsel_delivery_skips_unique_code_verification(db_session: Session) -> N
     order = db_session.execute(select(Order)).scalars().one()
     assert stats["orders_delivered"] == 1
     assert order.status == "delivered"
-    assert len(marketplace_client.messages) == 2
-    assert "Your gift card has been delivered." in marketplace_client.messages[1][1]
+    assert len(marketplace_client.messages) == 1
+    assert "Your gift card has been delivered." in marketplace_client.messages[0][1]
 
 
 def test_supplier_provider_down_during_purchase_requires_manual_retry(
@@ -384,8 +380,8 @@ def test_supplier_provider_down_during_purchase_requires_manual_retry(
             "product_payload": {},
         }
     ]
-    assert len(marketplace_client.messages) == 3
-    assert "Your gift card has been delivered." in marketplace_client.messages[2][1]
+    assert len(marketplace_client.messages) == 2
+    assert "Your gift card has been delivered." in marketplace_client.messages[1][1]
 
 
 def test_supplier_provider_down_during_delivery_poll_stays_retryable(
@@ -528,12 +524,8 @@ def test_ggsel_paid_recharge_order_delivers_after_shipped_without_code(
             },
         }
     ]
-    assert len(marketplace_client.messages) == 2
-    purchase_message = marketplace_client.messages[0][1]
-    delivery_message = marketplace_client.messages[1][1]
-    assert "will be delivered shortly" in purchase_message
-    assert "будет доставлен в ближайшее время" in purchase_message
-    assert "Product: Steam Wallet RUB 1000" in purchase_message
+    assert len(marketplace_client.messages) == 1
+    delivery_message = marketplace_client.messages[0][1]
     assert "Your product has been delivered successfully." in delivery_message
     assert "Ваш товар был успешно доставлен." in delivery_message
     assert "Product: Steam Wallet RUB 1000" in delivery_message
@@ -758,11 +750,8 @@ def test_ggsel_steam_game_gift_delivery_instructs_friend_request(
     assert stats["orders_delivered"] == 1
     assert order.status == "delivered"
     assert order.delivered_code_encrypted_or_masked == "fulfilled_without_code"
-    assert len(marketplace_client.messages) == 2
-    purchase_message = marketplace_client.messages[0][1]
-    delivery_message = marketplace_client.messages[1][1]
-    assert "Please wait while we prepare the delivery." in purchase_message
-    assert "пока мы подготовим доставку" in purchase_message
+    assert len(marketplace_client.messages) == 1
+    delivery_message = marketplace_client.messages[0][1]
     assert "Your game is ready to be delivered!" in delivery_message
     assert "Ваша игра готова к отправке!" in delivery_message
     assert "accept the friend request from our Steam account" in delivery_message
@@ -859,8 +848,8 @@ def test_ggsel_gengine_gift_order_uses_common_supplier_flow(
             },
         }
     ]
-    assert len(marketplace_client.messages) == 2
-    assert "Your game is ready to be delivered!" in marketplace_client.messages[1][1]
+    assert len(marketplace_client.messages) == 1
+    assert "Your game is ready to be delivered!" in marketplace_client.messages[0][1]
 
 
 def test_gengine_gift_delivery_uses_linked_ru_cis_region_for_cis_marketplace_option(
@@ -951,8 +940,8 @@ def test_gengine_gift_delivery_uses_linked_ru_cis_region_for_cis_marketplace_opt
             },
         }
     ]
-    assert len(marketplace_client.messages) == 2
-    assert "Your game is ready to be delivered!" in marketplace_client.messages[1][1]
+    assert len(marketplace_client.messages) == 1
+    assert "Your game is ready to be delivered!" in marketplace_client.messages[0][1]
 
 
 def test_gengine_gift_delivery_uses_ge_api_region_for_cis_marketplace_option(
@@ -1629,7 +1618,7 @@ def test_digiseller_code_posted_before_prompt_delivers_without_prompt(
     assert order.status == "delivered"
     assert len(supplier_client.create_calls) == 1
     assert marketplace_client.delivered_unique_codes == ["6E547DD6ADA24250"]
-    assert len(marketplace_client.messages) == 2
+    assert len(marketplace_client.messages) == 1
     assert all("please paste your unique code" not in message for _, message in marketplace_client.messages)
 
 
