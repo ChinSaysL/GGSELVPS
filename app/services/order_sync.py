@@ -167,8 +167,13 @@ def _to_decimal(value: object) -> Decimal | None:
 def _to_int(value: object) -> int | None:
     if value is None:
         return None
+    text = str(value).strip()
     try:
-        return int(str(value).strip())
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return int(float(text))
     except ValueError:
         return None
 
