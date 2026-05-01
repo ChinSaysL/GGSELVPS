@@ -29,6 +29,14 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("GGSEL_SELLER_ID", "GGSELSellerId"),
     )
+    ggsel_email: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("GGSEL_EMAIL", "GGSELEmail"),
+    )
+    ggsel_password: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("GGSEL_PASSWORD", "GGSELPassword"),
+    )
     ggsel_base_url: str = "https://seller.ggsel.com"
 
     digiseller_api_key: str | None = Field(

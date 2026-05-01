@@ -8,7 +8,8 @@
       "Bash(grep -n \"def set_offer_stock\" c:\\\\\\\\Users\\\\\\\\Abdou\\\\\\\\Documents\\\\\\\\VPS\\\\\\\\app\\\\\\\\clients\\\\\\\\digiseller.py)",
       "Bash(.venv/Scripts/pytest tests/test_clients_stage4.py -k \"ggsel_set_offer_stock\" -v)",
       "Bash(.venv/Scripts/pytest tests/test_stock_sync_service.py -k \"ggsel\" -v)",
-      "WebFetch(domain:api.digiseller.com)"
+      "WebFetch(domain:api.digiseller.com)",
+      "Bash(python -m pytest tests/ -x -q)"
     ]
   }
 }

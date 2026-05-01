@@ -1103,6 +1103,8 @@ def _build_marketplace_clients(settings: Settings) -> dict[str, MarketplaceStock
             settings.ggsel_base_url,
             settings.ggsel_api_key,
             seller_id=settings.ggsel_seller_id,
+            panel_email=settings.ggsel_email,
+            panel_password=settings.ggsel_password,
         )
     return clients
 

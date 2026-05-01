@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+import base64
 import hashlib
+import json as _json
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import httpx
+
+_PANEL_BASE = "https://seller.ggsel.com"
 
 from app.clients.base import APIClientConfigError, APIRequestError, BaseAPIClient
 
@@ -34,6 +38,8 @@ class GGSELClient(BaseAPIClient):
         timeout: float = 20.0,
         task_poll_timeout_seconds: int = 120,
         task_poll_interval_seconds: float = 1.0,
+        panel_email: str | None = None,
+        panel_password: str | None = None,
     ) -> None:
         super().__init__(
             service_name="GGSEL",
@@ -48,6 +54,10 @@ class GGSELClient(BaseAPIClient):
         self._access_token_valid_thru: datetime | None = None
         self._last_apilogin_timestamp: int | None = None
         self._last_apilogin_error: str | None = None
+        self._panel_email = panel_email
+        self._panel_password = panel_password
+        self._panel_cookies: dict[str, str] = {}
+        self._panel_cookies_valid_thru: datetime | None = None
 
     def _build_path(self, endpoint: str) -> str:
         if not endpoint.startswith("/"):
@@ -917,6 +927,167 @@ class GGSELClient(BaseAPIClient):
                 f"GGSEL price update task timed out ({task_id}), last status={status_code}"
             )
         raise APIRequestError(f"GGSEL price update task timed out ({task_id}).")
+
+    @staticmethod
+    def _parse_jwt_exp(token: str) -> datetime | None:
+        try:
+            parts = token.split(".")
+            if len(parts) < 2:
+                return None
+            padding = 4 - len(parts[1]) % 4
+            payload = _json.loads(base64.urlsafe_b64decode(parts[1] + "=" * padding))
+            exp = payload.get("exp")
+            if exp:
+                return datetime.fromtimestamp(int(exp), tz=timezone.utc)
+        except Exception:  # noqa: BLE001
+            pass
+        return None
+
+    def _panel_login(self) -> None:
+        if not self._panel_email or not self._panel_password:
+            raise APIClientConfigError(
+                "GGSEL_EMAIL and GGSEL_PASSWORD are required for stock quantity updates."
+            )
+        try:
+            resp = httpx.post(
+                f"{_PANEL_BASE}/api/auth/login",
+                json={"email": self._panel_email, "password": self._panel_password},
+                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                timeout=20.0,
+                follow_redirects=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise APIRequestError("GGSEL panel login request failed.") from exc
+
+        if resp.is_error:
+            raise APIRequestError(f"GGSEL panel login failed: HTTP {resp.status_code}")
+
+        cookies: dict[str, str] = {}
+        for name in ("ACCESS_TOKEN", "REFRESH_TOKEN", "CHAT_TOKEN"):
+            value = resp.cookies.get(name)
+            if value:
+                cookies[name] = value
+
+        if "ACCESS_TOKEN" not in cookies:
+            raise APIRequestError("GGSEL panel login did not return ACCESS_TOKEN cookie.")
+
+        self._panel_cookies = cookies
+        self._panel_cookies_valid_thru = self._parse_jwt_exp(cookies.get("CHAT_TOKEN", ""))
+
+    def _panel_session_is_valid(self) -> bool:
+        if not self._panel_cookies.get("ACCESS_TOKEN"):
+            return False
+        if self._panel_cookies_valid_thru is None:
+            return True
+        return self._panel_cookies_valid_thru > datetime.now(timezone.utc) + self._TOKEN_REFRESH_MARGIN
+
+    def _ensure_panel_session(self) -> dict[str, str]:
+        if not self._panel_session_is_valid():
+            self._panel_login()
+        return self._panel_cookies
+
+    def _panel_request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        cookies: dict[str, str],
+    ) -> dict[str, Any]:
+        try:
+            resp = httpx.request(
+                method=method,
+                url=f"{_PANEL_BASE}{path}",
+                cookies=cookies,
+                json=json_body,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "locale": "en",
+                    "Origin": _PANEL_BASE,
+                    "Referer": f"{_PANEL_BASE}/",
+                },
+                timeout=20.0,
+                follow_redirects=False,
+            )
+        except Exception as exc:  # noqa: BLE001
+            raise APIRequestError(f"GGSEL panel {method} {path} failed.") from exc
+
+        if resp.is_error:
+            raise APIRequestError(
+                f"GGSEL panel returned HTTP {resp.status_code} for {method} {path}: {resp.text[:200]}"
+            )
+
+        try:
+            result = resp.json()
+        except ValueError:
+            return {"status": "ok"}
+        if isinstance(result, dict):
+            return result
+        return {"status": "ok", "response": result}
+
+    def set_offer_stock(
+        self,
+        offer_id: str,
+        stock_qty: int,
+        *,
+        min_purchase_quantity: int | None = None,
+    ) -> dict[str, Any]:
+        cookies = self._ensure_panel_session()
+
+        try:
+            offer_resp = self._panel_request("GET", f"/api/v1/offers/{offer_id}", cookies=cookies)
+        except APIRequestError as exc:
+            if "HTTP 401" in str(exc):
+                self._panel_cookies = {}
+                cookies = self._ensure_panel_session()
+                offer_resp = self._panel_request("GET", f"/api/v1/offers/{offer_id}", cookies=cookies)
+            else:
+                raise
+
+        offer_data = offer_resp.get("data", offer_resp)
+        internal_id = offer_data.get("id")
+        if not internal_id:
+            raise APIRequestError(f"GGSEL could not resolve internal offer ID for {offer_id}.")
+
+        current_price = offer_data.get("price")
+        if current_price is None:
+            raise APIRequestError(f"GGSEL could not determine current price for offer {offer_id}.")
+
+        target_min = min_purchase_quantity if min_purchase_quantity is not None else int(offer_data.get("min_quantity", 1))
+        payload = {
+            "offer": {
+                "max_quantity": int(stock_qty),
+                "quantity": int(stock_qty),
+                "min_quantity": int(target_min),
+                "unlimited_quantity": False,
+                "price": float(current_price),
+            }
+        }
+
+        try:
+            result = self._panel_request(
+                "PATCH",
+                f"/api/v1/offers/{internal_id}/update_price",
+                json_body=payload,
+                cookies=cookies,
+            )
+        except APIRequestError as exc:
+            if "HTTP 401" in str(exc):
+                self._panel_cookies = {}
+                cookies = self._ensure_panel_session()
+                result = self._panel_request(
+                    "PATCH",
+                    f"/api/v1/offers/{internal_id}/update_price",
+                    json_body=payload,
+                    cookies=cookies,
+                )
+            else:
+                raise
+
+        if isinstance(result, dict):
+            result.setdefault("status", "ok")
+        return result
 
     def set_offer_price(
         self,
