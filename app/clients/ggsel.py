@@ -976,58 +976,6 @@ class GGSELClient(BaseAPIClient):
             return task_status
         return response
 
-    def set_offer_stock(
-        self,
-        offer_id: str,
-        stock_qty: int,
-        *,
-        min_purchase_quantity: int | None = None,
-    ) -> dict[str, Any]:
-        request_item: dict[str, Any] = {
-            "product_id": int(offer_id),
-            "unit_cnt_max": int(stock_qty),
-        }
-        if min_purchase_quantity is not None and min_purchase_quantity > 0:
-            request_item["unit_cnt_min"] = int(min_purchase_quantity)
-        request_payload: list[dict[str, Any]] = [request_item]
-        last_auth_error: APIRequestError | None = None
-        refresh_rounds = (False, True) if self.seller_id else (False,)
-        for force_refresh in refresh_rounds:
-            token = self._get_access_token(force_refresh=force_refresh)
-            try:
-                response = self._request_price_update(
-                    request_payload=request_payload,
-                    token=token,
-                )
-            except APIRequestError as exc:
-                if "HTTP 401" in str(exc) or "HTTP 403" in str(exc):
-                    last_auth_error = exc
-                    continue
-                raise
-
-            task_id = self._extract_task_id(response)
-            if task_id:
-                task_status = self._wait_for_price_update_task(task_id=task_id, token=token)
-                task_status.setdefault("task_id", task_id)
-                return task_status
-            return response
-
-        if last_auth_error is not None:
-            raise last_auth_error
-        response = self._request_price_update(
-            request_payload=request_payload,
-            token=self._get_access_token(),
-        )
-        task_id = self._extract_task_id(response)
-        if task_id:
-            task_status = self._wait_for_price_update_task(
-                task_id=task_id,
-                token=self._get_access_token(),
-            )
-            task_status.setdefault("task_id", task_id)
-            return task_status
-        return response
-
     @classmethod
     def _extract_sales_items(cls, payload: object) -> list[dict[str, Any]]:
         if isinstance(payload, list):
