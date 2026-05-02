@@ -749,7 +749,22 @@ class GGSELClient(BaseAPIClient):
             raise NotImplementedError(
                 "marketplace_disable_not_supported: GGSEL variant visibility requires panel credentials."
             )
-        internal_id, option_id, option = self._panel_option_for_variant(offer_id, variant_id)
+        try:
+            internal_id, option_id, option = self._panel_option_for_variant(offer_id, variant_id)
+        except APIRequestError as exc:
+            if "not found in panel offer" in str(exc):
+                if not visible:
+                    # Variant no longer exists on GGSEL — already effectively archived.
+                    return {
+                        "status": "ok",
+                        "offer_id": offer_id,
+                        "variant_id": variant_id,
+                        "visible": False,
+                        "unchanged": True,
+                        "reason": "variant_not_found_assumed_archived",
+                    }
+                raise
+            raise
         body = self._build_panel_option_put_body(option, variant_id, archived=not visible)
         self._panel_request_with_reauth(
             "PUT",
@@ -1079,9 +1094,18 @@ class GGSELClient(BaseAPIClient):
                 break
             for item in items:
                 if str(item.get("ggsel_id", "")) == str(public_offer_id):
-                    internal_id = item["id"]
+                    internal_id = item.get("id")
+                    if internal_id is None:
+                        raise APIRequestError(
+                            f"GGSEL panel returned offer with ggsel_id={public_offer_id} but no internal id."
+                        )
                     full = self._panel_request("GET", f"/api/v1/offers/{internal_id}", cookies=cookies)
-                    return full.get("data", full)
+                    data = full.get("data", full)
+                    if not isinstance(data, dict):
+                        raise APIRequestError(
+                            f"GGSEL panel returned unexpected response for offer {internal_id}: {data!r}"
+                        )
+                    return data
             page += 1
 
         raise APIRequestError(f"GGSEL offer {public_offer_id} not found in seller panel.")
