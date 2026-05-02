@@ -716,18 +716,20 @@ class GGSELClient(BaseAPIClient):
             "kind", "position", "title_ru", "title_en", "required",
             "hide_price_modifier", "splitted_products",
         )
+        _VARIANT_FIELDS = (
+            "id", "position", "title_ru", "title_en",
+            "discount_kind", "impact_variant", "default", "price",
+        )
         option_body: dict[str, Any] = {k: option[k] for k in _OPTION_FIELDS if k in option}
         raw_variants = option.get("variants") or option.get("variants_attributes") or []
         variants_out = []
         for v in raw_variants:
             if not isinstance(v, dict):
                 continue
-            v_copy = dict(v)
+            v_copy = {k: v[k] for k in _VARIANT_FIELDS if k in v}
             if v_copy.get("id") == target_variant_id:
                 if archived:
                     v_copy["status"] = "archived"
-                else:
-                    v_copy.pop("status", None)
             variants_out.append(v_copy)
         option_body["variants_attributes"] = variants_out
         return {"option": option_body}
