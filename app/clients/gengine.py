@@ -101,6 +101,22 @@ class GEngineClient(BaseAPIClient):
                 return text
         return None
 
+    @staticmethod
+    def _parse_availability(payload: dict[str, Any]) -> bool:
+        _UNAVAILABLE = {"inactive", "not_available", "unavailable", "disabled", "out_of_stock"}
+        _FALSE_STRINGS = {"0", "false", "no", "off"}
+        status = str(payload.get("status") or "").strip().lower()
+        if status in _UNAVAILABLE:
+            return False
+        for key in ("is_available", "available"):
+            raw = payload.get(key)
+            if raw is None:
+                continue
+            if isinstance(raw, (bool, int)):
+                return bool(raw)
+            return str(raw).strip().lower() not in _FALSE_STRINGS
+        return True
+
     def _extract_base_products(self, response: dict[str, Any]) -> list[dict[str, Any]]:
         data = response.get("data")
         if isinstance(data, dict):
@@ -473,7 +489,7 @@ class GEngineClient(BaseAPIClient):
                 "denomination": denomination_name,
                 "cost_usd": price,
                 "stock": self._first_non_empty_str(denomination, ("stock", "quantity")) or "unlimited",
-                "is_available": True,
+                "is_available": self._parse_availability(denomination),
             }
         )
         return product
@@ -615,11 +631,11 @@ class GEngineClient(BaseAPIClient):
                     continue
                 region_id = region.replace(":", "-")
                 title = f"{app_name} - {package_name}" if package_name != app_name else app_name
+                merged = {**app, **package, **price}
+                is_available = self._parse_availability(merged)
                 products.append(
                     {
-                        **app,
-                        **package,
-                        **price,
+                        **merged,
                         "id": f"gift:{app_id}:{package_id}:{region_id}",
                         "source_type": "gift",
                         "gift_app_id": str(app_id),
@@ -634,7 +650,7 @@ class GEngineClient(BaseAPIClient):
                         "denomination": region,
                         "cost_usd": cost,
                         "stock": "unlimited",
-                        "is_available": True,
+                        "is_available": is_available,
                         "source_slug": source_slug,
                         "base_product_id": str(app_id),
                         "gift_package_name": package_name,
