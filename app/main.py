@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Any, Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query
@@ -10,7 +11,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from app.clients import DigisellerClient, GEngineClient
+from app.clients import DigisellerClient, GEngineClient, GGSELClient
 from app.config import get_settings
 from app.db import get_db, init_db
 from app.models import BalanceSnapshot, MarketplaceOffer, Order, ProductMapping, SupplierProduct
@@ -72,6 +73,49 @@ class ManualOfferLinkRequest(BaseModel):
     max_price: Decimal | None = None
     manage_stock_quantity: bool = False
     min_purchase_quantity: int | None = None
+
+
+class RechargeVariantSpec(BaseModel):
+    variant_id: int
+    variant_name: str
+
+
+class AutoLinkRechargeDenominationsRequest(BaseModel):
+    marketplace: Literal["digiseller", "ggsel"]
+    marketplace_offer_id: str
+    supplier_service_id: str  # G-Engine service ID (e.g., "5")
+    variants: list[RechargeVariantSpec]
+    marketplace_commission_percent: Decimal | None = None
+    payment_system_commission_percent: Decimal | None = None
+    manage_stock_quantity: bool = False
+    min_purchase_quantity: int | None = None
+    dry_run: bool = False
+
+
+def _parse_additive_quantity(value: str | None) -> Decimal | None:
+    """Extract total quantity, summing additive notation: '32 + 3 Diamonds' → Decimal('35')."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    compact = re.sub(r"[\s  ]+", " ", text).strip()
+    if "+" in compact:
+        chain_match = re.match(r"^(\d+(?:[.,]\d+)?)(?:\s*\+\s*\d+(?:[.,]\d+)?)+", compact)
+        if chain_match:
+            nums = re.findall(r"\d+(?:[.,]\d+)?", chain_match.group(0))
+            try:
+                total = sum(Decimal(n.replace(",", ".")) for n in nums)
+                if total > 0:
+                    return total
+            except (InvalidOperation, ValueError):
+                pass
+    match = re.search(r"\d+(?:[.,]\d+)?", compact)
+    if match is None:
+        return None
+    try:
+        parsed = Decimal(match.group(0).replace(",", "."))
+        return parsed if parsed > 0 else None
+    except (InvalidOperation, ValueError):
+        return None
 
 
 def _serialize_datetime(value: datetime | None) -> str | None:
@@ -541,4 +585,127 @@ def manual_link_offer(
             "manage_stock_quantity": mapping.manage_stock_quantity,
             "min_purchase_quantity": mapping.min_purchase_quantity,
         },
+    }
+
+
+@app.post("/offers/auto-link-recharge-denominations")
+def auto_link_recharge_denominations(
+    payload: AutoLinkRechargeDenominationsRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Auto-match GGSEL/Digiseller variants to G-Engine denominations by numeric quantity.
+
+    Handles additive notation: GGSEL variant '35 Diamonds' matches G-Engine denomination
+    '32 + 3 Diamonds' because 32+3=35.
+    """
+    service_prefix = f"recharge:{payload.supplier_service_id}:"
+    denom_stmt = select(SupplierProduct).where(
+        SupplierProduct.supplier == "gengine",
+        SupplierProduct.supplier_product_id.like(service_prefix + "%"),
+    )
+    denominations = db.execute(denom_stmt).scalars().all()
+    if not denominations:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No G-Engine denominations found for service '{payload.supplier_service_id}'.",
+        )
+
+    denom_by_qty: dict[Decimal, SupplierProduct] = {}
+    for denom in denominations:
+        qty = _parse_additive_quantity(denom.denomination)
+        if qty is not None:
+            denom_by_qty[qty] = denom
+
+    offer_stmt = select(MarketplaceOffer).where(
+        MarketplaceOffer.marketplace == payload.marketplace,
+        MarketplaceOffer.marketplace_offer_id == payload.marketplace_offer_id,
+    )
+    offer = db.execute(offer_stmt).scalars().first()
+    if offer is None:
+        raise HTTPException(
+            status_code=404,
+            detail="Marketplace offer not found. Create it first via /offers/manual-link.",
+        )
+
+    results: list[dict[str, Any]] = []
+    matched = 0
+    unmatched = 0
+
+    for variant in payload.variants:
+        variant_qty = _parse_additive_quantity(variant.variant_name)
+        matched_denom = denom_by_qty.get(variant_qty) if variant_qty is not None else None
+
+        if matched_denom is None:
+            results.append({
+                "variant_id": variant.variant_id,
+                "variant_name": variant.variant_name,
+                "status": "unmatched",
+                "reason": "no_denomination_with_matching_quantity",
+            })
+            unmatched += 1
+            continue
+
+        if payload.dry_run:
+            results.append({
+                "variant_id": variant.variant_id,
+                "variant_name": variant.variant_name,
+                "status": "would_link",
+                "supplier_product_id": matched_denom.id,
+                "denomination": matched_denom.denomination,
+                "cost_usd": _serialize_decimal(matched_denom.cost_usd),
+            })
+            matched += 1
+            continue
+
+        mapping_stmt = select(ProductMapping).where(
+            ProductMapping.supplier_product_id == matched_denom.id,
+            ProductMapping.marketplace_offer_id == offer.id,
+        )
+        mapping = db.execute(mapping_stmt).scalars().first()
+        created = False
+        if mapping is None:
+            mapping = ProductMapping(
+                supplier_product_id=matched_denom.id,
+                marketplace_offer_id=offer.id,
+                enabled=True,
+                marketplace_variant_id=variant.variant_id,
+                marketplace_variant_name=variant.variant_name,
+                marketplace_commission_percent=payload.marketplace_commission_percent,
+                payment_system_commission_percent=payload.payment_system_commission_percent,
+                manage_stock_quantity=payload.manage_stock_quantity,
+                min_purchase_quantity=payload.min_purchase_quantity,
+            )
+            db.add(mapping)
+            created = True
+        else:
+            mapping.marketplace_variant_id = variant.variant_id
+            mapping.marketplace_variant_name = variant.variant_name
+            if payload.marketplace_commission_percent is not None:
+                mapping.marketplace_commission_percent = payload.marketplace_commission_percent
+            if payload.payment_system_commission_percent is not None:
+                mapping.payment_system_commission_percent = payload.payment_system_commission_percent
+            mapping.manage_stock_quantity = payload.manage_stock_quantity
+            if payload.min_purchase_quantity is not None:
+                mapping.min_purchase_quantity = payload.min_purchase_quantity
+            db.add(mapping)
+
+        results.append({
+            "variant_id": variant.variant_id,
+            "variant_name": variant.variant_name,
+            "status": "created" if created else "updated",
+            "supplier_product_id": matched_denom.id,
+            "denomination": matched_denom.denomination,
+            "cost_usd": _serialize_decimal(matched_denom.cost_usd),
+        })
+        matched += 1
+
+    if not payload.dry_run:
+        db.commit()
+
+    return {
+        "status": "ok",
+        "dry_run": payload.dry_run,
+        "matched": matched,
+        "unmatched": unmatched,
+        "results": results,
     }

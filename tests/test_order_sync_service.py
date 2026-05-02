@@ -15,7 +15,7 @@ from app.config import Settings
 from app.db import Base
 from app.models import MarketplaceOffer, Order, ProductMapping, SupplierProduct
 from app.services.provider_status import SUPPLIER_PROVIDER_UNAVAILABLE_NOTIFIED
-from app.services.order_sync import process_digiseller_unique_code, retry_order, sync_orders
+from app.services.order_sync import _parse_additive_quantity, process_digiseller_unique_code, retry_order, sync_orders
 
 
 def _db_session() -> Generator[Session, None, None]:
@@ -1757,3 +1757,159 @@ def test_order_sync_poll_window_includes_configured_future_skew(
     assert date_start is not None
     assert date_finish is not None
     assert date_finish - datetime.now(date_finish.tzinfo) > timedelta(hours=5, minutes=55)
+
+
+def test_parse_additive_quantity_sums_additive_notation() -> None:
+    assert _parse_additive_quantity("32 + 3 Diamonds") == Decimal("35")
+    assert _parse_additive_quantity("50 + 5 Diamonds") == Decimal("55")
+    assert _parse_additive_quantity("35 Diamonds") == Decimal("35")
+    assert _parse_additive_quantity("100 Gold") == Decimal("100")
+    assert _parse_additive_quantity("Weekly Pass") is None
+    assert _parse_additive_quantity("") is None
+    assert _parse_additive_quantity(None) is None
+    assert _parse_additive_quantity("10 + 2 + 3 Stars") == Decimal("15")
+
+
+def test_ggsel_recharge_variant_matches_additive_denomination_name(
+    db_session: Session,
+) -> None:
+    """Sale variant '35 Diamonds' matches mapping with name '32 + 3 Diamonds' via additive sum."""
+    raw_payload_json = (
+        '{"source_type":"recharge","recharge_product_id":"5",'
+        '"recharge_denomination_id":"101","recharge_param_keys":["Account"]}'
+    )
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="recharge:5:101",
+        title="Mobile Legends 35 Diamonds",
+        category="Recharge",
+        denomination="32 + 3 Diamonds",
+        region="Russia",
+        cost_usd=Decimal("0.6834"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json=raw_payload_json,
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="ggsel",
+        marketplace_offer_id="102270001",
+        supplier_product_id=supplier.id,
+        title="MLBB Diamonds Russia",
+        price=Decimal("0.80"),
+        currency="USD",
+        is_enabled=True,
+        requires_buyer_input=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+
+    db_session.add(
+        ProductMapping(
+            supplier_product_id=supplier.id,
+            marketplace_offer_id=offer.id,
+            enabled=True,
+            marketplace_variant_id=None,
+            marketplace_variant_name="32 + 3 Diamonds",
+        )
+    )
+    db_session.commit()
+
+    # GGSEL sale with variant_text "35 Diamonds" (sum of 32+3) but no matching variant_id
+    sale = {
+        "invoice_id": "9020",
+        "id_goods": "102270001",
+        "date_pay": "2026-05-01 10:00:00",
+        "amount": "0.80",
+        "denomination": "35 Diamonds",
+    }
+    supplier_client = FakeSupplierOrderClient(
+        create_response={"id": 8001, "status": "shipped", "supplier_order_id": "recharge:8001"}
+    )
+    marketplace_client = FakeMarketplaceOrderClient(sales=[sale], order_payloads={"9020": sale})
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"ggsel": marketplace_client},
+    )
+
+    assert stats["orders_delivered"] == 1
+    assert supplier_client.create_calls[0]["product_id"] == "recharge:5:101"
+
+
+def test_ggsel_recharge_variant_id_with_additive_text_fallback(
+    db_session: Session,
+) -> None:
+    """When variant_id doesn't match any mapping, fall back to additive quantity from variant_text."""
+    raw_payload_json = (
+        '{"source_type":"recharge","recharge_product_id":"5",'
+        '"recharge_denomination_id":"101","recharge_param_keys":["Account"]}'
+    )
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="recharge:5:101",
+        title="Mobile Legends 35 Diamonds",
+        category="Recharge",
+        denomination="32 + 3 Diamonds",
+        region="Russia",
+        cost_usd=Decimal("0.6834"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json=raw_payload_json,
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="ggsel",
+        marketplace_offer_id="102270002",
+        supplier_product_id=supplier.id,
+        title="MLBB Diamonds Russia",
+        price=Decimal("0.80"),
+        currency="USD",
+        is_enabled=True,
+        requires_buyer_input=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+
+    db_session.add(
+        ProductMapping(
+            supplier_product_id=supplier.id,
+            marketplace_offer_id=offer.id,
+            enabled=True,
+            marketplace_variant_id=None,
+            marketplace_variant_name="32 + 3 Diamonds",
+        )
+    )
+    db_session.commit()
+
+    # GGSEL sale with a variant_id that has no matching mapping, but text "35 Diamonds" can match
+    sale = {
+        "invoice_id": "9021",
+        "id_goods": "102270002",
+        "date_pay": "2026-05-01 10:00:00",
+        "amount": "0.80",
+        "options": [
+            {"name": "Diamonds", "user_data": "35 Diamonds", "user_data_id": 99999},
+            {"name": "Account", "user_data": "player123", "user_data_id": None},
+        ],
+    }
+    supplier_client = FakeSupplierOrderClient(
+        create_response={"id": 8002, "status": "shipped", "supplier_order_id": "recharge:8002"}
+    )
+    marketplace_client = FakeMarketplaceOrderClient(sales=[sale], order_payloads={"9021": sale})
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"ggsel": marketplace_client},
+    )
+
+    assert stats["orders_delivered"] == 1
+    assert supplier_client.create_calls[0]["product_id"] == "recharge:5:101"

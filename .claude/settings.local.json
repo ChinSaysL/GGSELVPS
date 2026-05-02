@@ -13,7 +13,8 @@
       "Bash(python -m pytest tests/test_order_sync_service.py -x -q)",
       "Bash(python -m pytest -q)",
       "Bash(python -m pytest tests/test_stock_sync_service.py -x -q)",
-      "Bash(python -m pytest tests/test_stock_sync_service.py tests/test_order_sync_service.py -q)"
+      "Bash(python -m pytest tests/test_stock_sync_service.py tests/test_order_sync_service.py -q)",
+      "Bash(python -c \"from app.main import app; print\\('OK'\\)\")"
     ]
   }
 }

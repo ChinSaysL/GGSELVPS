@@ -238,6 +238,32 @@ def _extract_numeric_quantity(value: str) -> str | None:
     return format(parsed.normalize(), "f")
 
 
+def _parse_additive_quantity(value: str | None) -> Decimal | None:
+    """Extract total quantity, summing additive notation: '32 + 3 Diamonds' \u2192 Decimal('35')."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    compact = re.sub(r"[\s\u00A0\u202F]+", " ", text).strip()
+    if "+" in compact:
+        chain_match = re.match(r"^(\d+(?:[.,]\d+)?)(?:\s*\+\s*\d+(?:[.,]\d+)?)+", compact)
+        if chain_match:
+            nums = re.findall(r"\d+(?:[.,]\d+)?", chain_match.group(0))
+            try:
+                total = sum(Decimal(n.replace(",", ".")) for n in nums)
+                if total > 0:
+                    return total
+            except (InvalidOperation, ValueError):
+                pass
+    match = re.search(r"\d+(?:[.,]\d+)?", compact)
+    if match is None:
+        return None
+    try:
+        parsed = Decimal(match.group(0).replace(",", "."))
+        return parsed if parsed > 0 else None
+    except (InvalidOperation, ValueError):
+        return None
+
+
 def _canonical_recharge_option_key(label: str | None, fallback: str) -> str:
     raw_label = str(label or "").strip()
     lowered = raw_label.lower()
@@ -578,6 +604,14 @@ def _select_mapping(
         fallback_mapping = _single_mapping_fallback_for_recharge()
         if fallback_mapping is not None:
             return fallback_mapping, None
+        # Additive quantity fallback when variant_id doesn't match any mapping:
+        # "35 Diamonds" (user_data) matches mapping with name "32 + 3 Diamonds" (32+3=35)
+        if sale.variant_text:
+            sale_qty = _parse_additive_quantity(sale.variant_text)
+            if sale_qty is not None:
+                for mapping in enabled_mappings:
+                    if _parse_additive_quantity(mapping.marketplace_variant_name) == sale_qty:
+                        return mapping, None
         return None, f"variant_mapping_not_found:{sale.variant_id}"
 
     if sale.variant_text:
@@ -585,6 +619,12 @@ def _select_mapping(
         for mapping in enabled_mappings:
             if _normalized_text(mapping.marketplace_variant_name) == sale_variant_text:
                 return mapping, None
+        # Additive quantity fallback: "35 Diamonds" matches "32 + 3 Diamonds" (32+3=35)
+        sale_qty = _parse_additive_quantity(sale.variant_text)
+        if sale_qty is not None:
+            for mapping in enabled_mappings:
+                if _parse_additive_quantity(mapping.marketplace_variant_name) == sale_qty:
+                    return mapping, None
 
     if len(enabled_mappings) == 1:
         return enabled_mappings[0], None
