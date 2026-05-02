@@ -2152,10 +2152,19 @@ def _product_variant_key(product: Any) -> str:
     gift_region_key = _product_gift_region_key(product)
     if gift_region_key is not None:
         return gift_region_key
+    payload = _raw_payload_dict(product)
+    alias_key = (
+        _variant_alias_key(getattr(product, "denomination", None))
+        or _variant_alias_key(payload.get("denomination"))
+        or _variant_alias_key(getattr(product, "title", None))
+        or _variant_alias_key(payload.get("title"))
+        or _variant_alias_key(payload.get("name"))
+    )
+    if alias_key is not None:
+        return _normalize_search_text(alias_key)
     signature = _product_denomination_signature(product)
     if signature:
         return signature
-    payload = _raw_payload_dict(product)
     quantity_key = _quantity_match_key_from_texts(
         str(getattr(product, "denomination", "") or ""),
         str(payload.get("denomination") or ""),
@@ -2614,6 +2623,8 @@ def _has_alpha_token(value: str | None) -> bool:
 def _quantity_match_key(value: str | None) -> str | None:
     if not value:
         return None
+    if _extract_denomination_signature(value):
+        return None
     quantity = _parse_additive_quantity(value)
     if quantity is None:
         return None
@@ -2640,7 +2651,7 @@ def _extract_denomination_signature(*texts: str | None) -> str | None:
         for match in amount_first_pattern.finditer(normalized_text):
             amount = _normalize_amount_text(match.group(1))
             currency = _normalize_denomination_currency_code(match.group(2))
-            if amount and currency:
+            if amount and currency in _CURRENCY_REGION_TOKENS:
                 return f"{amount} {currency}"
         for match in currency_first_pattern.finditer(normalized_text):
             currency = _normalize_denomination_currency_code(match.group(1))
@@ -2654,6 +2665,7 @@ def _extract_denomination_signature(*texts: str | None) -> str | None:
 
 _VARIANT_ALIAS_KEYS = {
     "недельный абонемент": "weekly pass",
+    "weekly pass": "weekly pass",
 }
 
 
