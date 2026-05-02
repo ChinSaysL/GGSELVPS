@@ -1328,6 +1328,44 @@ def test_auto_match_option_entries_matches_additive_quantity_for_recharge() -> N
     assert ambiguous == []
 
 
+def test_auto_match_option_entries_additive_with_region_payload_does_not_produce_rub_key() -> None:
+    """Real DB products have raw_payload_json with a 'value' field and region 'russia'.
+    Without the quantity-key-first fix, _product_denomination_signature combined the
+    standalone value (35) with the region currency hint (RUB) → "35 RUB", which never
+    matched the Digiseller Russian label key "qty:35"."""
+    import json
+
+    products = [
+        SimpleNamespace(
+            id=1,
+            title="Mobile Legends Bang Bang (Russia)",
+            category="Recharge",
+            denomination="32 + 3 Diamonds",
+            region="Russia",
+            supplier_product_id="recharge:5:denom1",
+            raw_payload_json=json.dumps({
+                "source_type": "recharge",
+                "recharge_product_id": "5",
+                "recharge_denomination_id": "denom1",
+                "denomination": "32 + 3 Diamonds",
+                "value": "35",
+                "source_slug": "mobile-legends-bang-bang-russia",
+            }),
+        ),
+    ]
+    entries = [
+        {
+            "option_label": "Количество",
+            "variant_value": "35 бриллиантов",
+        }
+    ]
+
+    matches, unmatched, _ = manage._auto_match_option_entries_to_products(products, entries)
+
+    assert [item["product"].id for item in matches] == [1]
+    assert unmatched == []
+
+
 def test_auto_match_option_entries_matches_weekly_pass_alias() -> None:
     products = [
         SimpleNamespace(

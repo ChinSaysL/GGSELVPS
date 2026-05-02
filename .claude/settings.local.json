@@ -14,7 +14,8 @@
       "Bash(python -m pytest -q)",
       "Bash(python -m pytest tests/test_stock_sync_service.py -x -q)",
       "Bash(python -m pytest tests/test_stock_sync_service.py tests/test_order_sync_service.py -q)",
-      "Bash(python -c \"from app.main import app; print\\('OK'\\)\")"
+      "Bash(python -c \"from app.main import app; print\\('OK'\\)\")",
+      "Bash(python -m pytest tests/test_manage.py -x -q -k \"additive or weekly_pass or alias\")"
     ]
   }
 }

@@ -2162,9 +2162,12 @@ def _product_variant_key(product: Any) -> str:
     )
     if alias_key is not None:
         return _normalize_search_text(alias_key)
-    signature = _product_denomination_signature(product)
-    if signature:
-        return signature
+    # Quantity key takes priority over denomination signature so that game-item
+    # denominations like "32 + 3 Diamonds" produce "qty:35" rather than the
+    # misleading "35 RUB" signature that the region hint can generate.
+    # _quantity_match_key returns None for pure financial denominations (e.g.
+    # "250 TRY") because _extract_denomination_signature fires first and blocks
+    # the path, so those still fall through to the signature path below.
     quantity_key = _quantity_match_key_from_texts(
         str(getattr(product, "denomination", "") or ""),
         str(payload.get("denomination") or ""),
@@ -2174,6 +2177,9 @@ def _product_variant_key(product: Any) -> str:
     )
     if quantity_key:
         return quantity_key
+    signature = _product_denomination_signature(product)
+    if signature:
+        return signature
     return _normalize_search_text(
         " ".join(
             [
