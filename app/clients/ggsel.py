@@ -383,7 +383,10 @@ class GGSELClient(BaseAPIClient):
         # Slow path: full panel lookup.
         cookies = self._ensure_panel_session()
         offer_data = self._panel_get_offer_data(public_offer_id, cookies=cookies)
-        return int(offer_data["id"])
+        raw_id = offer_data.get("id")
+        if raw_id is None:
+            raise APIRequestError(f"GGSEL panel did not return an internal ID for offer {public_offer_id}.")
+        return int(raw_id)
 
     def _panel_batch_action(self, public_offer_id: str, *, action: str) -> None:
         """Execute a panel batch action (pause/activate) on a single offer."""
