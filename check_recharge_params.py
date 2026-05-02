@@ -26,14 +26,13 @@ from decimal import Decimal
 from sqlalchemy.orm import Session
 
 from app.clients.gengine import GEngineClient
-from app.db import get_session_factory
+from app.db import SessionLocal
 from app.models import MarketplaceOffer, ProductMapping, SupplierProduct
 from app.services.order_sync import _normalize_input_key
 
 
 def _get_session() -> Session:
-    factory = get_session_factory()
-    return factory()
+    return SessionLocal()
 
 
 def _find_mapping(session: Session, offer_id: str, marketplace: str) -> ProductMapping | None:
@@ -50,7 +49,8 @@ def _find_mapping(session: Session, offer_id: str, marketplace: str) -> ProductM
 
 
 def _check(offer_id: str, marketplace: str) -> None:
-    with _get_session() as session:
+    session = _get_session()
+    try:
         mapping = _find_mapping(session, offer_id, marketplace)
         if mapping is None:
             print(f"[ERROR] No ProductMapping found for {marketplace} offer {offer_id!r}.")
