@@ -769,7 +769,7 @@ def sync_offer_stock(
                 if in_stock:
                     any_in_stock = True
 
-            if not any_in_stock and marketplace == "digiseller":
+            if not any_in_stock:
                 no_stock_parent_detail: dict[str, Any] = {
                     "offer_id": offer.id,
                     "marketplace": offer.marketplace,
