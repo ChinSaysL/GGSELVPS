@@ -1054,6 +1054,22 @@ def sync_offer_stock(
 
         mapping = managed[0]
         supplier = mapping.supplier_product
+        # Refresh cost_usd from the supplier API for variable recharge products
+        # (service_id format: "recharge:{id}" with no denomination suffix).
+        supplier_id_parts = (supplier.supplier_product_id or "").split(":")
+        if (
+            len(supplier_id_parts) == 2
+            and supplier_id_parts[0] == "recharge"
+            and hasattr(supplier_balance_client, "get_recharge_service_rate")
+        ):
+            try:
+                fresh_rate = supplier_balance_client.get_recharge_service_rate(supplier_id_parts[1])
+            except Exception:  # noqa: BLE001
+                fresh_rate = None
+            if fresh_rate is not None and fresh_rate > 0:
+                supplier.cost_usd = fresh_rate
+                db.add(supplier)
+                db.flush()
         stock_qty = _compute_managed_stock_quantity(
             usable_balance_usd=usable_balance_usd,
             cost_per_unit_usd=supplier.cost_usd,

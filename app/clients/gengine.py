@@ -270,6 +270,30 @@ class GEngineClient(BaseAPIClient):
             products.extend(self._expand_recharge_service(service, include_unpriced=False))
         return products
 
+    def _extract_recharge_rate(self, service: dict[str, Any]) -> Decimal | None:
+        """Extract cost-per-unit from a recharge service payload, checking all known fields."""
+        for source in (service, service.get("unfixed_details") or {}):
+            if not isinstance(source, dict):
+                continue
+            rate_str = self._first_non_empty_str(
+                source, ("cost_usd", "cost", "price_usd", "price", "rate")
+            )
+            if rate_str:
+                try:
+                    val = Decimal(rate_str)
+                    if val > 0:
+                        return val
+                except (InvalidOperation, ValueError):
+                    continue
+        return None
+
+    def get_recharge_service_rate(self, service_id: str) -> Decimal | None:
+        """Return the current cost per unit for a variable recharge service, or None."""
+        service = self._find_recharge_service(service_id, search=service_id)
+        if service is None:
+            return None
+        return self._extract_recharge_rate(service)
+
     def list_recharge_service_products(
         self,
         service_id: str,

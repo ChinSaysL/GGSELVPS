@@ -863,6 +863,78 @@ def test_stock_sync_calls_set_offer_stock_for_ggsel(
     assert client.stock_calls == [("102263901", 1700, 55)]
 
 
+def test_stock_sync_refreshes_recharge_cost_from_supplier_api(
+    db_session: Session,
+) -> None:
+    """Stock sync refreshes cost_usd from the supplier API before computing stock qty."""
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="recharge:3",
+        title="Steam KZT",
+        category="Recharge",
+        denomination="Variable KZT",
+        region=None,
+        cost_usd=Decimal("0.0010"),  # stale rate stored in DB
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json="{}",
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="ggsel",
+        marketplace_offer_id="102270001",
+        supplier_product_id=supplier.id,
+        title="Steam KZT top-up",
+        price=Decimal("1.00"),
+        currency="RUB",
+        is_enabled=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+
+    db_session.add(
+        ProductMapping(
+            supplier_product_id=supplier.id,
+            marketplace_offer_id=offer.id,
+            enabled=True,
+            manage_stock_quantity=True,
+            min_purchase_quantity=100,
+        )
+    )
+    db_session.commit()
+
+    @dataclass
+    class FakeRateBalanceClient:
+        payload: dict[str, Any]
+
+        def get_balance(self) -> dict[str, Any]:
+            return self.payload
+
+        def get_recharge_service_rate(self, service_id: str) -> Decimal | None:
+            if service_id == "3":
+                return Decimal("0.0022")
+            return None
+
+        def close(self) -> None:
+            return None
+
+    client = FakeDigisellerStockClient()
+    # usable = 100 * 0.85 = 85; refreshed rate = 0.0022 → stock = floor(85 / 0.0022) = 38636
+    stats = sync_offer_stock(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_balance_client=FakeRateBalanceClient({"balance": "100.00"}),
+        marketplace_clients={"ggsel": client},
+    )
+
+    assert stats["errors"] == 0
+    assert client.stock_calls == [("102270001", 38636, 100)]
+    db_session.refresh(supplier)
+    assert supplier.cost_usd == Decimal("0.0022")
+
+
 def test_stock_sync_disables_listing_instead_of_setting_zero_stock(
     db_session: Session,
 ) -> None:
