@@ -208,14 +208,17 @@ def _merge_payloads(*payloads: dict[str, Any]) -> dict[str, Any]:
 
 
 _LABEL_KEYWORD_TO_KEY: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("account", "login", "логин", "учетная", "аккаунт", "username", "user_name"), "account"),
-    (("quantity", "qty", "count", "amount", "sum", "колич", "сумм", "amount"), "quantity"),
+    (("account", "login", "логин", "учетная", "аккаунт", "username", "user_name", "счёт", "счет"), "account"),
+    (("quantity", "qty", "count", "amount", "sum", "колич", "сумм"), "quantity"),
     (("currency", "curr", "валют"), "currency"),
+    (("region", "регион", "server", "сервер", "zone", "зона"), "region"),
 )
 
 
 def _normalize_input_key(value: str | None, fallback: str) -> str:
     raw = str(value or "").strip()
+    # Strip parenthetical type annotations like "(Integer)", "(String)", "(целое число)"
+    raw = re.sub(r"\s*\([^)]+\)", "", raw).strip()
     lowered = raw.lower()
     for keywords, mapped_key in _LABEL_KEYWORD_TO_KEY:
         if any(kw in lowered for kw in keywords):

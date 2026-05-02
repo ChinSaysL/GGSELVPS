@@ -1266,6 +1266,165 @@ def test_digiseller_recharge_amount_option_becomes_gengine_quantity(
     assert marketplace_client.delivered_unique_codes == ["E5E8B7E1369947A3"]
 
 
+def test_recharge_order_with_account_and_region_integer_params(
+    db_session: Session,
+) -> None:
+    """GGSEL labels 'Account (Integer)' and 'Region (Integer)' must map to
+    G-Engine param keys 'Account' and 'Region' — the type suffix must not
+    bloat the key (e.g. 'region_integer' would never match 'region')."""
+    raw_payload_json = (
+        '{"source_type":"recharge","recharge_product_id":"5",'
+        '"recharge_denomination_id":"denom1",'
+        '"recharge_param_keys":["Account","Region"]}'
+    )
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="recharge:5:denom1",
+        title="Mobile Legends 35 Diamonds Russia",
+        category="Recharge",
+        denomination="32 + 3 Diamonds",
+        region="Russia",
+        cost_usd=Decimal("0.6834"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json=raw_payload_json,
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="ggsel",
+        marketplace_offer_id="102270010",
+        supplier_product_id=supplier.id,
+        title="MLBB Diamonds Russia",
+        price=Decimal("2.00"),
+        currency="USD",
+        is_enabled=True,
+        requires_buyer_input=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+    db_session.add(
+        ProductMapping(
+            supplier_product_id=supplier.id,
+            marketplace_offer_id=offer.id,
+            enabled=True,
+            marketplace_variant_id=None,
+            marketplace_variant_name="32 + 3 Diamonds",
+        )
+    )
+    db_session.commit()
+
+    sale = {
+        "invoice_id": "9030",
+        "id_goods": "102270010",
+        "date_pay": "2026-05-01 10:00:00",
+        "amount": "2.00",
+        "denomination": "35 Diamonds",
+        "options": [
+            {"name": "Account (Integer)", "user_data": "123456789", "user_data_id": None},
+            {"name": "Region (Integer)", "user_data": "5", "user_data_id": None},
+        ],
+    }
+    supplier_client = FakeSupplierOrderClient(
+        create_response={"id": 9001, "status": "shipped", "supplier_order_id": "recharge:9001"}
+    )
+    marketplace_client = FakeMarketplaceOrderClient(
+        sales=[sale], order_payloads={"9030": sale}
+    )
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"ggsel": marketplace_client},
+    )
+
+    assert stats["orders_delivered"] == 1
+    assert supplier_client.create_calls[0]["buyer_inputs"] == {
+        "account": "123456789",
+        "region": "5",
+    }
+
+
+def test_recharge_order_with_russian_account_and_region_labels(
+    db_session: Session,
+) -> None:
+    """Russian GGSEL labels 'Счёт (целое число)' and 'Регион (целое число)' must
+    map to G-Engine param keys 'Account' and 'Region'."""
+    raw_payload_json = (
+        '{"source_type":"recharge","recharge_product_id":"5",'
+        '"recharge_denomination_id":"denom1",'
+        '"recharge_param_keys":["Account","Region"]}'
+    )
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="recharge:5:denom1",
+        title="Mobile Legends 35 Diamonds Russia",
+        category="Recharge",
+        denomination="32 + 3 Diamonds",
+        region="Russia",
+        cost_usd=Decimal("0.6834"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json=raw_payload_json,
+    )
+    db_session.add(supplier)
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="ggsel",
+        marketplace_offer_id="102270011",
+        supplier_product_id=supplier.id,
+        title="MLBB Diamonds Russia",
+        price=Decimal("2.00"),
+        currency="USD",
+        is_enabled=True,
+        requires_buyer_input=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+    db_session.add(
+        ProductMapping(
+            supplier_product_id=supplier.id,
+            marketplace_offer_id=offer.id,
+            enabled=True,
+        )
+    )
+    db_session.commit()
+
+    sale = {
+        "invoice_id": "9031",
+        "id_goods": "102270011",
+        "date_pay": "2026-05-01 10:00:00",
+        "amount": "2.00",
+        "denomination": "35 Diamonds",
+        "options": [
+            {"name": "Счёт (целое число)", "user_data": "123456789", "user_data_id": None},
+            {"name": "Регион (целое число)", "user_data": "5", "user_data_id": None},
+        ],
+    }
+    supplier_client = FakeSupplierOrderClient(
+        create_response={"id": 9002, "status": "shipped", "supplier_order_id": "recharge:9002"}
+    )
+    marketplace_client = FakeMarketplaceOrderClient(
+        sales=[sale], order_payloads={"9031": sale}
+    )
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"ggsel": marketplace_client},
+    )
+
+    assert stats["orders_delivered"] == 1
+    assert supplier_client.create_calls[0]["buyer_inputs"] == {
+        "account": "123456789",
+        "region": "5",
+    }
+
+
 def test_digiseller_paid_order_waits_until_buyer_posts_unique_code(db_session: Session) -> None:
     _add_linked_offer(db_session, marketplace="digiseller", offer_id="5850465")
     sale = {
