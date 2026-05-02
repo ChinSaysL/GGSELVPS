@@ -397,41 +397,9 @@ class GGSELClient(BaseAPIClient):
         )
 
     def set_offer_enabled(self, offer_id: str, enabled: bool) -> dict[str, Any]:
-        # Panel batch activate/pause endpoints handle offer-level enable/disable.
-        # For variant-based offers, also update individual variant visibility.
-        if enabled:
-            self._panel_batch_action(offer_id, action="activate")
-            return {"status": "ok"}
-        # Disable: pause the offer at the panel level, then hide individual variants
-        # for the seller API (belt-and-suspenders for variant-based offers).
-        self._panel_batch_action(offer_id, action="pause")
-        token = self._get_access_token()
-        product = self.get_offer_by_id(offer_id)
-        if not isinstance(product, dict):
-            return {"status": "ok", "variants_updated": 0}
-        updated = 0
-        for option in self._offer_options(product):
-            option_id = self._extract_option_id(option)
-            if option_id is None:
-                continue
-            for variant in self._option_variants(option):
-                variant_id = self._extract_variant_id(variant)
-                if variant_id is None:
-                    continue
-                current_default = self._extract_bool(variant, ("is_default", "default"))
-                payload = self._build_variant_update_payload(
-                    variant,
-                    visible=False,
-                    is_default=bool(current_default) if current_default is not None else False,
-                )
-                self._request_json(
-                    method="POST",
-                    path=self._build_path(f"/api/products/options/{option_id}/variants/{variant_id}"),
-                    params={"token": token},
-                    json_body=payload,
-                )
-                updated += 1
-        return {"status": "ok", "variants_updated": updated}
+        action = "activate" if enabled else "pause"
+        self._panel_batch_action(offer_id, action=action)
+        return {"status": "ok"}
 
     @staticmethod
     def _response_is_success(response: dict[str, Any]) -> bool:
@@ -714,6 +682,56 @@ class GGSELClient(BaseAPIClient):
         payload["order"] = cls._parse_int(variant.get("order"), default=1)
         return payload
 
+    def _panel_option_for_variant(
+        self,
+        public_offer_id: str,
+        variant_id: int,
+    ) -> tuple[int, int, dict[str, Any]]:
+        """Return (internal_offer_id, option_id, option_dict) for the option containing variant_id."""
+        internal_id = self._panel_resolve_internal_id(public_offer_id)
+        cookies = self._ensure_panel_session()
+        offer_data = self._panel_get_offer_data(public_offer_id, cookies=cookies)
+        for option in offer_data.get("options") or []:
+            if not isinstance(option, dict):
+                continue
+            option_id = option.get("id")
+            if option_id is None:
+                continue
+            variants = option.get("variants") or option.get("variants_attributes") or []
+            for v in variants:
+                if isinstance(v, dict) and v.get("id") == variant_id:
+                    return internal_id, int(option_id), option
+        raise APIRequestError(
+            f"GGSEL variant {variant_id} not found in panel offer {public_offer_id}."
+        )
+
+    @staticmethod
+    def _build_panel_option_put_body(
+        option: dict[str, Any],
+        target_variant_id: int,
+        *,
+        archived: bool,
+    ) -> dict[str, Any]:
+        _OPTION_FIELDS = (
+            "kind", "position", "title_ru", "title_en", "required",
+            "hide_price_modifier", "splitted_products",
+        )
+        option_body: dict[str, Any] = {k: option[k] for k in _OPTION_FIELDS if k in option}
+        raw_variants = option.get("variants") or option.get("variants_attributes") or []
+        variants_out = []
+        for v in raw_variants:
+            if not isinstance(v, dict):
+                continue
+            v_copy = dict(v)
+            if v_copy.get("id") == target_variant_id:
+                if archived:
+                    v_copy["status"] = "archived"
+                else:
+                    v_copy.pop("status", None)
+            variants_out.append(v_copy)
+        option_body["variants_attributes"] = variants_out
+        return {"option": option_body}
+
     def set_offer_variant_state(
         self,
         offer_id: str,
@@ -722,42 +740,23 @@ class GGSELClient(BaseAPIClient):
         visible: bool,
         is_default: bool | None = None,
     ) -> dict[str, Any]:
-        token = self._get_access_token()
-        option_id, variant = self._find_variant_payload(
-            product_id=offer_id,
-            variant_id=variant_id,
-            token=token,
+        if not self._panel_email:
+            raise NotImplementedError(
+                "marketplace_disable_not_supported: GGSEL variant visibility requires panel credentials."
+            )
+        internal_id, option_id, option = self._panel_option_for_variant(offer_id, variant_id)
+        body = self._build_panel_option_put_body(option, variant_id, archived=not visible)
+        self._panel_request_with_reauth(
+            "PUT",
+            f"/api/v1/offers/{internal_id}/options/{option_id}",
+            json_body=body,
         )
-
-        current_visible = self._extract_bool(variant, ("visible", "is_visible"))
-        current_default = self._extract_bool(variant, ("is_default", "default"))
-        target_default = bool(current_default) if is_default is None else bool(is_default)
-        visible_matches = current_visible is not None and current_visible == bool(visible)
-        default_matches = is_default is None or current_default == bool(is_default)
-        if visible_matches and default_matches:
-            return {"status": "ok", "unchanged": True}
-
-        payload = self._build_variant_update_payload(
-            variant,
-            visible=visible,
-            is_default=target_default,
-        )
-        response = self._request_json(
-            method="POST",
-            path=self._build_path(f"/api/products/options/{option_id}/variants/{variant_id}"),
-            params={"token": token},
-            json_body=payload,
-        )
-        if not isinstance(response, dict):
-            raise APIRequestError("GGSEL variant update returned unexpected response format.")
-        self._ensure_success_response(response, context="GGSEL variant visibility update failed")
         return {
             "status": "ok",
             "offer_id": offer_id,
             "option_id": option_id,
             "variant_id": variant_id,
             "visible": bool(visible),
-            "is_default": target_default,
         }
 
     def set_offer_variant_visible(

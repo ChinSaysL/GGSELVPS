@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from typing import Any
+from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
@@ -1603,104 +1605,152 @@ def test_digiseller_listing_create_and_base_update_are_disabled() -> None:
     client.close()
 
 
-def test_ggsel_set_offer_variant_visible_edits_target_variant() -> None:
+def _make_panel_mock(responses: dict[str, Any]) -> MagicMock:
+    """
+    Return a MagicMock for httpx.request that dispatches by URL path.
+    responses: {"/path": json_dict_or_callable}
+    """
+    def side_effect(*args: Any, **kwargs: Any) -> MagicMock:
+        url = kwargs.get("url") or (args[1] if len(args) > 1 else "")
+        path = str(url).split("seller.ggsel.com", 1)[-1].split("?")[0]
+        body = responses.get(path)
+        if body is None:
+            resp = MagicMock()
+            resp.is_error = True
+            resp.status_code = 404
+            resp.text = f"unexpected path {path}"
+            return resp
+        if callable(body):
+            body = body()
+        resp = MagicMock()
+        resp.is_error = False
+        resp.status_code = 200
+        resp.json.return_value = body
+        return resp
+    mock = MagicMock(side_effect=side_effect)
+    return mock
+
+
+def _panel_offer_data(*, offer_id: str, internal_id: int, option_id: int, variants: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
+        "data": {
+            "id": internal_id,
+            "ggsel_id": offer_id,
+            "options": [
+                {
+                    "id": option_id,
+                    "kind": "radio_button",
+                    "position": 0,
+                    "title_ru": "Количество",
+                    "title_en": "Quantity",
+                    "required": True,
+                    "hide_price_modifier": False,
+                    "splitted_products": False,
+                    "variants": variants,
+                }
+            ],
+        }
+    }
+
+
+def test_ggsel_set_offer_variant_visible_archives_via_panel_put() -> None:
+    # offer_id 102267371 → internal_id 2267370 (fast-path formula: ggsel_id - 100_000_001)
     captured: dict[str, Any] = {}
+    variants = [
+        {"id": 19504166, "position": 0, "title_ru": "35 бриллиантов", "title_en": "35 Diamonds", "discount_kind": "fixed", "impact_variant": "increase", "default": True, "price": 0},
+        {"id": 19504167, "position": 1, "title_ru": "55 бриллиантов", "title_en": "55 Diamonds", "discount_kind": "fixed", "impact_variant": "increase", "default": False, "price": 38.47},
+    ]
+    offer_data = _panel_offer_data(offer_id="102267371", internal_id=2267370, option_id=3290052, variants=variants)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path.endswith("/api_sellers/api/products/options/list/5850465"):
-            return httpx.Response(status_code=200, json={"retval": 0, "content": [{"id": 777}]})
-        if request.url.path.endswith("/api_sellers/api/products/options/777"):
-            return httpx.Response(
-                status_code=200,
-                json={
-                    "retval": 0,
-                    "content": {
-                        "id": 777,
-                        "variants": [
-                            {
-                                "variant_id": 19472020,
-                                "name": [{"locale": "en-US", "value": "500 TRY"}],
-                                "type": "priceplus",
-                                "rate": 5.0,
-                                "is_default": False,
-                                "visible": True,
-                                "order": 2,
-                            }
-                        ],
-                    },
-                },
-            )
-        if request.url.path.endswith("/api_sellers/api/products/options/777/variants/19472020"):
-            captured["query"] = dict(request.url.params)
-            captured["json"] = json.loads(request.content.decode("utf-8"))
-            return httpx.Response(status_code=200, json={"retval": 0})
-        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+    def panel_request_side_effect(*args: Any, **kwargs: Any) -> MagicMock:
+        url = kwargs.get("url") or (args[1] if len(args) > 1 else "")
+        path = str(url).split("seller.ggsel.com", 1)[-1].split("?")[0]
+        resp = MagicMock()
+        resp.is_error = False
+        resp.status_code = 200
+        if path == "/api/v1/offers/2267370":
+            resp.json.return_value = offer_data
+        elif path == "/api/v1/offers/2267370/options/3290052":
+            captured["method"] = kwargs.get("method") or args[0]
+            captured["json"] = kwargs.get("json")
+            resp.json.return_value = {"data": {}}
+        else:
+            resp.is_error = True
+            resp.status_code = 404
+            resp.text = f"unexpected path {path}"
+        return resp
 
-    client = GGSELClient(base_url="https://seller.ggsel.com", api_key="secret")
-    _attach_mock_transport(client, httpx.MockTransport(handler))
+    client = GGSELClient(
+        base_url="https://seller.ggsel.com",
+        api_key="secret",
+        panel_email="seller@example.com",
+        panel_password="pw",
+    )
+    client._panel_cookies = {"ACCESS_TOKEN": "tok"}
+    client._panel_cookies_valid_thru = datetime.now(timezone.utc) + timedelta(hours=1)
 
-    result = client.set_offer_variant_visible("5850465", 19472020, False)
+    with patch("app.clients.ggsel.httpx.request", side_effect=panel_request_side_effect):
+        result = client.set_offer_variant_visible("102267371", 19504167, False)
     client.close()
 
     assert result["status"] == "ok"
-    assert result["variant_id"] == 19472020
-    assert captured["query"]["token"] == "secret"
-    assert captured["json"]["visible"] is False
+    assert result["variant_id"] == 19504167
+    assert captured["method"] == "PUT"
+    variants_out = captured["json"]["option"]["variants_attributes"]
+    target = next(v for v in variants_out if v["id"] == 19504167)
+    other = next(v for v in variants_out if v["id"] == 19504166)
+    assert target["status"] == "archived"
+    assert "status" not in other
 
 
-def test_ggsel_set_offer_variant_visible_uses_product_data_options() -> None:
-    captured: dict[str, Any] = {"paths": []}
+def test_ggsel_set_offer_variant_visible_enables_by_removing_archived_status() -> None:
+    captured: dict[str, Any] = {}
+    variants = [
+        {"id": 19504167, "position": 0, "title_ru": "55 бриллиантов", "title_en": "55 Diamonds", "discount_kind": "fixed", "impact_variant": "increase", "default": True, "price": 0, "status": "archived"},
+    ]
+    offer_data = _panel_offer_data(offer_id="102267371", internal_id=2267370, option_id=3290052, variants=variants)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        captured["paths"].append(request.url.path)
-        if request.url.path.endswith("/api_sellers/api/products/102260467/data"):
-            return httpx.Response(
-                status_code=200,
-                json={
-                    "retval": 0,
-                    "product": {
-                        "id": 102260467,
-                        "options": [
-                            {
-                                "name": 777,
-                                "label": "Country",
-                                "variants": [
-                                    {
-                                        "value": 19224615,
-                                        "text": "CIS",
-                                        "default": 0,
-                                        "modify": "1",
-                                        "modify_type": "priceplus",
-                                        "modify_value": "76.23",
-                                        "num_in_stock": 0,
-                                        "visible": 1,
-                                    }
-                                ],
-                            }
-                        ],
-                    },
-                },
-            )
-        if request.url.path.endswith("/api_sellers/api/products/options/777/variants/19224615"):
-            captured["query"] = dict(request.url.params)
-            captured["json"] = json.loads(request.content.decode("utf-8"))
-            return httpx.Response(status_code=200, json={"retval": 0})
-        return httpx.Response(status_code=404, json={"error": "unexpected path"})
+    def panel_request_side_effect(*args: Any, **kwargs: Any) -> MagicMock:
+        url = kwargs.get("url") or (args[1] if len(args) > 1 else "")
+        path = str(url).split("seller.ggsel.com", 1)[-1].split("?")[0]
+        resp = MagicMock()
+        resp.is_error = False
+        resp.status_code = 200
+        if path == "/api/v1/offers/2267370":
+            resp.json.return_value = offer_data
+        elif path == "/api/v1/offers/2267370/options/3290052":
+            captured["json"] = kwargs.get("json")
+            resp.json.return_value = {"data": {}}
+        else:
+            resp.is_error = True
+            resp.status_code = 404
+            resp.text = f"unexpected path {path}"
+        return resp
 
-    client = GGSELClient(base_url="https://seller.ggsel.com", api_key="secret")
-    _attach_mock_transport(client, httpx.MockTransport(handler))
+    client = GGSELClient(
+        base_url="https://seller.ggsel.com",
+        api_key="secret",
+        panel_email="seller@example.com",
+        panel_password="pw",
+    )
+    client._panel_cookies = {"ACCESS_TOKEN": "tok"}
+    client._panel_cookies_valid_thru = datetime.now(timezone.utc) + timedelta(hours=1)
 
-    result = client.set_offer_variant_visible("102260467", 19224615, False)
+    with patch("app.clients.ggsel.httpx.request", side_effect=panel_request_side_effect):
+        result = client.set_offer_variant_visible("102267371", 19504167, True)
     client.close()
 
     assert result["status"] == "ok"
-    assert result["option_id"] == 777
-    assert result["variant_id"] == 19224615
-    assert captured["query"]["token"] == "secret"
-    assert captured["json"]["text"] == "CIS"
-    assert captured["json"]["modify_value"] == "76.23"
-    assert captured["json"]["visible"] is False
-    assert "/api_sellers/api/products/options/list/102260467" not in captured["paths"]
+    variants_out = captured["json"]["option"]["variants_attributes"]
+    target = next(v for v in variants_out if v["id"] == 19504167)
+    assert "status" not in target
+
+
+def test_ggsel_set_offer_variant_visible_raises_without_panel_credentials() -> None:
+    client = GGSELClient(base_url="https://seller.ggsel.com", api_key="secret")
+    with pytest.raises(NotImplementedError, match="panel credentials"):
+        client.set_offer_variant_visible("102267371", 19504167, False)
+    client.close()
 
 
 def test_ggsel_send_buyer_message_uses_prefixed_debates_endpoint() -> None:
