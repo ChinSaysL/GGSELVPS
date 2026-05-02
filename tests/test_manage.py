@@ -1295,6 +1295,62 @@ def test_auto_match_option_entries_to_products_matches_hidden_spaces_and_confusa
     assert ambiguous == []
 
 
+def test_auto_match_option_entries_matches_additive_quantity_for_recharge() -> None:
+    products = [
+        SimpleNamespace(
+            id=1,
+            title="MLBB Diamonds RU",
+            category="Recharge",
+            denomination="32 + 3 Diamonds",
+        ),
+        SimpleNamespace(
+            id=2,
+            title="MLBB Diamonds RU",
+            category="Recharge",
+            denomination="50 + 5 Diamonds",
+        ),
+    ]
+    entries = [
+        {
+            "option_label": "\u041a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e",
+            "variant_value": "35 \u0431\u0440\u0438\u043b\u043b\u0438\u0430\u043d\u0442\u043e\u0432",
+        },
+        {
+            "option_label": "\u041a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e",
+            "variant_value": "55 \u0431\u0440\u0438\u043b\u043b\u0438\u0430\u043d\u0442\u043e\u0432",
+        },
+    ]
+
+    matches, unmatched, ambiguous = manage._auto_match_option_entries_to_products(products, entries)
+
+    assert [item["product"].id for item in matches] == [1, 2]
+    assert unmatched == []
+    assert ambiguous == []
+
+
+def test_auto_match_option_entries_matches_weekly_pass_alias() -> None:
+    products = [
+        SimpleNamespace(
+            id=1,
+            title="MLBB Diamonds RU",
+            category="Recharge",
+            denomination="Weekly Pass",
+        ),
+    ]
+    entries = [
+        {
+            "option_label": "\u041a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e",
+            "variant_value": "\u041d\u0435\u0434\u0435\u043b\u044c\u043d\u044b\u0439 \u0430\u0431\u043e\u043d\u0435\u043c\u0435\u043d\u0442",
+        }
+    ]
+
+    matches, unmatched, ambiguous = manage._auto_match_option_entries_to_products(products, entries)
+
+    assert [item["product"].id for item in matches] == [1]
+    assert unmatched == []
+    assert ambiguous == []
+
+
 def test_option_entry_description_formats_label_and_value() -> None:
     entry = {"option_label": "Currency", "variant_value": "RUB"}
     assert manage._option_entry_description(entry) == "Currency: RUB"

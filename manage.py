@@ -2101,6 +2101,12 @@ def _variant_match_key(text: str | None) -> str:
     signature = _extract_denomination_signature(text)
     if signature:
         return signature
+    alias = _variant_alias_key(text)
+    if alias:
+        return _normalize_search_text(alias)
+    quantity_key = _quantity_match_key(text)
+    if quantity_key:
+        return quantity_key
     return _normalize_search_text(text or "")
 
 
@@ -2149,6 +2155,16 @@ def _product_variant_key(product: Any) -> str:
     signature = _product_denomination_signature(product)
     if signature:
         return signature
+    payload = _raw_payload_dict(product)
+    quantity_key = _quantity_match_key_from_texts(
+        str(getattr(product, "denomination", "") or ""),
+        str(payload.get("denomination") or ""),
+        str(payload.get("label") or ""),
+        str(payload.get("text") or ""),
+        str(getattr(product, "title", "") or ""),
+    )
+    if quantity_key:
+        return quantity_key
     return _normalize_search_text(
         " ".join(
             [
@@ -2328,7 +2344,7 @@ def _print_auto_map_diagnostics(
     option_entries: list[dict[str, Any]],
 ) -> None:
     print("\nAuto-map diagnostics:")
-    print("Marketplace option signatures:")
+    print("Marketplace option keys:")
     for entry in option_entries[:20]:
         option_label = str(entry.get("option_label") or "Option")
         variant_value = str(entry.get("variant_value") or "")
@@ -2336,7 +2352,7 @@ def _print_auto_map_diagnostics(
     if len(option_entries) > 20:
         print(f"...and {len(option_entries) - 20} more marketplace option values.")
 
-    print("Local G-Engine row signatures:")
+    print("Local G-Engine row keys:")
     for product in products[:25]:
         payload = _raw_payload_dict(product)
         payload_hint = _debug_payload_hint(
@@ -2361,7 +2377,7 @@ def _print_auto_map_diagnostics(
         suffix = f" | payload hints: {payload_hint}" if payload_hint else ""
         print(
             f"- local {getattr(product, 'id', '?')}: "
-            f"signature={_product_denomination_signature(product) or '(none)'} | "
+            f"match_key={_product_variant_key(product) or '(none)'} | "
             f"denomination={getattr(product, 'denomination', None) or ''} | "
             f"title={getattr(product, 'title', None) or ''}{suffix}"
         )
@@ -2558,6 +2574,62 @@ def _extract_standalone_amount(value: object) -> str | None:
     return amount or None
 
 
+def _format_quantity_value(value: Decimal) -> str:
+    normalized = value.normalize()
+    return format(normalized, "f")
+
+
+def _parse_additive_quantity(value: str | None) -> Decimal | None:
+    """Extract total quantity, summing additive notation (e.g. "32 + 3 Diamonds" -> 35)."""
+    text = str(value or "").strip()
+    if not text:
+        return None
+    compact = re.sub(r"\s+", " ", text).strip()
+    if "+" in compact:
+        chain_match = re.match(r"^(\d+(?:[.,]\d+)?)(?:\s*\+\s*\d+(?:[.,]\d+)?)+", compact)
+        if chain_match:
+            nums = re.findall(r"\d+(?:[.,]\d+)?", chain_match.group(0))
+            try:
+                total = sum(Decimal(n.replace(",", ".")) for n in nums)
+                if total > 0:
+                    return total
+            except (InvalidOperation, ValueError):
+                pass
+    match = re.search(r"\d+(?:[.,]\d+)?", compact)
+    if match is None:
+        return None
+    try:
+        parsed = Decimal(match.group(0).replace(",", "."))
+        return parsed if parsed > 0 else None
+    except (InvalidOperation, ValueError):
+        return None
+
+
+def _has_alpha_token(value: str | None) -> bool:
+    if not value:
+        return False
+    return any(char.isalpha() for char in value)
+
+
+def _quantity_match_key(value: str | None) -> str | None:
+    if not value:
+        return None
+    quantity = _parse_additive_quantity(value)
+    if quantity is None:
+        return None
+    if not _has_alpha_token(value) and "+" not in value:
+        return None
+    return f"qty:{_format_quantity_value(quantity)}"
+
+
+def _quantity_match_key_from_texts(*texts: str | None) -> str | None:
+    for text in texts:
+        key = _quantity_match_key(text)
+        if key:
+            return key
+    return None
+
+
 def _extract_denomination_signature(*texts: str | None) -> str | None:
     amount_first_pattern = re.compile(r"(\d(?:[\d\s.,]*\d)?)\s*([^\W\d_]{2,8}|[$€₺₽₱])")
     currency_first_pattern = re.compile(r"([^\W\d_]{2,8}|[$€₺₽₱])\s*(\d(?:[\d\s.,]*\d)?)")
@@ -2578,6 +2650,22 @@ def _extract_denomination_signature(*texts: str | None) -> str | None:
             if amount:
                 return f"{amount} {currency}"
     return None
+
+
+_VARIANT_ALIAS_KEYS = {
+    "недельный абонемент": "weekly pass",
+}
+
+
+def _variant_alias_key(value: str | None) -> str | None:
+    if not value:
+        return None
+    normalized = unicodedata.normalize("NFKC", str(value)).lower()
+    normalized = re.sub(r"[^\w\s]+", " ", normalized)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
+    if not normalized:
+        return None
+    return _VARIANT_ALIAS_KEYS.get(normalized)
 
 
 def _payload_currency_hint(payload: dict[str, Any]) -> str | None:
