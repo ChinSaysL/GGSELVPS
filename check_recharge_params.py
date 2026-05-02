@@ -127,6 +127,8 @@ def _check(offer_id: str, marketplace: str) -> None:
         except Exception as exc:
             print(f"\n[FAIL] Failed with real marketplace labels: {exc}")
             sys.exit(1)
+    finally:
+        session.close()
 
 
 def main() -> None:
