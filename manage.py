@@ -1589,10 +1589,14 @@ def action_list_products() -> int:
 def action_list_offers() -> int:
     _print_header("Linked Offers")
     try:
+        from decimal import Decimal as _Decimal
+
         from sqlalchemy import desc, select
+        from sqlalchemy.orm import selectinload
 
         from app.db import SessionLocal
-        from app.models import MarketplaceOffer
+        from app.models import MarketplaceOffer, ProductMapping
+        from app.pricing import get_markup_percent
     except ImportError as exc:
         print(f"Could not import app dependencies: {exc}")
         print("Run: python -m pip install -r requirements.txt")
@@ -1600,7 +1604,14 @@ def action_list_offers() -> int:
 
     with SessionLocal() as db:
         offers = (
-            db.execute(select(MarketplaceOffer).order_by(desc(MarketplaceOffer.updated_at)).limit(25))
+            db.execute(
+                select(MarketplaceOffer)
+                .options(
+                    selectinload(MarketplaceOffer.mappings).selectinload(ProductMapping.supplier_product)
+                )
+                .order_by(desc(MarketplaceOffer.updated_at))
+                .limit(50)
+            )
             .scalars()
             .all()
         )
@@ -1610,12 +1621,67 @@ def action_list_offers() -> int:
         return 0
 
     for offer in offers:
+        status_flags: list[str] = []
+        if offer.is_enabled:
+            status_flags.append("ON")
+        else:
+            status_flags.append("OFF")
+        if offer.manually_disabled:
+            status_flags.append("HALTED")
+        if offer.requires_buyer_input:
+            status_flags.append("buyer-input")
+        status_str = " ".join(status_flags)
+
         print(
-            f"[{offer.id}] {offer.marketplace}:{offer.marketplace_offer_id} | "
-            f"supplier_product_id={offer.supplier_product_id} | "
-            f"price={_format_money(offer.price)} {offer.currency} | enabled={offer.is_enabled} | "
-            f"manual_halt={offer.manually_disabled} | buyer_input={offer.requires_buyer_input}"
+            f"\n[{offer.id}] {offer.marketplace}:{offer.marketplace_offer_id}  "
+            f"{status_str}  |  price={_format_money(offer.price)} {offer.currency}"
         )
+        print(f"  Title: {offer.title}")
+
+        mappings = offer.mappings
+        if not mappings:
+            print("  (no variant mappings)")
+            continue
+
+        for m in mappings:
+            sp = m.supplier_product
+            if sp is None:
+                print(f"  [mapping {m.id}] supplier row missing")
+                continue
+
+            product_name = sp.title or "(no title)"
+            denomination = sp.denomination or ""
+            label = f"{product_name} — {denomination}" if denomination else product_name
+
+            try:
+                cost = _Decimal(str(sp.cost_usd))
+            except Exception:  # noqa: BLE001
+                cost = _Decimal("0")
+
+            if m.min_margin_percent is not None:
+                markup_pct = _Decimal(str(m.min_margin_percent))
+                markup_src = "custom"
+            else:
+                markup_pct = get_markup_percent(cost) if cost > 0 else _Decimal("0")
+                markup_src = "default"
+
+            variant_tag = ""
+            if m.marketplace_variant_name:
+                variant_tag = f"  variant={m.marketplace_variant_name}"
+            elif m.marketplace_variant_id is not None:
+                variant_tag = f"  variant_id={m.marketplace_variant_id}"
+
+            enabled_tag = "" if m.enabled else "  [mapping disabled]"
+            stock_tag = "  [manage-qty]" if m.manage_stock_quantity else ""
+
+            print(
+                f"  [m{m.id}] {label}"
+                f"  cost=${cost:.4f}"
+                f"  markup={markup_pct * 100:.0f}%({markup_src})"
+                f"{variant_tag}{enabled_tag}{stock_tag}"
+            )
+
+    print()
     return 0
 
 
