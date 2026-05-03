@@ -2180,10 +2180,12 @@ def _product_variant_key(product: Any) -> str:
     signature = _product_denomination_signature(product)
     if signature:
         return signature
+    denomination = str(getattr(product, "denomination", "") or "")
+    if denomination:
+        return _normalize_search_text(denomination)
     return _normalize_search_text(
         " ".join(
             [
-                str(getattr(product, "denomination", "") or ""),
                 str(getattr(product, "title", "") or ""),
                 str(getattr(product, "category", "") or ""),
             ]

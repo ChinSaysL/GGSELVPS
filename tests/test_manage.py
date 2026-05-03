@@ -1389,6 +1389,29 @@ def test_auto_match_option_entries_matches_weekly_pass_alias() -> None:
     assert ambiguous == []
 
 
+def test_auto_match_option_entries_matches_cyrillic_label_denomination() -> None:
+    # "Ключ Microsoft" on the marketplace side and product side should match even
+    # though the Cyrillic word gets stripped during normalization — both sides
+    # reduce to "microsoft" and the product key must not include the title blob.
+    products = [
+        SimpleNamespace(
+            id=1,
+            title="Minecraft: Java & Bedrock Edition Global",
+            category="Games",
+            denomination="Ключ Microsoft",
+            region=None,
+            raw_payload_json="{}",
+        ),
+    ]
+    entries = [{"option_label": "Тип продукта", "variant_value": "Ключ Microsoft"}]
+
+    matches, unmatched, ambiguous = manage._auto_match_option_entries_to_products(products, entries)
+
+    assert [item["product"].id for item in matches] == [1]
+    assert unmatched == []
+    assert ambiguous == []
+
+
 def test_option_entry_description_formats_label_and_value() -> None:
     entry = {"option_label": "Currency", "variant_value": "RUB"}
     assert manage._option_entry_description(entry) == "Currency: RUB"
