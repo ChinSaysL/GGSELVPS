@@ -324,7 +324,7 @@ def run_product_sync() -> dict[str, Any]:
         with SessionLocal() as db:
             sync_run = SyncRun(job_name="product_sync", status="running")
             db.add(sync_run)
-            db.flush()
+            db.commit()
 
             log_event(
                 logger,

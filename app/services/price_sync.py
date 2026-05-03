@@ -745,7 +745,7 @@ def sync_offer_prices(
             supplier_client=supplier_client,
             stats=stats,
         )
-        db.flush()
+        db.commit()
         db.expire_all()
         mappings = _load_enabled_mappings(db)
 
@@ -1350,7 +1350,7 @@ def run_price_sync(
                 status="running",
             )
             db.add(sync_run)
-            db.flush()
+            db.commit()
 
             log_event(logger, "price_sync.started", dry_run=dry_run)
             stats = sync_offer_prices(

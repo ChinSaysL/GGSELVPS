@@ -1726,7 +1726,7 @@ def run_order_sync() -> dict[str, Any]:
         with SessionLocal() as db:
             sync_run = SyncRun(job_name="order_sync", status="running")
             db.add(sync_run)
-            db.flush()
+            db.commit()
 
             log_event(logger, "order_sync.started")
             stats = sync_orders(

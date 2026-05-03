@@ -485,7 +485,7 @@ def sync_offer_stock(
         usable_balance_usd=usable_balance_usd,
     )
     db.add(snapshot)
-    db.flush()
+    db.commit()
 
     stats: dict[str, Any] = {
         "status": "ok",
@@ -1069,7 +1069,7 @@ def sync_offer_stock(
             if fresh_rate is not None and fresh_rate > 0:
                 supplier.cost_usd = fresh_rate
                 db.add(supplier)
-                db.flush()
+                db.commit()
         stock_qty = _compute_managed_stock_quantity(
             usable_balance_usd=usable_balance_usd,
             cost_per_unit_usd=supplier.cost_usd,
@@ -1176,7 +1176,7 @@ def run_stock_sync(
         with SessionLocal() as db:
             sync_run = SyncRun(job_name="stock_sync", status="running")
             db.add(sync_run)
-            db.flush()
+            db.commit()
 
             log_event(logger, "stock_sync.started")
             stats = sync_offer_stock(
