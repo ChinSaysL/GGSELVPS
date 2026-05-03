@@ -1352,9 +1352,14 @@ def _product_reference_id_candidates(product: Any, reference: GEngineProductRefe
         return _product_reference_ids(product)
 
     candidates: set[str] = set()
-    direct_supplier_id = _product_direct_supplier_id(product)
-    if direct_supplier_id:
-        candidates.add(direct_supplier_id)
+
+    # For shop references, direct_supplier_id is the denomination variant ID, which can
+    # collide with unrelated shop page IDs (e.g. PSN Turkey variant id=6 matching shop/6).
+    # Shop membership is identified exclusively via payload parent fields (base_product_id etc.).
+    if reference.kind != "shop":
+        direct_supplier_id = _product_direct_supplier_id(product)
+        if direct_supplier_id:
+            candidates.add(direct_supplier_id)
 
     parent_id = _product_reference_parent_id(product, reference)
     if parent_id:
