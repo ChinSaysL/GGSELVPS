@@ -18,7 +18,8 @@
       "Bash(python -m pytest tests/test_manage.py -x -q -k \"additive or weekly_pass or alias\")",
       "Bash(python -m pytest tests/test_order_sync_service.py::test_recharge_order_with_account_and_region_integer_params -x -q -s)",
       "Bash(python -c ' *)",
-      "Bash(python -m pytest tests/test_manage.py -k \"auto_match_option\" -x -q)"
+      "Bash(python -m pytest tests/test_manage.py -k \"auto_match_option\" -x -q)",
+      "Bash(python -m pytest tests/test_manage.py -x -q)"
     ]
   }
 }

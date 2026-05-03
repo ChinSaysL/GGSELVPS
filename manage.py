@@ -2310,26 +2310,63 @@ def _manual_map_unmatched_option_entries(
     except RuntimeError:
         pool_products = sorted(reference_products, key=lambda item: int(item.id))
 
+    pool_by_id = {int(p.id): p for p in pool_products}
+
     mapped = 0
     for item in unmatched_entries:
         entry = item["entry"]
         description = _option_entry_description(entry)
-        suggestions = _suggest_products_for_option_entry(pool_products, entry)
         print(f"\nManual mapping for option value: {description}")
-        if suggestions:
-            print("Suggested local rows:")
-            _print_reference_products(suggestions, limit=10)
-        else:
-            print("No automatic row suggestions for this option value.")
 
-        selected_product = _choose_product_from_reference_rows(
-            pool_products,
-            prompt="Local row id for this option value (blank = skip)",
-            default_product_id=int(suggestions[0].id) if suggestions else None,
-            allow_skip=True,
-        )
-        if selected_product is None:
-            continue
+        if len(reference_products) == 1:
+            # Simple case: one imported product for this link — just confirm it.
+            ref = reference_products[0]
+            print(f"G-Engine product for this link:")
+            print(f"  {_product_label(ref)}")
+            if not _ask_bool(f"Link this product to '{description}'?", default=True):
+                continue
+            selected_product = ref
+        else:
+            # Show the imported products for this link as numbered choices.
+            candidates = list(reference_products)
+            ref_ids = {int(p.id) for p in candidates}
+            extra = [
+                p for p in _suggest_products_for_option_entry(pool_products, entry)
+                if int(p.id) not in ref_ids
+            ]
+
+            print("G-Engine products for this link:")
+            for i, p in enumerate(candidates, 1):
+                print(f"  {i}. {_product_label(p)}")
+            if extra:
+                print("Other suggested rows (enter local row id to pick):")
+                for p in extra[:5]:
+                    print(f"  [id {p.id}] {_product_label(p)}")
+
+            range_hint = f"1–{len(candidates)}" if len(candidates) > 1 else "1"
+            id_hint = " or a local row id" if extra else ""
+            prompt = f"Pick {range_hint}{id_hint}, blank to skip"
+
+            selected_product = None
+            while True:
+                value = _ask_text(prompt, default=None, required=False).strip()
+                if not value:
+                    break
+                if not value.isdigit():
+                    print("Please enter a number.")
+                    continue
+                num = int(value)
+                if 1 <= num <= len(candidates):
+                    selected_product = candidates[num - 1]
+                    break
+                found = pool_by_id.get(num)
+                if found:
+                    selected_product = found
+                    break
+                print(f"'{value}' is not a valid choice or local row id.")
+
+            if selected_product is None:
+                continue
 
         raw_variant_id = entry.get("variant_id")
         variant_id = int(raw_variant_id) if isinstance(raw_variant_id, int) else None
