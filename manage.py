@@ -74,6 +74,18 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
         "offer-halts",
         "Manually stop or resume linked marketplace offers.",
     ),
+    MenuAction(
+        "22",
+        "Cancel orders",
+        "cancel-orders",
+        "Mark stuck or unwanted pending orders as cancelled.",
+    ),
+    MenuAction(
+        "23",
+        "Delete links",
+        "delete-links",
+        "Remove product mappings or offer links from the local database.",
+    ),
 )
 
 VALID_MARKETPLACES = ("digiseller", "ggsel")
@@ -87,6 +99,7 @@ ORDER_SYNC_HIDDEN_SKIP_REASONS = {
     "marketplace_offer_not_linked",
 }
 MANUAL_RETRY_STATUSES = {"failed", "needs_manual_review"}
+CANCELLABLE_ORDER_STATUSES = {"pending", "supplier_order_created", "needs_manual_review", "failed"}
 
 
 def _is_order_sync_pending_reason(reason: object) -> bool:
@@ -1682,6 +1695,199 @@ def action_list_offers() -> int:
             )
 
     print()
+    return 0
+
+
+def action_cancel_orders() -> int:
+    _print_header("Cancel Orders")
+    print(
+        "Cancels stuck or unwanted orders by marking them as 'cancelled'. "
+        "This does NOT cancel any existing G-Engine purchase — handle that manually if needed."
+    )
+    try:
+        from sqlalchemy import desc, select
+
+        from app.db import SessionLocal
+        from app.models import Order
+    except ImportError as exc:
+        print(f"Could not import app dependencies: {exc}")
+        print("Run: python -m pip install -r requirements.txt")
+        return 1
+
+    with SessionLocal() as db:
+        orders = list(
+            db.execute(
+                select(Order)
+                .where(Order.status.in_(CANCELLABLE_ORDER_STATUSES))
+                .order_by(desc(Order.updated_at), desc(Order.id))
+                .limit(100)
+            )
+            .scalars()
+            .all()
+        )
+
+    if not orders:
+        print("No cancellable orders found.")
+        return 0
+
+    print(f"Cancellable orders ({len(orders)}):")
+    for o in orders:
+        gengine = f"  gengine={o.supplier_order_id}" if o.supplier_order_id else ""
+        err = f"  error={o.error_message}" if o.error_message else ""
+        print(
+            f"  [{o.id}] {o.marketplace}:{o.marketplace_order_id}  status={o.status}"
+            f"  buyer={o.buyer_id or '?'}  created={str(o.created_at)[:16]}{gengine}{err}"
+        )
+
+    if not sys.stdin.isatty():
+        print("\nListing only. Run with a TTY to cancel orders.")
+        return 0
+
+    available_ids = [int(o.id) for o in orders]
+    raw_selection = _ask_text(
+        "Local order IDs to cancel (comma-separated, 'all', or blank to abort)",
+        default="",
+        required=False,
+    )
+    selected_ids = _parse_offer_halt_selection(raw_selection, available_ids)
+    if not selected_ids:
+        print("No orders selected.")
+        return 0
+
+    print(f"Selected: {', '.join(str(i) for i in selected_ids)}")
+    if not _ask_bool("Cancel selected orders?", default=False):
+        print("Aborted.")
+        return 0
+
+    with SessionLocal() as db:
+        cancelled = 0
+        for order_id in selected_ids:
+            order = db.get(Order, order_id)
+            if order is None:
+                print(f"  [{order_id}] not found — skipped")
+                continue
+            order.status = "cancelled"
+            order.error_message = "manually_cancelled"
+            db.add(order)
+            cancelled += 1
+            print(f"  [{order_id}] {order.marketplace}:{order.marketplace_order_id} → cancelled")
+        db.commit()
+
+    print(f"\nCancelled {cancelled} order(s).")
+    return 0
+
+
+def action_delete_links() -> int:
+    _print_header("Delete Links")
+    print(
+        "Removes product mappings and/or marketplace offers from the local database. "
+        "This does NOT delete anything on the marketplace itself."
+    )
+    try:
+        from sqlalchemy import delete as sql_delete
+        from sqlalchemy import desc, select
+        from sqlalchemy.orm import selectinload
+
+        from app.db import SessionLocal
+        from app.models import MarketplaceOffer, Order, ProductMapping
+    except ImportError as exc:
+        print(f"Could not import app dependencies: {exc}")
+        print("Run: python -m pip install -r requirements.txt")
+        return 1
+
+    with SessionLocal() as db:
+        offers = list(
+            db.execute(
+                select(MarketplaceOffer)
+                .options(selectinload(MarketplaceOffer.mappings))
+                .order_by(desc(MarketplaceOffer.updated_at))
+                .limit(100)
+            )
+            .scalars()
+            .all()
+        )
+
+    if not offers:
+        print("No linked offers found.")
+        return 0
+
+    print(f"Linked offers ({len(offers)}):")
+    for offer in offers:
+        print(
+            f"  [{offer.id}] {offer.marketplace}:{offer.marketplace_offer_id}  "
+            f"mappings={len(offer.mappings)}  enabled={offer.is_enabled}  — {offer.title}"
+        )
+
+    if not sys.stdin.isatty():
+        print("\nListing only. Run with a TTY to delete links.")
+        return 0
+
+    available_offer_ids = [int(o.id) for o in offers]
+    raw_selection = _ask_text(
+        "Local offer IDs to act on (comma-separated, 'all', or blank to abort)",
+        default="",
+        required=False,
+    )
+    selected_offer_ids = _parse_offer_halt_selection(raw_selection, available_offer_ids)
+    if not selected_offer_ids:
+        print("No offers selected.")
+        return 0
+
+    delete_mode = _ask_text(
+        "Delete 'mappings' only (keeps offer row) or 'offer' (removes offer + all its mappings)",
+        default="mappings",
+    ).strip().lower()
+    if delete_mode not in {"mappings", "offer"}:
+        print("Must be 'mappings' or 'offer'.")
+        return 1
+
+    with SessionLocal() as db:
+        selected_offers = [o for o in offers if o.id in selected_offer_ids]
+
+        # Warn if any selected offer has active (non-terminal) orders.
+        active_statuses = {"pending", "supplier_order_created"}
+        for offer in selected_offers:
+            active_orders = db.execute(
+                select(Order).where(
+                    Order.marketplace_offer_id == offer.id,
+                    Order.status.in_(active_statuses),
+                )
+            ).scalars().all()
+            if active_orders:
+                print(
+                    f"  WARNING: offer [{offer.id}] {offer.marketplace_offer_id} has "
+                    f"{len(active_orders)} active order(s) — cancel them first."
+                )
+
+        print(
+            f"\nAbout to delete {delete_mode} for {len(selected_offers)} offer(s): "
+            + ", ".join(f"[{o.id}]" for o in selected_offers)
+        )
+        if not _ask_bool(f"Confirm delete {delete_mode}?", default=False):
+            print("Aborted.")
+            return 0
+
+        deleted_mappings = 0
+        deleted_offers = 0
+        for offer in selected_offers:
+            fresh_offer = db.get(MarketplaceOffer, offer.id)
+            if fresh_offer is None:
+                continue
+            mapping_ids = [m.id for m in fresh_offer.mappings]
+            if mapping_ids:
+                db.execute(sql_delete(ProductMapping).where(ProductMapping.id.in_(mapping_ids)))
+                deleted_mappings += len(mapping_ids)
+            if delete_mode == "offer":
+                db.delete(fresh_offer)
+                deleted_offers += 1
+            print(
+                f"  [{offer.id}] {offer.marketplace}:{offer.marketplace_offer_id} — "
+                f"deleted {len(mapping_ids)} mapping(s)"
+                + (" + offer row" if delete_mode == "offer" else "")
+            )
+        db.commit()
+
+    print(f"\nDeleted {deleted_mappings} mapping(s)" + (f" and {deleted_offers} offer row(s)" if deleted_offers else "") + ".")
     return 0
 
 
@@ -4363,6 +4569,8 @@ COMMANDS: dict[str, Callable[[], int]] = {
     "digiseller-code": action_digiseller_code,
     "manual-retries": action_manual_retries,
     "offer-halts": action_offer_halts,
+    "cancel-orders": action_cancel_orders,
+    "delete-links": action_delete_links,
     "list-products": action_list_products,
     "list-offers": action_list_offers,
     "manual-link": action_manual_link,

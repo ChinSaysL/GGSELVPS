@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -896,6 +897,11 @@ def _send_provider_unavailable_notice(
     return True
 
 
+# Retry delays (seconds) before notifying the buyer about provider unavailability.
+# A single momentary G-Engine blip retries silently; only persistent failures alert the buyer.
+_PROVIDER_RETRY_DELAYS: tuple[float, ...] = (3.0, 8.0)
+
+
 def _defer_for_provider_unavailable(
     *,
     db: Session,
@@ -1281,40 +1287,63 @@ def _process_normalized_sale(
                 }
             )
             return
-        try:
-            create_response = _create_supplier_purchase(
-                order=order,
-                mapping=mapping,
-                sale=sale,
-                supplier_client=supplier_client,
-            )
-        except Exception as exc:  # noqa: BLE001 - keep other paid orders moving.
-            if is_temporary_provider_error(exc):
-                product_title, _product_kind = _delivery_message_context(offer, mapping, sale)
-                notice_sent = _send_provider_unavailable_notice(
+        _create_exc: Exception | None = None
+        create_response: dict[str, Any] | None = None
+        for _attempt, _delay in enumerate((0.0, *_PROVIDER_RETRY_DELAYS)):
+            if _delay > 0:
+                time.sleep(_delay)
+            try:
+                create_response = _create_supplier_purchase(
                     order=order,
+                    mapping=mapping,
                     sale=sale,
-                    marketplace_client=marketplace_client,
-                    product_title=product_title,
-                    stats=stats,
+                    supplier_client=supplier_client,
                 )
-                order.status = "needs_manual_review"
-                order.error_message = f"{_SUPPLIER_PURCHASE_STATUS_UNKNOWN}:{exc}"
-                if notice_sent:
-                    order.error_message = f"{order.error_message};buyer_notified"
-                db.add(order)
-                db.commit()
-                stats["provider_unavailable"] += 1
-                stats["errors"] += 1
-                stats["details"].append(
-                    {
-                        "action": "error",
-                        "order_id": order.id,
-                        "marketplace_order_id": order.marketplace_order_id,
-                        "reason": _SUPPLIER_PURCHASE_STATUS_UNKNOWN,
-                    }
-                )
-                return
+                _create_exc = None
+                break
+            except Exception as exc:  # noqa: BLE001
+                if not is_temporary_provider_error(exc):
+                    order.status = "needs_manual_review"
+                    order.error_message = f"{_SUPPLIER_PURCHASE_STATUS_UNKNOWN}:{exc}"
+                    db.add(order)
+                    db.commit()
+                    stats["errors"] += 1
+                    stats["details"].append(
+                        {
+                            "action": "error",
+                            "order_id": order.id,
+                            "marketplace_order_id": order.marketplace_order_id,
+                            "reason": f"{_SUPPLIER_PURCHASE_STATUS_UNKNOWN}:{exc}",
+                        }
+                    )
+                    return
+                _create_exc = exc
+        if _create_exc is not None:
+            product_title, _product_kind = _delivery_message_context(offer, mapping, sale)
+            notice_sent = _send_provider_unavailable_notice(
+                order=order,
+                sale=sale,
+                marketplace_client=marketplace_client,
+                product_title=product_title,
+                stats=stats,
+            )
+            order.status = "needs_manual_review"
+            order.error_message = f"{_SUPPLIER_PURCHASE_STATUS_UNKNOWN}:{_create_exc}"
+            if notice_sent:
+                order.error_message = f"{order.error_message};buyer_notified"
+            db.add(order)
+            db.commit()
+            stats["provider_unavailable"] += 1
+            stats["errors"] += 1
+            stats["details"].append(
+                {
+                    "action": "error",
+                    "order_id": order.id,
+                    "marketplace_order_id": order.marketplace_order_id,
+                    "reason": _SUPPLIER_PURCHASE_STATUS_UNKNOWN,
+                }
+            )
+            return
             order.status = "needs_manual_review"
             order.error_message = f"{_SUPPLIER_PURCHASE_STATUS_UNKNOWN}:{exc}"
             db.add(order)
@@ -1335,12 +1364,57 @@ def _process_normalized_sale(
         product_title, product_kind = _delivery_message_context(offer, mapping, sale)
         just_created = True
 
-    try:
-        _payload, codes, fulfilled, terminal_failure = _load_supplier_delivery_payload(
+    _delivery_exc: Exception | None = None
+    for _attempt, _delay in enumerate((0.0, *_PROVIDER_RETRY_DELAYS)):
+        if _delay > 0:
+            time.sleep(_delay)
+        _delivery_exc = None
+        try:
+            _payload, codes, fulfilled, terminal_failure = _load_supplier_delivery_payload(
+                order=order,
+                supplier_client=supplier_client,
+                create_response=create_response if _attempt == 0 else None,
+            )
+            break
+        except Exception as exc:  # noqa: BLE001
+            if not is_temporary_provider_error(exc):
+                order.status = "failed" if not order.supplier_order_id else "needs_manual_review"
+                order.error_message = str(exc)
+                db.add(order)
+                db.commit()
+                stats["errors"] += 1
+                stats["details"].append(
+                    {
+                        "action": "error",
+                        "order_id": order.id,
+                        "marketplace_order_id": order.marketplace_order_id,
+                        "reason": f"delivery_failed:{exc}",
+                    }
+                )
+                return
+            _delivery_exc = exc
+    if _delivery_exc is not None:
+        if just_created:
+            _send_purchase_acknowledgement(
+                order=order,
+                sale=sale,
+                marketplace_client=marketplace_client,
+                product_title=product_title,
+                product_kind=product_kind,
+                stats=stats,
+            )
+        _defer_for_provider_unavailable(
+            db=db,
             order=order,
-            supplier_client=supplier_client,
-            create_response=create_response,
+            sale=sale,
+            offer=offer,
+            mapping=mapping,
+            marketplace_client=marketplace_client,
+            stats=stats,
+            retry_status="supplier_order_created" if order.supplier_order_id else "pending",
         )
+        return
+    try:
         if terminal_failure is not None:
             if (
                 allow_supplier_recreate
