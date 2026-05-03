@@ -1067,9 +1067,42 @@ def sync_offer_stock(
 
         mapping = managed[0]
         supplier = mapping.supplier_product
+        supplier_id_parts = (supplier.supplier_product_id or "").split(":")
+        is_recharge = len(supplier_id_parts) == 2 and supplier_id_parts[0] == "recharge"
+
+        if not is_recharge:
+            # Gift card / shop product: use unlimited stock on the marketplace.
+            # Balance-based enable/disable is handled by the variant pass above;
+            # if the offer is already disabled there's nothing to update here.
+            gift_detail: dict[str, Any] = {
+                "offer_id": offer.id,
+                "marketplace": offer.marketplace,
+                "marketplace_offer_id": offer.marketplace_offer_id,
+                "usable_balance_usd": str(usable_balance_usd),
+            }
+            if not offer.is_enabled:
+                gift_detail["action"] = "stock_unlimited_skipped_offer_disabled"
+                gift_detail["status"] = "skipped"
+                stats["details"].append(gift_detail)
+                continue
+            gift_detail["action"] = "stock_unlimited_update"
+            try:
+                cast(Any, client).set_offer_stock(
+                    offer.marketplace_offer_id,
+                    0,
+                    min_purchase_quantity=mapping.min_purchase_quantity,
+                    unlimited=True,
+                )
+                gift_detail["status"] = "ok"
+            except Exception as exc:  # noqa: BLE001
+                gift_detail["status"] = "error"
+                gift_detail["reason"] = str(exc)
+                stats["errors"] += 1
+            stats["details"].append(gift_detail)
+            continue
+
         # Refresh cost_usd from the supplier API for variable recharge products
         # (service_id format: "recharge:{id}" with no denomination suffix).
-        supplier_id_parts = (supplier.supplier_product_id or "").split(":")
         if (
             len(supplier_id_parts) == 2
             and supplier_id_parts[0] == "recharge"

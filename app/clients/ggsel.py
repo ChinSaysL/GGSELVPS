@@ -1133,6 +1133,7 @@ class GGSELClient(BaseAPIClient):
         stock_qty: int,
         *,
         min_purchase_quantity: int | None = None,
+        unlimited: bool = False,
     ) -> dict[str, Any]:
         cookies = self._ensure_panel_session()
 
@@ -1154,15 +1155,24 @@ class GGSELClient(BaseAPIClient):
             raise APIRequestError(f"GGSEL could not determine current price for offer {offer_id}.")
 
         target_min = min_purchase_quantity if min_purchase_quantity is not None else int(offer_data.get("min_quantity") or 1)
-        payload = {
-            "offer": {
-                "max_quantity": int(stock_qty),
-                "quantity": int(stock_qty),
-                "min_quantity": int(target_min),
-                "unlimited_quantity": False,
-                "price": float(current_price),
+        if unlimited:
+            payload = {
+                "offer": {
+                    "min_quantity": int(target_min),
+                    "unlimited_quantity": True,
+                    "price": float(current_price),
+                }
             }
-        }
+        else:
+            payload = {
+                "offer": {
+                    "max_quantity": int(stock_qty),
+                    "quantity": int(stock_qty),
+                    "min_quantity": int(target_min),
+                    "unlimited_quantity": False,
+                    "price": float(current_price),
+                }
+            }
 
         result = self._panel_request_with_reauth(
             "PATCH",
