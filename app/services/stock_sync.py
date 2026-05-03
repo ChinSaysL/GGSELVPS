@@ -251,6 +251,11 @@ def _marketplace_status_update_error_is_safe_noop(*, marketplace: str, reason: s
     return _digiseller_disable_is_already_unavailable_error(reason)
 
 
+def _is_variant_not_found_error(reason: str) -> bool:
+    lower = reason.lower()
+    return "not found" in lower and "variant" in lower
+
+
 def _parse_int_token(value: object) -> int | None:
     if value is None:
         return None
@@ -673,8 +678,12 @@ def sync_offer_stock(
                     _skip_detail(stats, detail, reason=str(exc))
                     continue
                 except Exception as exc:  # noqa: BLE001
-                    variant_control_failed = True
-                    _error_detail(stats, detail, reason=str(exc))
+                    reason_str = str(exc)
+                    if _is_variant_not_found_error(reason_str):
+                        _skip_detail(stats, detail, reason=reason_str)
+                    else:
+                        variant_control_failed = True
+                        _error_detail(stats, detail, reason=reason_str)
                     continue
 
                 is_pending, task_id = _is_pending_response(response if isinstance(response, dict) else None)
@@ -868,8 +877,12 @@ def sync_offer_stock(
                     _skip_detail(stats, detail, reason=str(exc))
                     continue
                 except Exception as exc:  # noqa: BLE001
-                    variant_control_failed = True
-                    _error_detail(stats, detail, reason=str(exc))
+                    reason_str = str(exc)
+                    if _is_variant_not_found_error(reason_str):
+                        _skip_detail(stats, detail, reason=reason_str)
+                    else:
+                        variant_control_failed = True
+                        _error_detail(stats, detail, reason=reason_str)
                     continue
 
                 is_pending, task_id = _is_pending_response(response if isinstance(response, dict) else None)

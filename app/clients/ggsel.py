@@ -1153,7 +1153,7 @@ class GGSELClient(BaseAPIClient):
         if current_price is None:
             raise APIRequestError(f"GGSEL could not determine current price for offer {offer_id}.")
 
-        target_min = min_purchase_quantity if min_purchase_quantity is not None else int(offer_data.get("min_quantity", 1))
+        target_min = min_purchase_quantity if min_purchase_quantity is not None else int(offer_data.get("min_quantity") or 1)
         payload = {
             "offer": {
                 "max_quantity": int(stock_qty),
