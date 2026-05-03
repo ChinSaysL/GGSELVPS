@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -8,6 +9,39 @@ from typing import Any
 import httpx
 
 from app.clients.base import APIClientConfigError, APIRequestError, BaseAPIClient
+
+
+class _TokenBucket:
+    """Thread-safe token bucket rate limiter shared across all DigisellerClient instances."""
+
+    def __init__(self, rate_per_second: float, burst: float) -> None:
+        self._rate = rate_per_second
+        self._tokens = burst
+        self._capacity = burst
+        self._last = time.monotonic()
+        self._lock = threading.Lock()
+
+    def configure(self, rate_per_second: float) -> None:
+        with self._lock:
+            self._rate = max(rate_per_second, 0.1)
+            self._capacity = max(rate_per_second * 5, 5.0)
+
+    def acquire(self) -> None:
+        while True:
+            with self._lock:
+                now = time.monotonic()
+                elapsed = now - self._last
+                self._tokens = min(self._capacity, self._tokens + elapsed * self._rate)
+                self._last = now
+                if self._tokens >= 1.0:
+                    self._tokens -= 1.0
+                    return
+                wait = (1.0 - self._tokens) / self._rate
+            time.sleep(wait)
+
+
+# Shared across all DigisellerClient instances in this process; default 80 req/min.
+_digiseller_rate_limiter = _TokenBucket(rate_per_second=80 / 60, burst=10.0)
 
 
 class DigisellerClient(BaseAPIClient):
@@ -41,6 +75,7 @@ class DigisellerClient(BaseAPIClient):
         sales_page_size: int | None = None,
         sales_max_pages: int | None = None,
         timeout: float = 20.0,
+        rate_limit_per_minute: int | None = None,
     ) -> None:
         super().__init__(
             service_name="Digiseller",
@@ -67,6 +102,28 @@ class DigisellerClient(BaseAPIClient):
         )
         self._sales_page_size = max(1, min(int(sales_page_size or self._SALES_PAGE_SIZE), 5000))
         self._sales_max_pages = max(1, int(sales_max_pages or self._SALES_MAX_PAGES))
+        if rate_limit_per_minute is not None:
+            _digiseller_rate_limiter.configure(max(1, int(rate_limit_per_minute)) / 60)
+
+    def _request_json(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict[str, Any] | None = None,
+        json_body: dict[str, Any] | list[Any] | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> dict[str, Any] | list[Any]:
+        _digiseller_rate_limiter.acquire()
+        try:
+            return super()._request_json(method, path, params=params, json_body=json_body, headers=headers)
+        except APIRequestError as exc:
+            if "HTTP 429" not in str(exc):
+                raise
+            # Per-minute quota hit; wait out the reset window and retry once.
+            time.sleep(60)
+            _digiseller_rate_limiter.acquire()
+            return super()._request_json(method, path, params=params, json_body=json_body, headers=headers)
 
     @staticmethod
     def _parse_valid_thru(value: object) -> datetime | None:

@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     digiseller_base_url: str = "https://api.digiseller.com"
     digiseller_task_poll_timeout_seconds: int = 120
     digiseller_task_poll_interval_seconds: float = 1.0
+    digiseller_rate_limit_per_minute: int = 80
 
     database_url: str = "sqlite:///./data/app.db"
 
@@ -129,6 +130,7 @@ class Settings(BaseSettings):
             "stock_sync_interval_minutes",
             "price_sync_interval_minutes",
             "digiseller_task_poll_timeout_seconds",
+            "digiseller_rate_limit_per_minute",
         )
         for field_name in interval_fields:
             value = int(getattr(self, field_name))

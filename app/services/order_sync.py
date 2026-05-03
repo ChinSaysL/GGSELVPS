@@ -1691,6 +1691,7 @@ def _build_marketplace_clients(settings: Settings) -> dict[str, MarketplaceOrder
             task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
             sales_page_size=settings.digiseller_sales_page_size,
             sales_max_pages=settings.digiseller_sales_max_pages,
+            rate_limit_per_minute=settings.digiseller_rate_limit_per_minute,
         )
     if settings.ggsel_api_key:
         clients["ggsel"] = GGSELClient(

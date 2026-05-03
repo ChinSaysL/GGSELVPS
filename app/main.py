@@ -445,6 +445,7 @@ def digiseller_unique_code_delivery(
         seller_id=settings.digiseller_seller_id,
         task_poll_timeout_seconds=settings.digiseller_task_poll_timeout_seconds,
         task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
+        rate_limit_per_minute=settings.digiseller_rate_limit_per_minute,
     )
     try:
         stats = process_digiseller_unique_code(
