@@ -2598,7 +2598,7 @@ def _manual_map_unmatched_option_entries(
         if len(reference_products) == 1:
             # Simple case: one imported product for this link — just confirm it.
             ref = reference_products[0]
-            print(f"G-Engine product for this link:")
+            print("G-Engine product for this link:")
             print(f"  {_product_label(ref)}")
             if not _ask_bool(f"Link this product to '{description}'?", default=True):
                 continue

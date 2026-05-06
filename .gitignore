@@ -9,3 +9,8 @@ data/pytest-tmp/
 .mypy_cache/
 .ruff_cache/
 .venv/
+.run-logs/
+manual-temp-root/
+manual-python-mkdir/
+pytest-access-test/
+pytest-access-test2/

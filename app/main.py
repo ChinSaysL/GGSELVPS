@@ -11,7 +11,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import desc, select
 from sqlalchemy.orm import Session
 
-from app.clients import DigisellerClient, GEngineClient, GGSELClient
+from app.clients import DigisellerClient, GEngineClient
 from app.config import get_settings
 from app.db import get_db, init_db
 from app.models import BalanceSnapshot, MarketplaceOffer, Order, ProductMapping, SupplierProduct
@@ -103,7 +103,7 @@ def _parse_additive_quantity(value: str | None) -> Decimal | None:
         if chain_match:
             nums = re.findall(r"\d+(?:[.,]\d+)?", chain_match.group(0))
             try:
-                total = sum(Decimal(n.replace(",", ".")) for n in nums)
+                total = sum((Decimal(n.replace(",", ".")) for n in nums), Decimal("0"))
                 if total > 0:
                     return total
             except (InvalidOperation, ValueError):

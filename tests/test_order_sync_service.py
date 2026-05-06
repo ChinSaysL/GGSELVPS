@@ -65,6 +65,7 @@ class FakeSupplierOrderClient:
     )
     create_error: Exception | None = None
     status_error: Exception | None = None
+    status_calls: list[str] = field(default_factory=list)
 
     def create_order(
         self,
@@ -89,6 +90,7 @@ class FakeSupplierOrderClient:
         return dict(self.create_response)
 
     def get_order_status(self, order_id: str) -> dict[str, Any]:
+        self.status_calls.append(order_id)
         if self.status_error is not None:
             raise self.status_error
         return {"order_id": order_id, **self.status_payload}
@@ -1091,6 +1093,112 @@ def test_supplier_cancelled_order_needs_manual_review_and_retry_can_recreate(
     assert retry_stats["orders_delivered"] == 1
     assert order.status == "delivered"
     assert order.supplier_order_id == "ge-retry-1"
+
+
+def test_manually_cancelled_digiseller_order_is_not_reopened_when_sale_reappears(
+    db_session: Session,
+) -> None:
+    supplier = _add_linked_offer(db_session, marketplace="digiseller", offer_id="5850465")
+    offer = db_session.execute(select(MarketplaceOffer)).scalars().one()
+    db_session.add(
+        Order(
+            marketplace="digiseller",
+            marketplace_order_id="9001",
+            marketplace_offer_id=offer.id,
+            supplier_product_id=supplier.id,
+            status="cancelled",
+            error_message="manually_cancelled",
+        )
+    )
+    db_session.commit()
+
+    sale = {
+        "invoice_id": "9001",
+        "id_goods": "5850465",
+        "date_pay": "2026-04-27 10:00:00",
+        "amount": "5.00",
+    }
+    supplier_client = FakeSupplierOrderClient()
+    marketplace_client = FakeDigisellerOrderClient(
+        sales=[sale],
+        order_payloads={"9001": sale},
+        chat_messages={
+            "9001": [
+                {
+                    "id": 1,
+                    "message": "unique code E5E8B7E1369947A3",
+                    "buyer": 1,
+                    "deleted": 0,
+                    "date_written": "2026-04-27 10:01:00",
+                }
+            ]
+        },
+    )
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"digiseller": marketplace_client},
+    )
+
+    order = db_session.execute(select(Order)).scalars().one()
+    assert stats["supplier_orders_created"] == 0
+    assert stats["orders_delivered"] == 0
+    assert stats["details"][-1]["reason"] == "order_manually_cancelled"
+    assert order.status == "cancelled"
+    assert order.error_message == "manually_cancelled"
+    assert supplier_client.create_calls == []
+    assert supplier_client.status_calls == []
+    assert marketplace_client.messages == []
+    assert marketplace_client.delivered_unique_codes == []
+
+
+def test_manually_cancelled_order_with_supplier_id_is_not_polled_or_delivered(
+    db_session: Session,
+) -> None:
+    supplier = _add_linked_offer(db_session, marketplace="ggsel", offer_id="102251279")
+    offer = db_session.execute(select(MarketplaceOffer)).scalars().one()
+    db_session.add(
+        Order(
+            marketplace="ggsel",
+            marketplace_order_id="9006",
+            marketplace_offer_id=offer.id,
+            supplier_product_id=supplier.id,
+            status="cancelled",
+            supplier_order_id="ge-1",
+            error_message="manually_cancelled",
+        )
+    )
+    db_session.commit()
+
+    sale = {
+        "invoice_id": "9006",
+        "id_goods": "102251279",
+        "date_pay": "2026-04-27 10:00:00",
+        "amount": "5.00",
+    }
+    supplier_client = FakeSupplierOrderClient(
+        status_payload={"status": "completed", "codes": ["SHOULD-NOT-DELIVER"]}
+    )
+    marketplace_client = FakeMarketplaceOrderClient(sales=[sale], order_payloads={"9006": sale})
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"ggsel": marketplace_client},
+    )
+
+    order = db_session.execute(select(Order)).scalars().one()
+    assert stats["supplier_orders_created"] == 0
+    assert stats["orders_delivered"] == 0
+    assert stats["details"][-1]["reason"] == "order_manually_cancelled"
+    assert order.status == "cancelled"
+    assert order.supplier_order_id == "ge-1"
+    assert supplier_client.create_calls == []
+    assert supplier_client.status_calls == []
+    assert marketplace_client.messages == []
 
 
 def test_ggsel_quantity_based_recharge_order_scales_cost_and_supplier_quantity(

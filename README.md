@@ -200,6 +200,10 @@ avoid duplicate purchases. Use `python manage.py manual-retries` to list those o
 specific local order ID for retry, and optionally run live order sync after the explicit
 confirmation.
 
+Orders marked with `python manage.py cancel-orders` stay cancelled locally. Later marketplace
+polls may still see the paid sale, but order sync will not reopen the order, create another
+G-Engine purchase, poll the supplier order, or deliver codes for that local order.
+
 Order polling scale knobs:
 - `ORDER_SYNC_INITIAL_LOOKBACK_HOURS` controls the first/recovery polling window when no successful order-sync checkpoint exists.
 - `ORDER_SYNC_OVERLAP_MINUTES` adds overlap after the last successful checkpoint so late marketplace writes are not missed.

@@ -42,6 +42,7 @@ OrderStatus = Literal[
     "delivered",
     "failed",
     "needs_manual_review",
+    "cancelled",
 ]
 
 RetryAction = Literal["none", "retry_processing", "retry_delivery"]
@@ -109,7 +110,13 @@ def should_create_supplier_purchase(existing_status: str | None) -> bool:
 
 
 def should_skip_order(existing_status: str | None) -> bool:
-    return existing_status in {"processing", "supplier_order_created", "delivered"}
+    return existing_status in {
+        "processing",
+        "supplier_order_created",
+        "delivered",
+        "cancelled",
+        "canceled",
+    }
 
 
 def get_retry_action(status: str, supplier_order_id: str | None) -> RetryAction:
@@ -128,10 +135,36 @@ _RECREATABLE_SUPPLIER_TERMINAL_ERRORS = (
 _DIGISELLER_UNIQUE_CODE_WAIT_PREFIX = "awaiting_digiseller_unique_code"
 _DIGISELLER_UNIQUE_CODE_PROMPT_SENT_MARKER = "prompt_sent"
 _SUPPLIER_PURCHASE_STATUS_UNKNOWN = "supplier_purchase_status_unknown"
+_MANUALLY_CANCELLED_ORDER_STATUS = "cancelled"
+_MANUALLY_CANCELLED_ORDER_ERROR = "manually_cancelled"
+_CANCELLED_ORDER_STATUSES = {"cancelled", "canceled"}
 
 
 def _supplier_order_can_be_recreated(error_message: str | None) -> bool:
     return str(error_message or "") in _RECREATABLE_SUPPLIER_TERMINAL_ERRORS
+
+
+def _order_is_manually_cancelled(order: Order) -> bool:
+    status = str(order.status or "").strip().lower()
+    error_message = str(order.error_message or "").strip().lower()
+    return status in _CANCELLED_ORDER_STATUSES or error_message == _MANUALLY_CANCELLED_ORDER_ERROR
+
+
+def _normalize_manually_cancelled_order(db: Session, order: Order) -> bool:
+    if not _order_is_manually_cancelled(order):
+        return False
+
+    changed = False
+    if order.status != _MANUALLY_CANCELLED_ORDER_STATUS:
+        order.status = _MANUALLY_CANCELLED_ORDER_STATUS
+        changed = True
+    if not order.error_message:
+        order.error_message = _MANUALLY_CANCELLED_ORDER_ERROR
+        changed = True
+    if changed:
+        db.add(order)
+        db.commit()
+    return True
 
 
 def _sale_allows_supplier_recreate(sale: NormalizedMarketplaceSale) -> bool:
@@ -253,7 +286,7 @@ def _parse_additive_quantity(value: str | None) -> Decimal | None:
         if chain_match:
             nums = re.findall(r"\d+(?:[.,]\d+)?", chain_match.group(0))
             try:
-                total = sum(Decimal(n.replace(",", ".")) for n in nums)
+                total = sum((Decimal(n.replace(",", ".")) for n in nums), Decimal("0"))
                 if total > 0:
                     return total
             except (InvalidOperation, ValueError):
@@ -1170,6 +1203,18 @@ def _process_normalized_sale(
     order = _get_or_create_order(db, sale, offer, mapping)
     db.commit()
 
+    if _normalize_manually_cancelled_order(db, order):
+        stats["skipped"] += 1
+        stats["details"].append(
+            {
+                "action": "skipped",
+                "order_id": order.id,
+                "marketplace_order_id": order.marketplace_order_id,
+                "reason": "order_manually_cancelled",
+            }
+        )
+        return
+
     if order.status == "delivered":
         stats["skipped"] += 1
         stats["details"].append(
@@ -1288,7 +1333,6 @@ def _process_normalized_sale(
             )
             return
         _create_exc: Exception | None = None
-        create_response: dict[str, Any] | None = None
         for _attempt, _delay in enumerate((0.0, *_PROVIDER_RETRY_DELAYS)):
             if _delay > 0:
                 time.sleep(_delay)
@@ -1341,20 +1385,6 @@ def _process_normalized_sale(
                     "order_id": order.id,
                     "marketplace_order_id": order.marketplace_order_id,
                     "reason": _SUPPLIER_PURCHASE_STATUS_UNKNOWN,
-                }
-            )
-            return
-            order.status = "needs_manual_review"
-            order.error_message = f"{_SUPPLIER_PURCHASE_STATUS_UNKNOWN}:{exc}"
-            db.add(order)
-            db.commit()
-            stats["errors"] += 1
-            stats["details"].append(
-                {
-                    "action": "error",
-                    "order_id": order.id,
-                    "marketplace_order_id": order.marketplace_order_id,
-                    "reason": f"{_SUPPLIER_PURCHASE_STATUS_UNKNOWN}:{exc}",
                 }
             )
             return

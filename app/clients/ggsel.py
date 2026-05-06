@@ -9,9 +9,9 @@ from typing import Any
 
 import httpx
 
-_PANEL_BASE = "https://seller.ggsel.com"
-
 from app.clients.base import APIClientConfigError, APIRequestError, BaseAPIClient
+
+_PANEL_BASE = "https://seller.ggsel.com"
 
 
 class GGSELClient(BaseAPIClient):
@@ -1080,7 +1080,7 @@ class GGSELClient(BaseAPIClient):
             if computed > 0:
                 resp = self._panel_request("GET", f"/api/v1/offers/{computed}", cookies=cookies)
                 data = resp.get("data", resp)
-                if str(data.get("ggsel_id", "")) == str(public_offer_id):
+                if isinstance(data, dict) and str(data.get("ggsel_id", "")) == str(public_offer_id):
                     return data
         except (ValueError, APIRequestError):
             pass

@@ -117,7 +117,7 @@ def _check(offer_id: str, marketplace: str) -> None:
             real_label_inputs[normalized] = "TEST_VALUE"
 
         try:
-            params2 = GEngineClient._build_recharge_params(
+            GEngineClient._build_recharge_params(
                 product_payload=raw_payload,
                 buyer_inputs=real_label_inputs,
                 marketplace_quantity=1,

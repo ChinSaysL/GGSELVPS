@@ -17,6 +17,12 @@ def test_existing_delivered_order_not_purchased_again() -> None:
     assert should_create_supplier_purchase("delivered") is False
 
 
+def test_existing_cancelled_order_not_purchased_again() -> None:
+    assert should_skip_order("cancelled") is True
+    assert should_skip_order("canceled") is True
+    assert should_create_supplier_purchase("cancelled") is False
+
+
 def test_supplier_success_delivery_failure_retries_delivery_only() -> None:
     assert get_retry_action("failed", supplier_order_id="sup-123") == "retry_delivery"
 
