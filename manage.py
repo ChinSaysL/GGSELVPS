@@ -2543,6 +2543,66 @@ def _auto_match_option_entries_to_products(
     return matches, unmatched, ambiguous
 
 
+_RECHARGE_RUNTIME_PARAM_ALIASES = {
+    "account": "account",
+    "login": "account",
+    "playerid": "account",
+    "uid": "account",
+    "userid": "account",
+    "\u0430\u043a\u043a\u0430\u0443\u043d\u0442": "account",
+    "\u0438\u0433\u0440\u043e\u0432\u043e\u0439id": "account",
+    "\u043b\u043e\u0433\u0438\u043d": "account",
+    "\u0441\u0447\u0435\u0442": "account",
+    "\u0441\u0447\u0451\u0442": "account",
+    "region": "region",
+    "server": "region",
+    "zone": "region",
+    "\u0437\u043e\u043d\u0430": "region",
+    "\u0440\u0435\u0433\u0438\u043e\u043d": "region",
+    "\u0441\u0435\u0440\u0432\u0435\u0440": "region",
+}
+
+
+def _normalize_recharge_runtime_param_key(value: object) -> str:
+    raw = str(value or "").strip()
+    raw = re.sub(r"\s*\([^)]+\)", "", raw).strip()
+    normalized = "".join(character.lower() for character in raw if character.isalnum())
+    return _RECHARGE_RUNTIME_PARAM_ALIASES.get(normalized, normalized)
+
+
+def _recharge_runtime_param_keys_for_products(products: list[Any]) -> set[str]:
+    keys: set[str] = set()
+    for product in products:
+        for key in _recharge_non_quantity_param_keys(product):
+            normalized = _normalize_recharge_runtime_param_key(key)
+            if normalized and normalized != "quantity":
+                keys.add(normalized)
+    return keys
+
+
+def _split_recharge_runtime_option_entries(
+    reference: GEngineProductReference,
+    products: list[Any],
+    option_entries: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if reference.kind != "recharge":
+        return option_entries, []
+
+    runtime_param_keys = _recharge_runtime_param_keys_for_products(products)
+    if not runtime_param_keys:
+        return option_entries, []
+
+    product_mapping_entries: list[dict[str, Any]] = []
+    runtime_input_entries: list[dict[str, Any]] = []
+    for entry in option_entries:
+        label_key = _normalize_recharge_runtime_param_key(entry.get("option_label"))
+        if label_key in runtime_param_keys:
+            runtime_input_entries.append(entry)
+        else:
+            product_mapping_entries.append(entry)
+    return product_mapping_entries, runtime_input_entries
+
+
 def _option_entry_description(entry: dict[str, Any]) -> str:
     option_label = str(entry.get("option_label") or "Option")
     variant_value = str(entry.get("variant_value") or "").strip()
@@ -4095,9 +4155,14 @@ def action_manual_link() -> int:
                 f"{len(option_variant_entries)} option values."
             )
         else:
-            auto_matches, unmatched_entries, ambiguous_entries = _auto_match_option_entries_to_products(
+            mapping_option_entries, runtime_input_entries = _split_recharge_runtime_option_entries(
+                reference,
                 reference_products,
                 option_variant_entries,
+            )
+            auto_matches, unmatched_entries, ambiguous_entries = _auto_match_option_entries_to_products(
+                reference_products,
+                mapping_option_entries,
             )
             for item in auto_matches:
                 entry = item["entry"]
@@ -4113,8 +4178,16 @@ def action_manual_link() -> int:
 
             print(
                 "\nAuto-map summary: "
-                f"matched {len(auto_matches)}/{len(option_variant_entries)} option values."
+                f"matched {len(auto_matches)}/{len(mapping_option_entries)} product option values."
             )
+            if runtime_input_entries:
+                print("Recharge input option values are passed at order time, not product-mapped:")
+                for entry in runtime_input_entries[:20]:
+                    option_label = str(entry.get("option_label") or "Option")
+                    variant_value = str(entry.get("variant_value") or "")
+                    print(f"- {option_label}: {variant_value}")
+                if len(runtime_input_entries) > 20:
+                    print(f"...and {len(runtime_input_entries) - 20} more input values.")
             if unmatched_entries:
                 print("Unmatched option values (skipped):")
                 for item in unmatched_entries[:20]:
@@ -4147,7 +4220,18 @@ def action_manual_link() -> int:
 
     if not targets_by_product_id:
         if option_variant_entries:
-            _print_auto_map_diagnostics(reference_products, option_variant_entries)
+            mapping_option_entries, runtime_input_entries = _split_recharge_runtime_option_entries(
+                reference,
+                reference_products,
+                option_variant_entries,
+            )
+            _print_auto_map_diagnostics(reference_products, mapping_option_entries)
+            if runtime_input_entries:
+                print("\nRecharge input options were detected and skipped from product mapping:")
+                for entry in runtime_input_entries[:20]:
+                    option_label = str(entry.get("option_label") or "Option")
+                    variant_value = str(entry.get("variant_value") or "")
+                    print(f"- {option_label}: {variant_value}")
             print(
                 "No option values could be auto-mapped. "
                 "The diagnostics above show the normalized signatures from both sides; "

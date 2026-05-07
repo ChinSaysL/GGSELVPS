@@ -1328,6 +1328,69 @@ def test_auto_match_option_entries_matches_additive_quantity_for_recharge() -> N
     assert ambiguous == []
 
 
+def test_recharge_region_option_entries_are_runtime_inputs_not_product_mappings() -> None:
+    reference = manage.GEngineProductReference(
+        kind="recharge",
+        product_id="78",
+        slug="zenless-zone-zero-russia",
+        source="https://b2b.g-engine.net/en/recharge/78/zenless-zone-zero-russia",
+    )
+    products = [
+        SimpleNamespace(
+            id=1,
+            title="Zenless Zone Zero (Russia)",
+            category="Recharge",
+            denomination="60 Monochromes",
+            raw_payload_json=(
+                '{"source_type":"recharge","recharge_product_id":"78",'
+                '"params":[{"param_key":"Region","param_type":"Select"},'
+                '{"param_key":"Account","param_type":"Integer"}],'
+                '"recharge_param_keys":["Region","Account"]}'
+            ),
+        ),
+        SimpleNamespace(
+            id=2,
+            title="Zenless Zone Zero (Russia)",
+            category="Recharge",
+            denomination="330 Monochromes",
+            raw_payload_json=(
+                '{"source_type":"recharge","recharge_product_id":"78",'
+                '"params":[{"param_key":"Region","param_type":"Select"},'
+                '{"param_key":"Account","param_type":"Integer"}],'
+                '"recharge_param_keys":["Region","Account"]}'
+            ),
+        ),
+    ]
+    entries = [
+        {"option_label": "Region", "variant_value": "\u0415\u0432\u0440\u043e\u043f\u0430"},
+        {"option_label": "Region", "variant_value": "\u0410\u043c\u0435\u0440\u0438\u043a\u0430"},
+        {"option_label": "\u041a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e", "variant_value": "60 Monochromes"},
+        {"option_label": "\u041a\u043e\u043b\u0438\u0447\u0435\u0441\u0442\u0432\u043e", "variant_value": "330 Monochromes"},
+    ]
+
+    mapping_entries, runtime_entries = manage._split_recharge_runtime_option_entries(
+        reference,
+        products,
+        entries,
+    )
+    matches, unmatched, ambiguous = manage._auto_match_option_entries_to_products(
+        products,
+        mapping_entries,
+    )
+
+    assert [entry["variant_value"] for entry in runtime_entries] == [
+        "\u0415\u0432\u0440\u043e\u043f\u0430",
+        "\u0410\u043c\u0435\u0440\u0438\u043a\u0430",
+    ]
+    assert [entry["variant_value"] for entry in mapping_entries] == [
+        "60 Monochromes",
+        "330 Monochromes",
+    ]
+    assert [item["product"].id for item in matches] == [1, 2]
+    assert unmatched == []
+    assert ambiguous == []
+
+
 def test_auto_match_option_entries_additive_with_region_payload_does_not_produce_rub_key() -> None:
     """Real DB products have raw_payload_json with a 'value' field and region 'russia'.
     Without the quantity-key-first fix, _product_denomination_signature combined the

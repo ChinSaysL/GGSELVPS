@@ -56,6 +56,22 @@ class GEngineClient(BaseAPIClient):
         "failed",
         "error",
     }
+    _RECHARGE_REGION_VALUE_ALIASES = {
+        "america": "America",
+        "\u0430\u043c\u0435\u0440\u0438\u043a\u0430": "America",
+        "asia": "Asia",
+        "\u0430\u0437\u0438\u044f": "Asia",
+        "europe": "Europe",
+        "europa": "Europe",
+        "\u0435\u0432\u0440\u043e\u043f\u0430": "Europe",
+        "hongkong": "Hong Kong",
+        "\u0433\u043e\u043d\u043a\u043e\u043d\u0433": "Hong Kong",
+        "macau": "Macau",
+        "macao": "Macau",
+        "\u043c\u0430\u043a\u0430\u043e": "Macau",
+        "taiwan": "Taiwan",
+        "\u0442\u0430\u0439\u0432\u0430\u043d\u044c": "Taiwan",
+    }
 
     def __init__(self, base_url: str, api_key: str | None, timeout: float = 20.0) -> None:
         super().__init__(
@@ -899,6 +915,11 @@ class GEngineClient(BaseAPIClient):
         return cls._normalize_param_key(value)
 
     @classmethod
+    def _canonical_recharge_region_value(cls, value: str) -> str:
+        normalized = cls._normalize_option_value(value)
+        return cls._RECHARGE_REGION_VALUE_ALIASES.get(normalized, value)
+
+    @classmethod
     def _canonical_recharge_param_value(
         cls,
         param_key: str,
@@ -906,12 +927,17 @@ class GEngineClient(BaseAPIClient):
         *,
         product_payload: dict[str, Any],
     ) -> str:
+        normalized_param = cls._normalize_param_key(param_key)
         param_spec = cls._payload_param_spec_for_key(product_payload, param_key)
         if param_spec is None:
+            if normalized_param == "region":
+                return cls._canonical_recharge_region_value(value)
             return value
 
         options = cls._extract_param_options(param_spec)
         if not options:
+            if normalized_param == "region":
+                return cls._canonical_recharge_region_value(value)
             return value
 
         normalized_value = cls._normalize_option_value(value)
@@ -921,6 +947,16 @@ class GEngineClient(BaseAPIClient):
                 for candidate in cls._option_match_values(option)
             ):
                 return cls._option_api_value(option) or value
+        if normalized_param == "region":
+            region_alias = cls._canonical_recharge_region_value(value)
+            normalized_alias = cls._normalize_option_value(region_alias)
+            for option in options:
+                if any(
+                    cls._normalize_option_value(candidate) == normalized_alias
+                    for candidate in cls._option_match_values(option)
+                ):
+                    return cls._option_api_value(option) or region_alias
+            return region_alias
         return value
 
     @classmethod
