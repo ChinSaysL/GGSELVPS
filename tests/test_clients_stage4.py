@@ -492,6 +492,42 @@ def test_gengine_create_fixed_recharge_order_includes_denomination_id() -> None:
     assert captured["body"]["params"] == [{"param_key": "Account", "param_value": "player-1"}]
 
 
+def test_gengine_create_recharge_order_canonicalizes_select_param_value() -> None:
+    captured: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured["body"] = json.loads(request.content.decode("utf-8"))
+        return httpx.Response(status_code=200, json={"id": 7006, "status": "processing"})
+
+    client = GEngineClient(base_url="https://api.g-engine.net", api_key="secret")
+    _attach_mock_transport(client, httpx.MockTransport(handler))
+
+    response = client.create_order(
+        "recharge:5:10",
+        buyer_inputs={"account": "123456789", "region": "europe"},
+        product_payload={
+            "source_type": "recharge",
+            "recharge_product_id": "5",
+            "recharge_denomination_id": "10",
+            "params": [
+                {"param_key": "Account", "param_type": "Integer"},
+                {
+                    "param_key": "Region",
+                    "param_type": "Select",
+                    "options": ["Asia", "America", "Europe", "Taiwan"],
+                },
+            ],
+        },
+    )
+    client.close()
+
+    assert response == {"id": 7006, "status": "processing", "supplier_order_id": "recharge:7006"}
+    assert captured["body"]["params"] == [
+        {"param_key": "Account", "param_value": "123456789"},
+        {"param_key": "Region", "param_value": "Europe"},
+    ]
+
+
 def test_gengine_recharge_status_pays_when_order_becomes_verified() -> None:
     captured_paths: list[str] = []
 

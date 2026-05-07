@@ -1455,6 +1455,106 @@ def test_recharge_order_with_account_and_region_integer_params(
     }
 
 
+def test_recharge_region_select_option_does_not_hide_denomination_mapping(
+    db_session: Session,
+) -> None:
+    raw_payload_json = (
+        '{"source_type":"recharge","recharge_product_id":"5",'
+        '"recharge_denomination_id":"denom1",'
+        '"params":['
+        '{"param_key":"Account","param_type":"Integer"},'
+        '{"param_key":"Region","param_type":"Select","options":["Asia","America","Europe"]}'
+        "],"
+        '"recharge_param_keys":["Account","Region"]}'
+    )
+    supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="recharge:5:denom1",
+        title="Mobile Legends 35 Diamonds",
+        category="Recharge",
+        denomination="32 + 3 Diamonds",
+        region=None,
+        cost_usd=Decimal("0.6834"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json=raw_payload_json,
+    )
+    other_supplier = SupplierProduct(
+        supplier="gengine",
+        supplier_product_id="recharge:5:denom2",
+        title="Mobile Legends 55 Diamonds",
+        category="Recharge",
+        denomination="50 + 5 Diamonds",
+        region=None,
+        cost_usd=Decimal("1.0500"),
+        supplier_stock="unlimited",
+        is_available=True,
+        raw_payload_json=raw_payload_json.replace("denom1", "denom2"),
+    )
+    db_session.add_all([supplier, other_supplier])
+    db_session.flush()
+
+    offer = MarketplaceOffer(
+        marketplace="ggsel",
+        marketplace_offer_id="102270012",
+        supplier_product_id=supplier.id,
+        title="MLBB Diamonds",
+        price=Decimal("2.00"),
+        currency="USD",
+        is_enabled=True,
+        requires_buyer_input=True,
+    )
+    db_session.add(offer)
+    db_session.flush()
+    db_session.add_all(
+        [
+            ProductMapping(
+                supplier_product_id=supplier.id,
+                marketplace_offer_id=offer.id,
+                enabled=True,
+                marketplace_variant_name="32 + 3 Diamonds",
+            ),
+            ProductMapping(
+                supplier_product_id=other_supplier.id,
+                marketplace_offer_id=offer.id,
+                enabled=True,
+                marketplace_variant_name="50 + 5 Diamonds",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    sale = {
+        "invoice_id": "9032",
+        "id_goods": "102270012",
+        "date_pay": "2026-05-01 10:00:00",
+        "amount": "2.00",
+        "denomination": "35 Diamonds",
+        "options": [
+            {"name": "Region (Select)", "user_data": "Europe", "user_data_id": 30003},
+            {"name": "Account (Integer)", "user_data": "123456789", "user_data_id": None},
+        ],
+    }
+    supplier_client = FakeSupplierOrderClient(
+        create_response={"id": 9003, "status": "shipped", "supplier_order_id": "recharge:9003"}
+    )
+    marketplace_client = FakeMarketplaceOrderClient(sales=[sale], order_payloads={"9032": sale})
+
+    stats = sync_orders(
+        db=db_session,
+        settings=_settings_for_tests(),
+        supplier_client=supplier_client,
+        marketplace_clients={"ggsel": marketplace_client},
+    )
+
+    assert stats["orders_delivered"] == 1
+    assert supplier_client.create_calls[0]["product_id"] == "recharge:5:denom1"
+    assert supplier_client.create_calls[0]["buyer_inputs"] == {
+        "account": "123456789",
+        "region": "Europe",
+    }
+
+
 def test_recharge_order_with_russian_account_and_region_labels(
     db_session: Session,
 ) -> None:

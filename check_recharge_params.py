@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import sys
+from typing import Any
 
 from sqlalchemy.orm import Session
 
@@ -28,6 +29,17 @@ from app.clients.gengine import GEngineClient
 from app.db import SessionLocal
 from app.models import MarketplaceOffer, ProductMapping, SupplierProduct
 from app.services.order_sync import _normalize_input_key
+
+
+def _first_non_empty_str(payload: dict[str, Any], keys: tuple[str, ...]) -> str | None:
+    for key in keys:
+        value = payload.get(key)
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return None
 
 
 def _get_session() -> Session:
@@ -71,11 +83,19 @@ def _check(offer_id: str, marketplace: str) -> None:
             except json.JSONDecodeError:
                 print("[WARN] raw_payload_json is not valid JSON.")
 
+        param_specs = GEngineClient._payload_param_specs(raw_payload)
         param_keys = GEngineClient._payload_param_keys(raw_payload)
         print(f"\nG-Engine param keys in raw_payload: {param_keys}")
+        print("G-Engine param metadata:")
+        for spec in param_specs:
+            key = GEngineClient._param_key_from_spec(spec) or "(unknown)"
+            param_type = _first_non_empty_str(spec, ("param_type", "type", "input_type")) or "unknown"
+            options = GEngineClient._extract_param_options(spec)
+            option_preview = ", ".join(str(item) for item in options[:8]) if options else "none"
+            print(f"  {key}: type={param_type}; options={option_preview}")
 
         # Simulate what _extract_buyer_inputs produces for each param key.
-        # The marketplace sends labels like "Account (Integer)", "Region (Integer)".
+        # The marketplace sends labels like "Account (Integer)", "Region (Select)".
         # We test the worst-case: the label IS the param key (label == param name).
         print("\n--- Mapping simulation ---")
         simulated_buyer_inputs: dict[str, str] = {}
@@ -108,10 +128,12 @@ def _check(offer_id: str, marketplace: str) -> None:
             sys.exit(1)
 
         # Check account key variant — simulate what a real Digiseller/GGSEL order sends.
-        print("\n--- Real-label simulation (e.g. 'Account (Integer)', 'Region (Integer)') ---")
+        print("\n--- Real-label simulation (e.g. 'Account (Integer)', 'Region (Select)') ---")
         real_label_inputs: dict[str, str] = {}
-        for i, key in enumerate(param_keys, start=1):
-            label = f"{key} (Integer)"
+        for i, spec in enumerate(param_specs, start=1):
+            key = GEngineClient._param_key_from_spec(spec) or f"input_{i}"
+            param_type = _first_non_empty_str(spec, ("param_type", "type", "input_type")) or "Integer"
+            label = f"{key} ({param_type})"
             normalized = _normalize_input_key(label, f"input_{i}")
             print(f"  Label {label!r:35s} -> {normalized!r}")
             real_label_inputs[normalized] = "TEST_VALUE"
@@ -122,7 +144,7 @@ def _check(offer_id: str, marketplace: str) -> None:
                 buyer_inputs=real_label_inputs,
                 marketplace_quantity=1,
             )
-            print("\n[OK] All params resolved with '(Integer)'-suffixed labels too.")
+            print("\n[OK] All params resolved with real type-suffixed labels too.")
         except Exception as exc:
             print(f"\n[FAIL] Failed with real marketplace labels: {exc}")
             sys.exit(1)

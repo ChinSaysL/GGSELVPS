@@ -381,6 +381,13 @@ def _extract_recharge_option_inputs(payload: dict[str, Any]) -> dict[str, str]:
 
 
 def _extract_variant_id(payload: dict[str, Any]) -> int | None:
+    candidates = _extract_variant_id_candidates(payload)
+    return candidates[0] if candidates else None
+
+
+def _extract_variant_id_candidates(payload: dict[str, Any]) -> list[int]:
+    candidates: list[int] = []
+
     direct = _to_int(
         _first_non_empty_str(
             payload,
@@ -395,7 +402,7 @@ def _extract_variant_id(payload: dict[str, Any]) -> int | None:
         )
     )
     if direct is not None:
-        return direct
+        candidates.append(direct)
 
     for option in _extract_options(payload):
         variant_id = _to_int(
@@ -404,19 +411,37 @@ def _extract_variant_id(payload: dict[str, Any]) -> int | None:
                 ("user_data_id", "variant_id", "variantId", "value_id", "id_variant"),
             )
         )
-        if variant_id is not None:
-            return variant_id
-    return None
+        if variant_id is not None and variant_id not in candidates:
+            candidates.append(variant_id)
+    return candidates
 
 
 def _extract_variant_text(payload: dict[str, Any]) -> str | None:
+    candidates = _extract_variant_text_candidates(payload)
+    return candidates[0] if candidates else None
+
+
+def _extract_variant_text_candidates(payload: dict[str, Any]) -> list[str]:
+    candidates: list[str] = []
+
+    for key in ("variant", "variant_name", "denomination", "option"):
+        value = _first_non_empty_str(payload, (key,))
+        if value and value not in candidates:
+            candidates.append(value)
+
     for option in _extract_options(payload):
-        if _to_int(option.get("user_data_id")) is None:
+        variant_id = _to_int(
+            _first_non_empty_str(
+                option,
+                ("user_data_id", "variant_id", "variantId", "value_id", "id_variant"),
+            )
+        )
+        if variant_id is None:
             continue
         value = _first_non_empty_str(option, ("user_data", "value", "text"))
-        if value:
-            return value
-    return _first_non_empty_str(payload, ("variant", "variant_name", "option", "denomination"))
+        if value and value not in candidates:
+            candidates.append(value)
+    return candidates
 
 
 def _extract_unique_code(payload: dict[str, Any], explicit: str | None) -> str | None:
@@ -634,34 +659,48 @@ def _select_mapping(
             return mapping
         return None
 
+    def _match_by_variant_texts() -> ProductMapping | None:
+        variant_texts = _extract_variant_text_candidates(sale.raw_payload)
+        if sale.variant_text:
+            variant_texts.insert(0, sale.variant_text)
+        variant_texts = list(dict.fromkeys(variant_texts))
+
+        for variant_text in variant_texts:
+            sale_variant_text = _normalized_text(variant_text)
+            for mapping in enabled_mappings:
+                if _normalized_text(mapping.marketplace_variant_name) == sale_variant_text:
+                    return mapping
+
+        for variant_text in variant_texts:
+            sale_qty = _parse_additive_quantity(variant_text)
+            if sale_qty is None:
+                continue
+            for mapping in enabled_mappings:
+                if _parse_additive_quantity(mapping.marketplace_variant_name) == sale_qty:
+                    return mapping
+        return None
+
+    variant_ids = _extract_variant_id_candidates(sale.raw_payload)
     if sale.variant_id is not None:
-        for mapping in enabled_mappings:
-            if mapping.marketplace_variant_id == sale.variant_id:
-                return mapping, None
+        variant_ids.insert(0, sale.variant_id)
+    variant_ids = list(dict.fromkeys(variant_ids))
+
+    if variant_ids:
+        for variant_id in variant_ids:
+            for mapping in enabled_mappings:
+                if mapping.marketplace_variant_id == variant_id:
+                    return mapping, None
         fallback_mapping = _single_mapping_fallback_for_recharge()
         if fallback_mapping is not None:
             return fallback_mapping, None
-        # Additive quantity fallback when variant_id doesn't match any mapping:
-        # "35 Diamonds" (user_data) matches mapping with name "32 + 3 Diamonds" (32+3=35)
-        if sale.variant_text:
-            sale_qty = _parse_additive_quantity(sale.variant_text)
-            if sale_qty is not None:
-                for mapping in enabled_mappings:
-                    if _parse_additive_quantity(mapping.marketplace_variant_name) == sale_qty:
-                        return mapping, None
-        return None, f"variant_mapping_not_found:{sale.variant_id}"
+        text_mapping = _match_by_variant_texts()
+        if text_mapping is not None:
+            return text_mapping, None
+        return None, f"variant_mapping_not_found:{variant_ids[0]}"
 
-    if sale.variant_text:
-        sale_variant_text = _normalized_text(sale.variant_text)
-        for mapping in enabled_mappings:
-            if _normalized_text(mapping.marketplace_variant_name) == sale_variant_text:
-                return mapping, None
-        # Additive quantity fallback: "35 Diamonds" matches "32 + 3 Diamonds" (32+3=35)
-        sale_qty = _parse_additive_quantity(sale.variant_text)
-        if sale_qty is not None:
-            for mapping in enabled_mappings:
-                if _parse_additive_quantity(mapping.marketplace_variant_name) == sale_qty:
-                    return mapping, None
+    text_mapping = _match_by_variant_texts()
+    if text_mapping is not None:
+        return text_mapping, None
 
     if len(enabled_mappings) == 1:
         return enabled_mappings[0], None

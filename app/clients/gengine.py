@@ -749,25 +749,179 @@ class GEngineClient(BaseAPIClient):
         return "".join(character.lower() for character in str(value) if character.isalnum())
 
     @classmethod
-    def _payload_param_keys(cls, product_payload: dict[str, Any]) -> list[str]:
-        raw_keys = product_payload.get("recharge_param_keys")
-        if isinstance(raw_keys, list):
-            keys = [str(item).strip() for item in raw_keys if str(item).strip()]
-            if keys:
-                return keys
+    def _param_key_from_spec(cls, param_spec: dict[str, Any]) -> str | None:
+        for key in ("param_key", "key", "name", "label", "title"):
+            value = param_spec.get(key)
+            if value is not None and str(value).strip():
+                return str(value).strip()
+        return None
 
+    @classmethod
+    def _payload_param_specs(cls, product_payload: dict[str, Any]) -> list[dict[str, Any]]:
         raw_params = product_payload.get("params")
         if isinstance(raw_params, list):
-            keys = []
+            specs = []
             for item in raw_params:
                 if not isinstance(item, dict):
                     continue
-                value = item.get("param_key")
-                if value is not None and str(value).strip():
-                    keys.append(str(value).strip())
-            if keys:
-                return keys
-        return ["Account"]
+                if cls._param_key_from_spec(item) is not None:
+                    specs.append(item)
+            if specs:
+                return specs
+
+        raw_keys = product_payload.get("recharge_param_keys")
+        if isinstance(raw_keys, list):
+            specs = [{"param_key": str(item).strip()} for item in raw_keys if str(item).strip()]
+            if specs:
+                return specs
+        return [{"param_key": "Account"}]
+
+    @classmethod
+    def _payload_param_keys(cls, product_payload: dict[str, Any]) -> list[str]:
+        return [
+            param_key
+            for param_key in (
+                cls._param_key_from_spec(param_spec)
+                for param_spec in cls._payload_param_specs(product_payload)
+            )
+            if param_key is not None
+        ]
+
+    @classmethod
+    def _payload_param_spec_for_key(
+        cls,
+        product_payload: dict[str, Any],
+        param_key: str,
+    ) -> dict[str, Any] | None:
+        normalized_param = cls._normalize_param_key(param_key)
+        for param_spec in cls._payload_param_specs(product_payload):
+            spec_key = cls._param_key_from_spec(param_spec)
+            if spec_key is not None and cls._normalize_param_key(spec_key) == normalized_param:
+                return param_spec
+        return None
+
+    @staticmethod
+    def _split_option_text(value: str) -> list[object]:
+        if "," in value:
+            comma_items: list[object] = [item.strip() for item in value.split(",") if item.strip()]
+            return comma_items
+        lines: list[object] = [item.strip() for item in value.splitlines() if item.strip()]
+        if len(lines) > 1:
+            return lines
+        return [value.strip()] if value.strip() else []
+
+    @classmethod
+    def _extract_param_options(cls, param_spec: dict[str, Any]) -> list[object]:
+        option_keys = (
+            "options",
+            "values",
+            "choices",
+            "items",
+            "variants",
+            "select_options",
+            "available_values",
+            "param_values",
+        )
+        for key in option_keys:
+            raw_options = param_spec.get(key)
+            if isinstance(raw_options, list):
+                return list(raw_options)
+            if isinstance(raw_options, dict):
+                nested = cls._extract_param_options(raw_options)
+                if nested:
+                    return nested
+                return [
+                    {"id": option_key, "value": option_value}
+                    for option_key, option_value in raw_options.items()
+                ]
+            if isinstance(raw_options, str):
+                return cls._split_option_text(raw_options)
+        return []
+
+    @staticmethod
+    def _option_text(value: object) -> str | None:
+        if value in {None, ""}:
+            return None
+        text = str(value).strip()
+        return text or None
+
+    @classmethod
+    def _option_match_values(cls, option: object) -> list[str]:
+        if not isinstance(option, dict):
+            text = cls._option_text(option)
+            return [] if text is None else [text]
+
+        values: list[str] = []
+        for key in (
+            "id",
+            "value_id",
+            "option_id",
+            "key",
+            "code",
+            "slug",
+            "value",
+            "param_value",
+            "name",
+            "label",
+            "title",
+            "text",
+            "variant_value",
+        ):
+            text = cls._option_text(option.get(key))
+            if text is not None and text not in values:
+                values.append(text)
+        return values
+
+    @classmethod
+    def _option_api_value(cls, option: object) -> str | None:
+        if not isinstance(option, dict):
+            return cls._option_text(option)
+
+        for key in (
+            "param_value",
+            "value",
+            "name",
+            "label",
+            "title",
+            "text",
+            "variant_value",
+            "key",
+            "code",
+            "id",
+        ):
+            text = cls._option_text(option.get(key))
+            if text is not None:
+                return text
+        return None
+
+    @classmethod
+    def _normalize_option_value(cls, value: object) -> str:
+        return cls._normalize_param_key(value)
+
+    @classmethod
+    def _canonical_recharge_param_value(
+        cls,
+        param_key: str,
+        value: str,
+        *,
+        product_payload: dict[str, Any],
+    ) -> str:
+        param_spec = cls._payload_param_spec_for_key(product_payload, param_key)
+        if param_spec is None:
+            return value
+
+        options = cls._extract_param_options(param_spec)
+        if not options:
+            return value
+
+        normalized_value = cls._normalize_option_value(value)
+        for option in options:
+            if any(
+                cls._normalize_option_value(candidate) == normalized_value
+                for candidate in cls._option_match_values(option)
+            ):
+                return cls._option_api_value(option) or value
+        return value
 
     @classmethod
     def _value_for_recharge_param(
@@ -860,7 +1014,16 @@ class GEngineClient(BaseAPIClient):
             if value is None:
                 missing.append(param_key)
                 continue
-            params.append({"param_key": param_key, "param_value": value})
+            params.append(
+                {
+                    "param_key": param_key,
+                    "param_value": cls._canonical_recharge_param_value(
+                        param_key,
+                        value,
+                        product_payload=product_payload,
+                    ),
+                }
+            )
 
         if missing:
             raise APIClientError(
