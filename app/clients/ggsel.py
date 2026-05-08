@@ -1169,27 +1169,31 @@ class GGSELClient(BaseAPIClient):
                 "variants_attributes": variants,
             }
         }
-        response = self._panel_request_with_reauth(
+        self._panel_request_with_reauth(
             "POST",
             f"/api/v1/offers/{internal_id}/options",
             json_body=body,
         )
-        data = response.get("data", response) if isinstance(response, dict) else {}
-        if not isinstance(data, dict):
-            data = {}
-        # If the response is the wrapper offer, find our new option by title match.
-        options = data.get("options") or []
-        if isinstance(options, list) and options:
-            # Return the option whose title matches (last one is newest).
-            for opt in reversed(options):
-                if isinstance(opt, dict) and (
-                    opt.get("title_en") == title_en or opt.get("title_ru") == title_ru
-                ):
-                    return opt
-            # Fallback: last option.
-            return options[-1]
-        # Response IS the option directly.
-        return data
+
+        # POST response rarely includes full variant IDs — re-fetch the offer to get them.
+        cookies = self._ensure_panel_session()
+        offer_data = self._panel_get_offer_data(offer_id, cookies=cookies)
+        options = offer_data.get("options") or []
+        # Find the option we just created by title (newest match wins).
+        matched: dict[str, Any] | None = None
+        for opt in reversed(options):
+            if not isinstance(opt, dict):
+                continue
+            if opt.get("title_en") == title_en or opt.get("title_ru") == title_ru:
+                matched = opt
+                break
+        if matched is None and options:
+            matched = options[-1]
+        if matched is None:
+            raise APIRequestError(
+                f"Option '{title_en}' was POSTed to GGSEL but could not be found on re-fetch."
+            )
+        return matched
 
     def set_offer_stock(
         self,

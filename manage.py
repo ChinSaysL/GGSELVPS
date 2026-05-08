@@ -2387,6 +2387,18 @@ def _variant_match_key(text: str | None) -> str:
     return _normalize_search_text(text or "")
 
 
+_REGION_CODE_ALIASES: dict[str, str] = {
+    # G-Engine codes that differ from the GGSEL buyer-facing display names.
+    "ge": "cis",   # Georgia ISO code used by G-Engine for CIS region
+    "gb": "uk",    # Great Britain ISO code → UK display
+    "eu": "euro",  # EU → EURO display
+    "euro": "euro",
+    # Canonical display names that map to themselves (ensure symmetric matching).
+    "cis": "cis",
+    "uk": "uk",
+}
+
+
 def _gift_region_match_key(value: object) -> str | None:
     if value in {None, ""}:
         return None
@@ -2396,6 +2408,8 @@ def _gift_region_match_key(value: object) -> str | None:
     compact = normalized.replace(" ", "")
     if "cis" in normalized.split():
         return "cis"
+    if compact in _REGION_CODE_ALIASES:
+        return _REGION_CODE_ALIASES[compact]
     if re.fullmatch(r"[a-z]{2,5}", compact):
         return compact
     return None
@@ -3481,16 +3495,79 @@ def _ggsel_group_products_by_package(products: list[Any]) -> dict[str, list[Any]
     return groups
 
 
+# G-Engine region codes that differ from the GGSEL display names shown to buyers.
+_GENGINE_REGION_DISPLAY: dict[str, str] = {
+    "ae": "AE",
+    "ar": "AR",
+    "au": "AU",
+    "br": "BR",
+    "ca": "CA",
+    "ch": "CH",
+    "cl": "CL",
+    "co": "CO",
+    "cr": "CR",
+    "eu": "EURO",
+    "euro": "EURO",
+    "gb": "UK",
+    "ge": "CIS",
+    "hk": "HK",
+    "id": "ID",
+    "il": "IL",
+    "in": "IN",
+    "jp": "JP",
+    "kr": "KR",
+    "kw": "KW",
+    "kz": "KZ",
+    "latam": "LATAM",
+    "mena": "MENA",
+    "mx": "MX",
+    "my": "MY",
+    "no": "NO",
+    "nz": "NZ",
+    "pe": "PE",
+    "ph": "PH",
+    "pl": "PL",
+    "qa": "QA",
+    "sasia": "SASIA",
+    "sg": "SG",
+    "th": "TH",
+    "tw": "TW",
+    "ua": "UA",
+    "us": "US",
+    "uy": "UY",
+    "vn": "VN",
+    "za": "ZA",
+}
+
+
+def _ggsel_region_display_name(product: Any) -> str:
+    """Return the buyer-facing region label for a SupplierProduct."""
+    import json as _json
+
+    # Prefer gift_zone from raw payload (G-Engine may include a display name).
+    raw = getattr(product, "raw_payload_json", None)
+    if raw:
+        try:
+            payload = _json.loads(raw)
+            zone = str(payload.get("gift_zone") or "").strip()
+            if zone:
+                return zone.upper()
+        except Exception:
+            pass
+
+    denom = str(getattr(product, "denomination", "") or "").strip().lower()
+    return _GENGINE_REGION_DISPLAY.get(denom, denom.upper() if denom else "")
+
+
 def _ggsel_build_option_variants(products: list[Any]) -> list[dict[str, Any]]:
     """Build GGSEL panel variant dicts from SupplierProduct rows.
 
-    Each variant title = denomination (region code / value label).
+    Each variant title uses the buyer-facing region display name.
     Price impact is left as 0 — price sync fills in the correct values.
     """
     variants: list[dict[str, Any]] = []
     for i, p in enumerate(products):
-        denom = str(getattr(p, "denomination", "") or "").strip()
-        title = denom or str(getattr(p, "title", "") or f"Option {i + 1}")
+        title = _ggsel_region_display_name(p) or f"Option {i + 1}"
         variants.append(
             {
                 "id": None,
