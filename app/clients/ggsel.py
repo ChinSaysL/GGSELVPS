@@ -1209,12 +1209,18 @@ class GGSELClient(BaseAPIClient):
             json_body=put_body,
         )
 
-        # Step 5: re-fetch to return the option with populated variant IDs
-        cookies = self._ensure_panel_session()
-        final_data = self._panel_get_offer_data(offer_id, cookies=cookies)
-        for opt in (final_data.get("options") or []):
-            if isinstance(opt, dict) and opt.get("id") == option_id:
-                return opt
+        # Step 5: fetch the option directly to get populated variant IDs
+        # (offer-level GET omits variant details; option-level GET includes them)
+        try:
+            opt_resp = self._panel_request_with_reauth(
+                "GET",
+                f"/api/v1/offers/{internal_id}/options/{option_id}",
+            )
+            opt_data = opt_resp.get("data", opt_resp) if isinstance(opt_resp, dict) else opt_resp
+            if isinstance(opt_data, dict) and (opt_data.get("variants") or opt_data.get("variants_attributes")):
+                return opt_data
+        except APIRequestError:
+            pass
         return new_option
 
     def set_offer_stock(
