@@ -3481,11 +3481,15 @@ def _ggsel_group_products_by_package(products: list[Any]) -> dict[str, list[Any]
     return groups
 
 
-def _ggsel_build_option_variants(products: list[Any]) -> list[dict[str, Any]]:
+def _ggsel_build_option_variants(
+    products: list[Any],
+    *,
+    discount_kind: str = "fixed",
+) -> list[dict[str, Any]]:
     """Build GGSEL panel variant dicts from SupplierProduct rows.
 
     Each variant title = denomination (region code / value label).
-    Price is left as 0 — price sync fills in the correct values.
+    Price impact is left as 0 — price sync fills in the correct values.
     """
     variants: list[dict[str, Any]] = []
     for i, p in enumerate(products):
@@ -3495,7 +3499,8 @@ def _ggsel_build_option_variants(products: list[Any]) -> list[dict[str, Any]]:
             {
                 "title_ru": title,
                 "title_en": title,
-                "price": 0,
+                "discount_kind": discount_kind,
+                "impact_variant": "0",
                 "default": i == 0,
             }
         )
@@ -4420,29 +4425,81 @@ def action_manual_link() -> int:
                 f"{selected_product.id}: {selection_reason}."
             )
             print(_product_label(selected_product))
+            _add_link_target(
+                targets_by_product_id,
+                product=selected_product,
+                option_description=None,
+            )
         else:
             manual_candidates = _single_offer_manual_candidates(reference, reference_products)
-            print("\nNo option-value list found on marketplace item. Select one local row to link:")
-            if len(manual_candidates) < len(reference_products):
-                print(
-                    "Showing direct recharge/top-up candidates only; "
-                    "gift-card denomination rows were hidden from this prompt."
-                )
-            _print_reference_products(manual_candidates, limit=25)
-            selected_product = _choose_product_from_reference_rows(
-                manual_candidates,
-                prompt="Local row id",
-                default_product_id=None,
-                allow_skip=False,
+
+            # GGSEL with multiple rows: offer to auto-create all denominations.
+            ggsel_auto_available = (
+                marketplace == "ggsel"
+                and len(reference_products) > 1
+                and sys.stdin.isatty()
+                and getattr(settings, "ggsel_email", None)
             )
-            if selected_product is None:
-                print("Cancelled.")
-                return 1
-        _add_link_target(
-            targets_by_product_id,
-            product=selected_product,
-            option_description=None,
-        )
+            if ggsel_auto_available:
+                print(
+                    f"\nThis GGSEL offer has {len(reference_products)} G-Engine rows available "
+                    f"but no denominations yet."
+                )
+                if _ask_bool("Auto-create all denominations on GGSEL and link them?", default=True):
+                    created_entries = _ggsel_create_denominations_interactively(
+                        marketplace_offer_id=marketplace_offer_id,
+                        products=reference_products,
+                        settings=settings,
+                    )
+                    if created_entries:
+                        auto_matches, unmatched, _ = _auto_match_option_entries_to_products(
+                            reference_products,
+                            created_entries,
+                        )
+                        for item in auto_matches:
+                            entry = item["entry"]
+                            raw_vid = entry.get("variant_id")
+                            _add_link_target(
+                                targets_by_product_id,
+                                product=item["product"],
+                                option_description=str(item["option_description"]),
+                                variant_id=int(raw_vid) if isinstance(raw_vid, int) else None,
+                                variant_value=str(entry.get("variant_value") or ""),
+                            )
+                        if targets_by_product_id:
+                            print(
+                                f"Auto-linked {len(targets_by_product_id)} row(s) "
+                                f"({len(unmatched)} unmatched)."
+                            )
+                            selected_product = None  # skip single-row add below
+                        else:
+                            print("No rows matched after auto-create — falling back to manual.")
+                            ggsel_auto_available = False
+                    else:
+                        ggsel_auto_available = False
+
+            if not ggsel_auto_available or not targets_by_product_id:
+                print("\nNo option-value list found on marketplace item. Select one local row to link:")
+                if len(manual_candidates) < len(reference_products):
+                    print(
+                        "Showing direct recharge/top-up candidates only; "
+                        "gift-card denomination rows were hidden from this prompt."
+                    )
+                _print_reference_products(manual_candidates, limit=25)
+                selected_product = _choose_product_from_reference_rows(
+                    manual_candidates,
+                    prompt="Local row id",
+                    default_product_id=None,
+                    allow_skip=False,
+                )
+                if selected_product is None:
+                    print("Cancelled.")
+                    return 1
+                _add_link_target(
+                    targets_by_product_id,
+                    product=selected_product,
+                    option_description=None,
+                )
 
     targets = list(targets_by_product_id.values())
     primary_product = targets[0]["product"]

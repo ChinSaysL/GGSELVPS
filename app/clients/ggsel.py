@@ -1134,17 +1134,32 @@ class GGSELClient(BaseAPIClient):
         title_en: str,
         title_ru: str,
         variants: list[dict[str, Any]],
+        kind: str | None = None,
     ) -> dict[str, Any]:
-        """Create a new radio option on a GGSEL offer via the panel API.
+        """Create a new option on a GGSEL offer via the panel API.
 
         Returns the created option dict (with variant IDs populated).
         """
         if not self._panel_email:
             raise NotImplementedError("GGSEL option creation requires panel credentials.")
         internal_id = self._panel_resolve_internal_id(offer_id)
+
+        # Infer option kind from an existing option on this offer; fall back to "select".
+        if kind is None:
+            try:
+                cookies = self._ensure_panel_session()
+                offer_data = self._panel_get_offer_data(offer_id, cookies=cookies)
+                existing_opts = offer_data.get("options") or []
+                if existing_opts and isinstance(existing_opts[0], dict):
+                    kind = str(existing_opts[0].get("kind") or "select")
+                else:
+                    kind = "select"
+            except Exception:
+                kind = "select"
+
         body = {
             "option": {
-                "kind": "radio",
+                "kind": kind,
                 "title_ru": title_ru,
                 "title_en": title_en,
                 "required": True,
