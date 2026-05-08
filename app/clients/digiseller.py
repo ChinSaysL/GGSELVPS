@@ -864,6 +864,56 @@ class DigisellerClient(BaseAPIClient):
             is_default=None,
         )
 
+    def create_offer_option(
+        self,
+        offer_id: str,
+        *,
+        title_en: str,
+        title_ru: str,
+        variants: list[dict[str, Any]],
+        kind: str = "radio",
+        required: bool = True,
+        order: int = 1,
+    ) -> dict[str, Any]:
+        """Create a new parameter/option group on a Digiseller product.
+
+        Returns the created option dict with variant IDs populated.
+        Uses POST /api/products/options then re-fetches to get the new option ID.
+        """
+        token = self._get_access_token()
+        product_id = int(offer_id.strip())
+
+        before_ids = set(self._list_product_option_ids(offer_id, token=token))
+
+        body: dict[str, Any] = {
+            "product_id": product_id,
+            "type": kind,
+            "name": [
+                {"locale": "en", "value": title_en},
+                {"locale": "ru", "value": title_ru},
+            ],
+            "required": required,
+            "modifier_visible": False,
+            "order": order,
+        }
+        if variants:
+            body["variants"] = variants
+
+        self._request_json(
+            method="POST",
+            path="/api/products/options",
+            params={"token": token},
+            json_body=body,
+        )
+
+        after_ids = self._list_product_option_ids(offer_id, token=token)
+        new_id = next((oid for oid in after_ids if oid not in before_ids), None)
+        if new_id is None:
+            raise APIRequestError(
+                f"Option '{title_en}' was POSTed to Digiseller but not found on re-fetch."
+            )
+        return self._get_product_option(new_id, token=token)
+
     def set_offer_price(
         self,
         offer_id: str,

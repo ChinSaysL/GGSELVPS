@@ -2560,6 +2560,151 @@ def _auto_match_option_entries_to_products(
     return matches, unmatched, ambiguous
 
 
+def _group_option_entries_by_label(
+    entries: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for entry in entries:
+        label = str(entry.get("option_label") or "Option")
+        groups.setdefault(label, []).append(entry)
+    return groups
+
+
+def _option_group_looks_like_regions(entries: list[dict[str, Any]]) -> bool:
+    return any(
+        _gift_region_match_key(str(e.get("variant_value") or ""))
+        for e in entries
+    )
+
+
+def _common_prefix_words(names: list[str]) -> str:
+    if not names:
+        return ""
+    split = [n.split() for n in names]
+    ref = split[0]
+    length = 0
+    for i, word in enumerate(ref):
+        if all(i < len(s) and s[i] == word for s in split[1:]):
+            length = i + 1
+        else:
+            break
+    return " ".join(ref[:length])
+
+
+def _product_package_shortname(product: Any, common_prefix: str) -> str:
+    import json as _json
+
+    raw = getattr(product, "raw_payload_json", None)
+    payload: dict[str, Any] = {}
+    if raw:
+        try:
+            payload = _json.loads(raw)
+        except Exception:
+            pass
+    pkg = str(payload.get("gift_package_name") or "").strip()
+    if common_prefix and pkg.lower().startswith(common_prefix.lower()):
+        return pkg[len(common_prefix):].strip()
+    return pkg
+
+
+def _auto_match_products_2d_option_groups(
+    products: list[Any],
+    edition_entries: list[dict[str, Any]],
+    region_entries: list[dict[str, Any]],
+    *,
+    edition_label: str,
+    region_label: str,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Match each G-Engine product to its edition entry + region entry.
+
+    Returns (auto_matches, unmatched_entries, ambiguous_entries).
+    Each match uses the region entry as primary (region variant_id drives stock control).
+    """
+    import json as _json
+
+    # Build region lookup: region_key → entry
+    region_by_key: dict[str, dict[str, Any]] = {}
+    for entry in region_entries:
+        key = _gift_region_match_key(str(entry.get("variant_value") or ""))
+        if key and key not in region_by_key:
+            region_by_key[key] = entry
+
+    # Build edition lookup: normalized shortname → entry
+    edition_by_key: dict[str, dict[str, Any]] = {}
+    for entry in edition_entries:
+        key = _normalize_search_text(str(entry.get("variant_value") or ""))
+        if key and key not in edition_by_key:
+            edition_by_key[key] = entry
+
+    # Derive common package prefix so we can extract shortnames like "Standard", "Deluxe"
+    all_pkgs: list[str] = []
+    for p in products:
+        raw = getattr(p, "raw_payload_json", None)
+        if raw:
+            try:
+                pkg = _json.loads(raw).get("gift_package_name") or ""
+                if pkg:
+                    all_pkgs.append(str(pkg).strip())
+            except Exception:
+                pass
+    seen: set[str] = set()
+    unique_pkgs = [n for n in all_pkgs if not (n in seen or seen.add(n))]  # type: ignore[func-returns-value]
+    common_prefix = _common_prefix_words(unique_pkgs)
+
+    matches: list[dict[str, Any]] = []
+    unmatched_products: list[Any] = []
+    matched_region_keys: set[str] = set()
+
+    for product in products:
+        denom = str(getattr(product, "denomination", None) or "")
+        region_key = _gift_region_match_key(denom) or _normalize_search_text(denom)
+        region_entry = region_by_key.get(region_key)
+
+        shortname = _product_package_shortname(product, common_prefix)
+        edition_key = _normalize_search_text(shortname)
+        edition_entry = edition_by_key.get(edition_key)
+        if edition_entry is None and shortname:
+            for key, entry in edition_by_key.items():
+                if key and edition_key and (key in edition_key or edition_key in key):
+                    edition_entry = entry
+                    break
+
+        if region_entry is not None and edition_entry is not None:
+            region_value = str(region_entry.get("variant_value") or "")
+            edition_value = str(edition_entry.get("variant_value") or "")
+            matches.append({
+                "entry": region_entry,
+                "product": product,
+                "option_description": (
+                    f"{edition_label}: {edition_value}, {region_label}: {region_value}"
+                ),
+            })
+            if region_key:
+                matched_region_keys.add(region_key)
+        else:
+            unmatched_products.append(product)
+
+    if unmatched_products:
+        print(
+            f"[WARN] {len(unmatched_products)} G-Engine row(s) had no matching "
+            f"edition+region option entry and were skipped."
+        )
+        for p in unmatched_products[:10]:
+            print(f"  - id={p.id} denom={getattr(p, 'denomination', '?')} "
+                  f"pkg={_product_package_shortname(p, common_prefix) or '(no package)'}")
+        if len(unmatched_products) > 10:
+            print(f"  ...and {len(unmatched_products) - 10} more.")
+
+    # Unmatched entries: region variants that had no G-Engine product
+    unmatched_entries: list[dict[str, Any]] = [
+        {"entry": e}
+        for e in region_entries
+        if (_gift_region_match_key(str(e.get("variant_value") or "")) or "") not in matched_region_keys
+    ]
+
+    return matches, unmatched_entries, []
+
+
 _RECHARGE_RUNTIME_PARAM_ALIASES = {
     "account": "account",
     "login": "account",
@@ -3622,6 +3767,196 @@ def _ggsel_build_option_variants(products: list[Any]) -> list[dict[str, Any]]:
     return variants
 
 
+def _digiseller_extract_name(name_field: object) -> str:
+    """Extract display text from a Digiseller name field (string or locale list)."""
+    if isinstance(name_field, str):
+        return name_field.strip()
+    if isinstance(name_field, list):
+        for item in name_field:
+            if isinstance(item, dict) and str(item.get("locale") or "").lower() == "en":
+                return str(item.get("value") or "").strip()
+        for item in name_field:
+            if isinstance(item, dict):
+                return str(item.get("value") or "").strip()
+    return ""
+
+
+def _digiseller_variant_body(title: str, order: int, *, default: bool = False) -> dict[str, Any]:
+    return {
+        "name": [
+            {"locale": "en", "value": title},
+            {"locale": "ru", "value": title},
+        ],
+        "type": "priceplus",
+        "rate": 0,
+        "default": default,
+        "order": order,
+    }
+
+
+def _digiseller_option_to_entries(
+    option: dict[str, Any],
+    option_label: str,
+) -> list[dict[str, Any]]:
+    """Build option_variant_entries from a re-fetched Digiseller option dict."""
+    entries: list[dict[str, Any]] = []
+    for v in option.get("variants") or []:
+        if not isinstance(v, dict):
+            continue
+        vid: int | None = None
+        for key in ("id", "variant_id", "variantId"):
+            raw = v.get(key)
+            if raw is not None:
+                try:
+                    vid = int(str(raw).strip())
+                    break
+                except ValueError:
+                    pass
+        display = _digiseller_extract_name(v.get("name"))
+        if not display:
+            continue
+        entry: dict[str, Any] = {"option_label": option_label, "variant_value": display}
+        if vid is not None:
+            entry["variant_id"] = vid
+        entries.append(entry)
+    return entries
+
+
+def _digiseller_create_denominations_interactively(
+    marketplace_offer_id: str,
+    products: list[Any],
+    settings: Any,
+) -> list[dict[str, Any]]:
+    """Create Digiseller Edition + Region radio options and Steam URL text field.
+
+    Returns option_variant_entries (Edition + Region entries only; text field is
+    buyer-input and not product-mapped).
+    """
+    try:
+        from app.clients import DigisellerClient
+        from app.clients.base import APIRequestError
+    except ImportError as exc:
+        print(f"[ERROR] Could not import Digiseller client: {exc}")
+        return []
+
+    if not getattr(settings, "digiseller_api_key", None):
+        print("[SKIP] Digiseller API key not configured.")
+        return []
+
+    # Group by edition package
+    package_groups = _ggsel_group_products_by_package(products)
+    non_empty = {k: v for k, v in package_groups.items() if v}
+
+    all_pkgs = sorted(k for k in non_empty if k)
+    common_prefix = _common_prefix_words(all_pkgs)
+
+    # Edition shortnames (e.g. "Standard", "Deluxe", "Ultimate")
+    edition_names: list[str] = []
+    for pkg in sorted(non_empty.keys()):
+        if pkg:
+            shortname = (
+                pkg[len(common_prefix):].strip()
+                if common_prefix and pkg.lower().startswith(common_prefix.lower())
+                else pkg
+            )
+            edition_names.append(shortname or pkg)
+        else:
+            edition_names.append("Standard")
+
+    # Region names from any one edition (all share same regions)
+    sample_products = next(
+        (v for k, v in sorted(non_empty.items()) if v), list(products)
+    )
+    region_names = [
+        _ggsel_region_display_name(p) or f"Region {i + 1}"
+        for i, p in enumerate(sample_products)
+    ]
+
+    edition_title = _ask_text("Edition option title (shown to buyer)", default="Edition")
+    region_title = _ask_text("Region option title (shown to buyer)", default="Region")
+    steam_title_en = _ask_text(
+        "Steam invite URL field title (EN)", default="Steam quick invite link"
+    )
+    steam_title_ru = _ask_text(
+        "Steam invite URL field title (RU)", default="Быстрая ссылка-приглашение в Steam"
+    )
+
+    client = DigisellerClient(
+        settings.digiseller_base_url,
+        settings.digiseller_api_key,
+        seller_id=getattr(settings, "digiseller_seller_id", None),
+        task_poll_timeout_seconds=getattr(settings, "digiseller_task_poll_timeout_seconds", None),
+        task_poll_interval_seconds=getattr(settings, "digiseller_task_poll_interval_seconds", None),
+    )
+    entries: list[dict[str, Any]] = []
+    try:
+        # Create Edition radio option (order 1)
+        ed_variants = [
+            _digiseller_variant_body(name, i + 1, default=(i == 0))
+            for i, name in enumerate(edition_names)
+        ]
+        print(
+            f"\nCreating Digiseller option '{edition_title}' "
+            f"with {len(ed_variants)} edition(s)..."
+        )
+        edition_option = client.create_offer_option(
+            marketplace_offer_id,
+            title_en=edition_title,
+            title_ru=edition_title,
+            variants=ed_variants,
+            kind="radio",
+            order=1,
+        )
+        entries.extend(_digiseller_option_to_entries(edition_option, edition_title))
+        print(f"[OK] Edition option created with {len(edition_option.get('variants') or [])} variant(s).")
+
+        # Create Region radio option (order 2)
+        reg_variants = [
+            _digiseller_variant_body(name, i + 1, default=(i == 0))
+            for i, name in enumerate(region_names)
+        ]
+        print(
+            f"Creating Digiseller option '{region_title}' "
+            f"with {len(reg_variants)} region(s)..."
+        )
+        region_option = client.create_offer_option(
+            marketplace_offer_id,
+            title_en=region_title,
+            title_ru=region_title,
+            variants=reg_variants,
+            kind="radio",
+            order=2,
+        )
+        entries.extend(_digiseller_option_to_entries(region_option, region_title))
+        print(f"[OK] Region option created with {len(region_option.get('variants') or [])} variant(s).")
+
+        # Create Steam invite URL text field (order 3, not product-mapped)
+        print(f"Creating Digiseller text field '{steam_title_en}'...")
+        client.create_offer_option(
+            marketplace_offer_id,
+            title_en=steam_title_en,
+            title_ru=steam_title_ru,
+            variants=[],
+            kind="text",
+            required=True,
+            order=3,
+        )
+        print("[OK] Steam URL text field created.")
+
+    except (APIRequestError, NotImplementedError) as exc:
+        print(f"[ERROR] Failed to create Digiseller options: {exc}")
+        return []
+    finally:
+        client.close()
+
+    if not entries:
+        print("[WARN] Options created but no variant entries returned. Re-fetch to get IDs.")
+    else:
+        print(f"[OK] {len(entries)} option variant entries ready for linking.")
+
+    return entries
+
+
 def _ggsel_create_denominations_interactively(
     marketplace_offer_id: str,
     products: list[Any],
@@ -4422,6 +4757,25 @@ def action_manual_link() -> int:
                 settings=settings,
             )
 
+    # Digiseller: same auto-create offer when the listing has no options yet.
+    if (
+        marketplace == "digiseller"
+        and not option_variant_entries
+        and len(reference_products) > 1
+        and sys.stdin.isatty()
+        and getattr(settings, "digiseller_api_key", None)
+    ):
+        print(
+            f"\nThe Digiseller listing has no parameters yet, "
+            f"but {len(reference_products)} G-Engine row(s) are available."
+        )
+        if _ask_bool("Auto-create Digiseller parameters from G-Engine data?", default=True):
+            option_variant_entries = _digiseller_create_denominations_interactively(
+                marketplace_offer_id=marketplace_offer_id,
+                products=reference_products,
+                settings=settings,
+            )
+
     if option_variant_entries:
         if _should_use_recharge_runtime_option_mapping(
             reference,
@@ -4449,14 +4803,53 @@ def action_manual_link() -> int:
                 reference_products,
                 option_variant_entries,
             )
-            match_products = _filter_products_by_gift_package_interactively(
-                reference_products,
-                prompt_context="— select the edition this offer sells",
-            )
-            auto_matches, unmatched_entries, ambiguous_entries = _auto_match_option_entries_to_products(
-                match_products,
-                mapping_option_entries,
-            )
+
+            # Detect 2D (edition × region) structure: multiple option groups AND multiple editions
+            entry_groups = _group_option_entries_by_label(mapping_option_entries)
+            package_groups = _ggsel_group_products_by_package(reference_products)
+            non_empty_packages = {k: v for k, v in package_groups.items() if v}
+            two_d_edition_label: str | None = None
+            two_d_region_label: str | None = None
+            if len(non_empty_packages) > 1 and len(entry_groups) >= 2:
+                for grp_label, grp_entries in entry_groups.items():
+                    if _option_group_looks_like_regions(grp_entries):
+                        if two_d_region_label is None:
+                            two_d_region_label = grp_label
+                    else:
+                        if two_d_edition_label is None:
+                            two_d_edition_label = grp_label
+
+            if two_d_edition_label and two_d_region_label:
+                n_ed = len(entry_groups[two_d_edition_label])
+                n_reg = len(entry_groups[two_d_region_label])
+                print(
+                    f"\n2D match mode: '{two_d_edition_label}' ({n_ed}) × "
+                    f"'{two_d_region_label}' ({n_reg}) = {n_ed * n_reg} combinations expected, "
+                    f"{len(reference_products)} G-Engine row(s) available."
+                )
+                auto_matches, unmatched_entries, ambiguous_entries = (
+                    _auto_match_products_2d_option_groups(
+                        reference_products,
+                        entry_groups[two_d_edition_label],
+                        entry_groups[two_d_region_label],
+                        edition_label=two_d_edition_label,
+                        region_label=two_d_region_label,
+                    )
+                )
+                match_denominator = len(reference_products)
+            else:
+                match_products = _filter_products_by_gift_package_interactively(
+                    reference_products,
+                    prompt_context="— select the edition this offer sells",
+                )
+                auto_matches, unmatched_entries, ambiguous_entries = (
+                    _auto_match_option_entries_to_products(
+                        match_products,
+                        mapping_option_entries,
+                    )
+                )
+                match_denominator = len(mapping_option_entries)
+
             for item in auto_matches:
                 entry = item["entry"]
                 raw_variant_id = entry.get("variant_id")
@@ -4471,7 +4864,8 @@ def action_manual_link() -> int:
 
             print(
                 "\nAuto-map summary: "
-                f"matched {len(auto_matches)}/{len(mapping_option_entries)} product option values."
+                f"matched {len(auto_matches)}/{match_denominator} "
+                f"{'products' if two_d_edition_label else 'product option values'}."
             )
             if runtime_input_entries:
                 print("Recharge input option values are passed at order time, not product-mapped:")
