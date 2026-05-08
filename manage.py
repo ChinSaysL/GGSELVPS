@@ -3478,6 +3478,42 @@ def _products_for_reference(reference: GEngineProductReference, products: list[A
     return _sort_products_for_reference(matches, reference)
 
 
+def _filter_products_by_gift_package_interactively(
+    products: list[Any],
+    *,
+    prompt_context: str = "",
+) -> list[Any]:
+    """If products span multiple gift editions, ask the user which one to use.
+
+    Returns the filtered subset, or the original list if only one edition exists.
+    """
+    groups = _ggsel_group_products_by_package(products)
+    non_empty = {k: v for k, v in groups.items() if v}
+    if len(non_empty) <= 1:
+        return products
+
+    print(f"\nThe G-Engine product has {len(non_empty)} editions{': ' + prompt_context if prompt_context else '.'}")
+    edition_names = sorted(non_empty.keys())
+    for idx, name in enumerate(edition_names, start=1):
+        label = name or "(no package name)"
+        print(f"  {idx}. {label}  ({len(non_empty[name])} row(s))")
+    raw = _ask_text(
+        f"Which edition does this marketplace offer sell? (1-{len(edition_names)})",
+        required=True,
+    )
+    try:
+        chosen_idx = int(raw.strip()) - 1
+        if not 0 <= chosen_idx < len(edition_names):
+            raise ValueError
+    except ValueError:
+        print("Invalid choice — using all editions (may produce ambiguous matches).")
+        return products
+    chosen = edition_names[chosen_idx]
+    subset = non_empty[chosen]
+    print(f"Filtering to '{chosen or '(default)'}' — {len(subset)} row(s).")
+    return subset
+
+
 def _ggsel_group_products_by_package(products: list[Any]) -> dict[str, list[Any]]:
     """Group SupplierProduct rows by their gift_package_name (or '' for ungrouped)."""
     groups: dict[str, list[Any]] = {}
@@ -4410,8 +4446,12 @@ def action_manual_link() -> int:
                 reference_products,
                 option_variant_entries,
             )
-            auto_matches, unmatched_entries, ambiguous_entries = _auto_match_option_entries_to_products(
+            match_products = _filter_products_by_gift_package_interactively(
                 reference_products,
+                prompt_context="— select the edition this offer sells",
+            )
+            auto_matches, unmatched_entries, ambiguous_entries = _auto_match_option_entries_to_products(
+                match_products,
                 mapping_option_entries,
             )
             for item in auto_matches:
@@ -4522,14 +4562,18 @@ def action_manual_link() -> int:
                     f"but no denominations yet."
                 )
                 if _ask_bool("Auto-create all denominations on GGSEL and link them?", default=True):
+                    create_products = _filter_products_by_gift_package_interactively(
+                        reference_products,
+                        prompt_context="— select the edition this offer sells",
+                    )
                     created_entries = _ggsel_create_denominations_interactively(
                         marketplace_offer_id=marketplace_offer_id,
-                        products=reference_products,
+                        products=create_products,
                         settings=settings,
                     )
                     if created_entries:
                         auto_matches, unmatched, _ = _auto_match_option_entries_to_products(
-                            reference_products,
+                            create_products,
                             created_entries,
                         )
                         for item in auto_matches:
