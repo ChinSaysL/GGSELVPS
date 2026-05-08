@@ -1193,6 +1193,21 @@ class GGSELClient(BaseAPIClient):
             raise APIRequestError(
                 f"Option '{title_en}' was POSTed to GGSEL but could not be found on re-fetch."
             )
+        # Offer-level GET typically omits variant details — fetch the option directly.
+        option_id = matched.get("id")
+        if option_id is not None:
+            try:
+                full = self._panel_request_with_reauth(
+                    "GET",
+                    f"/api/v1/offers/{internal_id}/options/{option_id}",
+                )
+                data = full.get("data", full) if isinstance(full, dict) else full
+                if isinstance(data, dict) and (
+                    data.get("variants") or data.get("variants_attributes")
+                ):
+                    return data
+            except APIRequestError:
+                pass
         return matched
 
     def set_offer_stock(
