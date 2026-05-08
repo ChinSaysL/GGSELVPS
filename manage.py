@@ -2659,15 +2659,28 @@ def _auto_match_products_2d_option_groups(
         denom = str(getattr(product, "denomination", None) or "")
         region_key = _gift_region_match_key(denom) or _normalize_search_text(denom)
         region_entry = region_by_key.get(region_key)
+        # Fallback: use the display name from gift_zone (e.g. ar → LATAM, pk → SASIA)
+        if region_entry is None:
+            display = _ggsel_region_display_name(product)
+            if display:
+                display_key = _gift_region_match_key(display) or _normalize_search_text(display)
+                region_entry = region_by_key.get(display_key)
 
         shortname = _product_package_shortname(product, common_prefix)
         edition_key = _normalize_search_text(shortname)
         edition_entry = edition_by_key.get(edition_key)
-        if edition_entry is None and shortname:
-            for key, entry in edition_by_key.items():
-                if key and edition_key and (key in edition_key or edition_key in key):
-                    edition_entry = entry
-                    break
+        if edition_entry is None:
+            if shortname:
+                # Partial substring match
+                for key, entry in edition_by_key.items():
+                    if key and edition_key and (key in edition_key or edition_key in key):
+                        edition_entry = entry
+                        break
+            else:
+                # Empty package name → product belongs to the default (first/Standard) edition
+                edition_entry = edition_by_key.get("standard") or next(
+                    iter(edition_by_key.values()), None
+                )
 
         if region_entry is not None and edition_entry is not None:
             region_value = str(region_entry.get("variant_value") or "")
@@ -2679,8 +2692,11 @@ def _auto_match_products_2d_option_groups(
                     f"{edition_label}: {edition_value}, {region_label}: {region_value}"
                 ),
             })
-            if region_key:
-                matched_region_keys.add(region_key)
+            effective_region_key = (
+                _gift_region_match_key(region_value) or _normalize_search_text(region_value)
+            )
+            if effective_region_key:
+                matched_region_keys.add(effective_region_key)
         else:
             unmatched_products.append(product)
 
