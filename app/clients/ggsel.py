@@ -1139,28 +1139,62 @@ class GGSELClient(BaseAPIClient):
         """Create a new option on a GGSEL offer via the panel API.
 
         Returns the created option dict (with variant IDs populated).
+        GGSEL's POST endpoint creates an option skeleton but ignores variants_attributes.
+        Variants must be added via a subsequent PUT to the new option's ID.
         """
         if not self._panel_email:
             raise NotImplementedError("GGSEL option creation requires panel credentials.")
         internal_id = self._panel_resolve_internal_id(offer_id)
 
-        # Infer option kind from an existing option on this offer; fall back to "radio_button".
         if kind is None:
-            try:
-                cookies = self._ensure_panel_session()
-                offer_data = self._panel_get_offer_data(offer_id, cookies=cookies)
-                existing_opts = offer_data.get("options") or []
-                if existing_opts and isinstance(existing_opts[0], dict):
-                    kind = str(existing_opts[0].get("kind") or "radio_button")
-                else:
-                    kind = "radio_button"
-            except Exception:
-                kind = "radio_button"
+            kind = "radio_button"
 
-        body = {
+        # Step 1: record existing option IDs before creation
+        cookies = self._ensure_panel_session()
+        before_data = self._panel_get_offer_data(offer_id, cookies=cookies)
+        before_ids = {
+            opt.get("id")
+            for opt in (before_data.get("options") or [])
+            if isinstance(opt, dict)
+        }
+
+        # Step 2: POST skeleton (variants_attributes is ignored by GGSEL here)
+        post_body = {
             "option": {
                 "kind": kind,
-                "position": 1,
+                "position": len(before_ids) + 1,
+                "title_ru": title_ru,
+                "title_en": title_en,
+                "required": True,
+                "hide_price_modifier": False,
+                "splitted_products": False,
+            }
+        }
+        self._panel_request_with_reauth(
+            "POST",
+            f"/api/v1/offers/{internal_id}/options",
+            json_body=post_body,
+        )
+
+        # Step 3: find the newly created option by ID difference
+        cookies = self._ensure_panel_session()
+        after_data = self._panel_get_offer_data(offer_id, cookies=cookies)
+        new_option: dict[str, Any] | None = None
+        for opt in reversed(after_data.get("options") or []):
+            if isinstance(opt, dict) and opt.get("id") not in before_ids:
+                new_option = opt
+                break
+        if new_option is None:
+            raise APIRequestError(
+                f"Option '{title_en}' was POSTed to GGSEL but could not be found on re-fetch."
+            )
+
+        # Step 4: PUT variants onto the new option
+        option_id = new_option.get("id")
+        put_body = {
+            "option": {
+                "kind": kind,
+                "position": new_option.get("position", len(before_ids) + 1),
                 "title_ru": title_ru,
                 "title_en": title_en,
                 "required": True,
@@ -1170,45 +1204,18 @@ class GGSELClient(BaseAPIClient):
             }
         }
         self._panel_request_with_reauth(
-            "POST",
-            f"/api/v1/offers/{internal_id}/options",
-            json_body=body,
+            "PUT",
+            f"/api/v1/offers/{internal_id}/options/{option_id}",
+            json_body=put_body,
         )
 
-        # POST response rarely includes full variant IDs — re-fetch the offer to get them.
+        # Step 5: re-fetch to return the option with populated variant IDs
         cookies = self._ensure_panel_session()
-        offer_data = self._panel_get_offer_data(offer_id, cookies=cookies)
-        options = offer_data.get("options") or []
-        # Find the option we just created by title (newest match wins).
-        matched: dict[str, Any] | None = None
-        for opt in reversed(options):
-            if not isinstance(opt, dict):
-                continue
-            if opt.get("title_en") == title_en or opt.get("title_ru") == title_ru:
-                matched = opt
-                break
-        if matched is None and options:
-            matched = options[-1]
-        if matched is None:
-            raise APIRequestError(
-                f"Option '{title_en}' was POSTed to GGSEL but could not be found on re-fetch."
-            )
-        # Offer-level GET typically omits variant details — fetch the option directly.
-        option_id = matched.get("id")
-        if option_id is not None:
-            try:
-                full = self._panel_request_with_reauth(
-                    "GET",
-                    f"/api/v1/offers/{internal_id}/options/{option_id}",
-                )
-                data = full.get("data", full) if isinstance(full, dict) else full
-                if isinstance(data, dict) and (
-                    data.get("variants") or data.get("variants_attributes")
-                ):
-                    return data
-            except APIRequestError:
-                pass
-        return matched
+        final_data = self._panel_get_offer_data(offer_id, cookies=cookies)
+        for opt in (final_data.get("options") or []):
+            if isinstance(opt, dict) and opt.get("id") == option_id:
+                return opt
+        return new_option
 
     def set_offer_stock(
         self,
