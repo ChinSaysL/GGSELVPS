@@ -1127,6 +1127,52 @@ class GGSELClient(BaseAPIClient):
         cookies = self._ensure_panel_session()
         return self._panel_request(method, path, json_body=json_body, cookies=cookies)
 
+    def create_offer_option(
+        self,
+        offer_id: str,
+        *,
+        title_en: str,
+        title_ru: str,
+        variants: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        """Create a new radio option on a GGSEL offer via the panel API.
+
+        Returns the created option dict (with variant IDs populated).
+        """
+        if not self._panel_email:
+            raise NotImplementedError("GGSEL option creation requires panel credentials.")
+        internal_id = self._panel_resolve_internal_id(offer_id)
+        body = {
+            "option": {
+                "kind": "radio",
+                "title_ru": title_ru,
+                "title_en": title_en,
+                "required": True,
+                "variants_attributes": variants,
+            }
+        }
+        response = self._panel_request_with_reauth(
+            "POST",
+            f"/api/v1/offers/{internal_id}/options",
+            json_body=body,
+        )
+        data = response.get("data", response) if isinstance(response, dict) else {}
+        if not isinstance(data, dict):
+            data = {}
+        # If the response is the wrapper offer, find our new option by title match.
+        options = data.get("options") or []
+        if isinstance(options, list) and options:
+            # Return the option whose title matches (last one is newest).
+            for opt in reversed(options):
+                if isinstance(opt, dict) and (
+                    opt.get("title_en") == title_en or opt.get("title_ru") == title_ru
+                ):
+                    return opt
+            # Fallback: last option.
+            return options[-1]
+        # Response IS the option directly.
+        return data
+
     def set_offer_stock(
         self,
         offer_id: str,

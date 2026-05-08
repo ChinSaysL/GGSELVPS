@@ -3464,6 +3464,154 @@ def _products_for_reference(reference: GEngineProductReference, products: list[A
     return _sort_products_for_reference(matches, reference)
 
 
+def _ggsel_group_products_by_package(products: list[Any]) -> dict[str, list[Any]]:
+    """Group SupplierProduct rows by their gift_package_name (or '' for ungrouped)."""
+    groups: dict[str, list[Any]] = {}
+    for p in products:
+        payload: dict[str, Any] = {}
+        raw = getattr(p, "raw_payload_json", None)
+        if raw:
+            try:
+                import json as _json
+                payload = _json.loads(raw)
+            except Exception:
+                pass
+        package = str(payload.get("gift_package_name") or "").strip()
+        groups.setdefault(package, []).append(p)
+    return groups
+
+
+def _ggsel_build_option_variants(products: list[Any]) -> list[dict[str, Any]]:
+    """Build GGSEL panel variant dicts from SupplierProduct rows.
+
+    Each variant title = denomination (region code / value label).
+    Price is left as 0 — price sync fills in the correct values.
+    """
+    variants: list[dict[str, Any]] = []
+    for i, p in enumerate(products):
+        denom = str(getattr(p, "denomination", "") or "").strip()
+        title = denom or str(getattr(p, "title", "") or f"Option {i + 1}")
+        variants.append(
+            {
+                "title_ru": title,
+                "title_en": title,
+                "price": 0,
+                "default": i == 0,
+            }
+        )
+    return variants
+
+
+def _ggsel_create_denominations_interactively(
+    marketplace_offer_id: str,
+    products: list[Any],
+    settings: Any,
+) -> list[dict[str, Any]]:
+    """Create GGSEL option+variants from local product rows and return option_variant_entries.
+
+    Handles both single-package (region only) and multi-package (edition+region) product sets.
+    For multi-package products, asks the user which edition to link now and creates a Region
+    option for that subset only.
+    """
+    try:
+        from app.clients import GGSELClient
+        from app.clients.base import APIRequestError
+    except ImportError as exc:
+        print(f"[ERROR] Could not import GGSEL client: {exc}")
+        return []
+
+    if not settings.ggsel_api_key:
+        print("[SKIP] GGSEL API key not configured.")
+        return []
+
+    groups = _ggsel_group_products_by_package(products)
+    non_empty_groups = {k: v for k, v in groups.items() if v}
+
+    subset: list[Any]
+    option_title: str
+
+    if len(non_empty_groups) <= 1:
+        # Single package (or ungrouped) — just use regions.
+        subset = products
+        option_title = "Region"
+    else:
+        # Multiple editions — ask user which one to link for this offer.
+        edition_names = sorted(non_empty_groups.keys())
+        print("\nThis product has multiple editions:")
+        for idx, name in enumerate(edition_names, start=1):
+            count = len(non_empty_groups[name])
+            label = name or "(no package name)"
+            print(f"  {idx}. {label}  ({count} region(s))")
+        raw = _ask_text(
+            f"Which edition is this GGSEL offer for? (1-{len(edition_names)})",
+            required=True,
+        )
+        try:
+            chosen_idx = int(raw.strip()) - 1
+            if not 0 <= chosen_idx < len(edition_names):
+                raise ValueError
+        except ValueError:
+            print("Invalid choice — skipping auto-create.")
+            return []
+        chosen_name = edition_names[chosen_idx]
+        subset = non_empty_groups[chosen_name]
+        option_title = "Region"
+        print(f"Using edition: {chosen_name or '(default)'} — {len(subset)} region(s)")
+
+    if not subset:
+        print("[SKIP] No products in selected group.")
+        return []
+
+    option_title_input = _ask_text("Option group title (shown to buyer)", default=option_title)
+    variants = _ggsel_build_option_variants(subset)
+
+    print(f"\nCreating GGSEL option '{option_title_input}' with {len(variants)} variant(s)...")
+
+    client = GGSELClient(
+        settings.ggsel_base_url,
+        settings.ggsel_api_key,
+        seller_id=settings.ggsel_seller_id,
+        panel_email=getattr(settings, "ggsel_email", None),
+        panel_password=getattr(settings, "ggsel_password", None),
+    )
+    try:
+        option = client.create_offer_option(
+            marketplace_offer_id,
+            title_en=option_title_input,
+            title_ru=option_title_input,
+            variants=variants,
+        )
+    except (APIRequestError, NotImplementedError) as exc:
+        print(f"[ERROR] Failed to create GGSEL option: {exc}")
+        return []
+    finally:
+        client.close()
+
+    created_variants = option.get("variants") or option.get("variants_attributes") or []
+    if not created_variants:
+        print("[WARN] Option created but no variants returned. Re-fetch offer to get IDs.")
+        return []
+
+    # Map back to option_variant_entries format, pairing by position.
+    entries: list[dict[str, Any]] = []
+    for v in created_variants:
+        if not isinstance(v, dict):
+            continue
+        variant_id = v.get("id")
+        title_en = v.get("title_en") or v.get("title_ru") or ""
+        entries.append(
+            {
+                "option_label": option_title_input,
+                "variant_id": variant_id,
+                "variant_value": title_en,
+            }
+        )
+
+    print(f"[OK] Created option with {len(entries)} variant(s).")
+    print("     Run 'sync-prices' after linking to set per-region prices.")
+    return entries
+
+
 def _choose_reference_products_interactively() -> tuple[GEngineProductReference, list[Any]] | None:
     try:
         products = _load_recent_products(limit=1000)
@@ -4133,6 +4281,27 @@ def action_manual_link() -> int:
 
     targets_by_product_id: dict[int, dict[str, Any]] = {}
     runtime_option_mode = False
+
+    # GGSEL: if the offer has no options yet and there are multiple local rows,
+    # offer to auto-create the denominations on GGSEL via the panel API.
+    if (
+        marketplace == "ggsel"
+        and not option_variant_entries
+        and len(reference_products) > 1
+        and sys.stdin.isatty()
+        and getattr(settings, "ggsel_email", None)
+    ):
+        print(
+            f"\nThe GGSEL offer has no denominations yet, "
+            f"but {len(reference_products)} G-Engine row(s) are available."
+        )
+        if _ask_bool("Auto-create GGSEL denominations from G-Engine data?", default=True):
+            option_variant_entries = _ggsel_create_denominations_interactively(
+                marketplace_offer_id=marketplace_offer_id,
+                products=reference_products,
+                settings=settings,
+            )
+
     if option_variant_entries:
         if _should_use_recharge_runtime_option_mapping(
             reference,
