@@ -3481,11 +3481,7 @@ def _ggsel_group_products_by_package(products: list[Any]) -> dict[str, list[Any]
     return groups
 
 
-def _ggsel_build_option_variants(
-    products: list[Any],
-    *,
-    discount_kind: str = "fixed",
-) -> list[dict[str, Any]]:
+def _ggsel_build_option_variants(products: list[Any]) -> list[dict[str, Any]]:
     """Build GGSEL panel variant dicts from SupplierProduct rows.
 
     Each variant title = denomination (region code / value label).
@@ -3497,11 +3493,14 @@ def _ggsel_build_option_variants(
         title = denom or str(getattr(p, "title", "") or f"Option {i + 1}")
         variants.append(
             {
+                "id": None,
+                "position": i,
                 "title_ru": title,
                 "title_en": title,
-                "discount_kind": discount_kind,
-                "impact_variant": "0",
+                "discount_kind": "fixed",
+                "impact_variant": "increase",
                 "default": i == 0,
+                "price": 0,
             }
         )
     return variants

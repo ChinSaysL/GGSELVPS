@@ -1144,25 +1144,28 @@ class GGSELClient(BaseAPIClient):
             raise NotImplementedError("GGSEL option creation requires panel credentials.")
         internal_id = self._panel_resolve_internal_id(offer_id)
 
-        # Infer option kind from an existing option on this offer; fall back to "select".
+        # Infer option kind from an existing option on this offer; fall back to "radio_button".
         if kind is None:
             try:
                 cookies = self._ensure_panel_session()
                 offer_data = self._panel_get_offer_data(offer_id, cookies=cookies)
                 existing_opts = offer_data.get("options") or []
                 if existing_opts and isinstance(existing_opts[0], dict):
-                    kind = str(existing_opts[0].get("kind") or "select")
+                    kind = str(existing_opts[0].get("kind") or "radio_button")
                 else:
-                    kind = "select"
+                    kind = "radio_button"
             except Exception:
-                kind = "select"
+                kind = "radio_button"
 
         body = {
             "option": {
                 "kind": kind,
+                "position": 1,
                 "title_ru": title_ru,
                 "title_en": title_en,
                 "required": True,
+                "hide_price_modifier": False,
+                "splitted_products": False,
                 "variants_attributes": variants,
             }
         }
