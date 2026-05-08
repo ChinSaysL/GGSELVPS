@@ -3773,7 +3773,7 @@ def _digiseller_extract_name(name_field: object) -> str:
         return name_field.strip()
     if isinstance(name_field, list):
         for item in name_field:
-            if isinstance(item, dict) and str(item.get("locale") or "").lower() == "en":
+            if isinstance(item, dict) and str(item.get("locale") or "").lower().startswith("en"):
                 return str(item.get("value") or "").strip()
         for item in name_field:
             if isinstance(item, dict):
@@ -3784,8 +3784,8 @@ def _digiseller_extract_name(name_field: object) -> str:
 def _digiseller_variant_body(title: str, order: int, *, default: bool = False) -> dict[str, Any]:
     return {
         "name": [
-            {"locale": "en", "value": title},
-            {"locale": "ru", "value": title},
+            {"locale": "en-US", "value": title},
+            {"locale": "ru-RU", "value": title},
         ],
         "type": "priceplus",
         "rate": 0,

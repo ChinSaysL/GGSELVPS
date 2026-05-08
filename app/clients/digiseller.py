@@ -576,7 +576,6 @@ class DigisellerClient(BaseAPIClient):
             return repr(fallback_errors)
 
         return ""
-        return str(raw_errors).strip()
 
     def _fetch_price_update_task_status(self, *, task_id: str, token: str) -> dict[str, Any]:
         response = self._request_json(
@@ -889,8 +888,8 @@ class DigisellerClient(BaseAPIClient):
             "product_id": product_id,
             "type": kind,
             "name": [
-                {"locale": "en", "value": title_en},
-                {"locale": "ru", "value": title_ru},
+                {"locale": "en-US", "value": title_en},
+                {"locale": "ru-RU", "value": title_ru},
             ],
             "required": required,
             "modifier_visible": False,
