@@ -2384,6 +2384,9 @@ def _variant_match_key(text: str | None) -> str:
     quantity_key = _quantity_match_key(text)
     if quantity_key:
         return quantity_key
+    region_key = _gift_region_match_key(text)
+    if region_key:
+        return region_key
     return _normalize_search_text(text or "")
 
 
