@@ -5665,13 +5665,13 @@ def _check_digiseller_permissions(client: Any, label: str, api_key: str, seller_
         apilogin_error = getattr(client, "_last_apilogin_error", None)
         if apilogin_error:
             print(f"  login / token refresh: FAIL — apilogin failed (fell back to raw key): {apilogin_error}")
-            print(f"    → Activate in Digiseller API settings: POST /api/apilogin")
+            print("    → Activate in Digiseller API settings: POST /api/apilogin")
         else:
-            print(f"  login / token refresh: OK")
+            print("  login / token refresh: OK")
             login_ok = True
     except Exception as exc:  # noqa: BLE001
         print(f"  login / token refresh: ERROR — {exc}")
-        print(f"    → Endpoint: POST /api/apilogin")
+        print("    → Endpoint: POST /api/apilogin")
 
     # Diagnostic for sales: try via production client method, then raw HTTP with seller_id in body.
     sales_ok = False
@@ -5706,9 +5706,9 @@ def _check_digiseller_permissions(client: Any, label: str, api_key: str, seller_
             print(f"    → Raw HTTP {resp.status_code}: {resp.text[:400]}")
         except Exception as raw_exc:  # noqa: BLE001
             print(f"    → Raw HTTP attempt failed: {raw_exc}")
-        print(f"    → Endpoint: POST /api/seller-sells/v2")
-        print(f"    → Fix: In Digiseller API settings, DELETE the current key and generate a new one.")
-        print(f"       Permissions only apply to keys created AFTER granting them.")
+        print("    → Endpoint: POST /api/seller-sells/v2")
+        print("    → Fix: In Digiseller API settings, DELETE the current key and generate a new one.")
+        print("       Permissions only apply to keys created AFTER granting them.")
 
     results = [
         login_ok,
