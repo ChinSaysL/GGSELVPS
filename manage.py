@@ -5195,12 +5195,6 @@ def action_manual_link() -> int:
                         api_key=_digi_api_key,
                         seller_id=_digi_seller_id,
                     )
-                elif marketplace == "ggsel" and sys.stdin.isatty():
-                    _ggsel_rename_short_code_regions(
-                        marketplace_offer_id,
-                        entry_groups[two_d_region_label],
-                        settings,
-                    )
 
                 n_ed = len(entry_groups[two_d_edition_label])
                 n_reg = len(entry_groups[two_d_region_label])
@@ -5220,6 +5214,12 @@ def action_manual_link() -> int:
                 )
                 match_denominator = len(reference_products)
             else:
+                if marketplace == "ggsel" and sys.stdin.isatty():
+                    _ggsel_rename_short_code_regions(
+                        marketplace_offer_id,
+                        mapping_option_entries,
+                        settings,
+                    )
                 match_products = _filter_products_by_gift_package_interactively(
                     reference_products,
                     prompt_context="— select the edition this offer sells",
