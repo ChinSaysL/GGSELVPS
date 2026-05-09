@@ -26,7 +26,8 @@
       "Bash(xargs grep -l \"supplier.*order\\\\|create_order\\\\|deliver\")",
       "Bash(grep -E \"\\\\.py$\")",
       "Bash(git add *)",
-      "Bash(git commit -m ' *)"
+      "Bash(git commit -m ' *)",
+      "Bash(git push *)"
     ]
   }
 }
