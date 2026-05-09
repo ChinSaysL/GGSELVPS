@@ -4313,22 +4313,24 @@ def _ggsel_create_denominations_interactively(
     marketplace_offer_id: str,
     products: list[Any],
     settings: Any,
-) -> list[dict[str, Any]]:
-    """Create GGSEL option+variants from local product rows and return option_variant_entries.
+) -> tuple[list[dict[str, Any]], bool]:
+    """Create GGSEL option+variants from local product rows.
 
     Single-package: creates a Region option only (1D flow).
     Multi-package: creates Edition + Region options (2D flow).
+    Optionally creates a buyer input text field.
+    Returns (option_variant_entries, text_field_created).
     """
     try:
         from app.clients import GGSELClient
         from app.clients.base import APIRequestError
     except ImportError as exc:
         print(f"[ERROR] Could not import GGSEL client: {exc}")
-        return []
+        return [], False
 
     if not settings.ggsel_api_key:
         print("[SKIP] GGSEL API key not configured.")
-        return []
+        return [], False
 
     groups = _ggsel_group_products_by_package(products)
     non_empty_groups = {k: v for k, v in groups.items() if v}
@@ -4340,6 +4342,7 @@ def _ggsel_create_denominations_interactively(
         panel_email=getattr(settings, "ggsel_email", None),
         panel_password=getattr(settings, "ggsel_password", None),
     )
+    text_field_created = False
     try:
         if len(non_empty_groups) <= 1:
             # 1D: single package — create Region option only.
@@ -4355,14 +4358,12 @@ def _ggsel_create_denominations_interactively(
             created = option.get("variants") or option.get("variants_attributes") or []
             if not created:
                 print("[WARN] Option created but no variants returned. Re-fetch offer to get IDs.")
-                return []
+                return [], False
             entries: list[dict[str, Any]] = [
                 {"option_label": option_title, "variant_id": v.get("id"), "variant_value": v.get("title_en") or v.get("title_ru") or ""}
                 for v in created if isinstance(v, dict)
             ]
             print(f"[OK] Created option with {len(entries)} variant(s).")
-            print("     Run 'sync-prices' after linking to set per-region prices.")
-            return entries
 
         else:
             # 2D: multiple editions — create Edition + Region options.
@@ -4383,7 +4384,7 @@ def _ggsel_create_denominations_interactively(
             region_names, _ = _digiseller_region_names_and_default_index(products)
             if not region_names:
                 print("[SKIP] Could not determine region names from products.")
-                return []
+                return [], False
 
             edition_title = _ask_text("Edition option title (shown to buyer)", default="Edition")
             region_title = _ask_text("Region option title (shown to buyer)", default="Region")
@@ -4439,15 +4440,33 @@ def _ggsel_create_denominations_interactively(
 
             if not entries:
                 print("[WARN] Options created but no variant entries returned. Re-fetch offer to get IDs.")
-                return []
+                return [], False
 
             print(f"[OK] Created {len(entries)} option variant entries (edition + region).")
-            print("     Run 'sync-prices' after linking to set per-region and per-edition prices.")
-            return entries
+
+        # Optionally create a buyer input text field (e.g. Steam invite URL).
+        if sys.stdin.isatty() and _ask_bool(
+            "Does this product require buyer input (e.g. Steam invite URL)?", default=False
+        ):
+            input_title_en = _ask_text("Input field title (EN)", default="Steam quick invite link")
+            input_title_ru = _ask_text("Input field title (RU)", default="Быстрая ссылка-приглашение в Steam")
+            print(f"Creating GGSEL text field '{input_title_en}'...")
+            client.create_offer_option(
+                marketplace_offer_id,
+                title_en=input_title_en,
+                title_ru=input_title_ru,
+                variants=[],
+                kind="text",
+            )
+            print("[OK] Buyer input text field created.")
+            text_field_created = True
+
+        print("     Run 'sync-prices' after linking to set prices.")
+        return entries, text_field_created
 
     except (APIRequestError, NotImplementedError) as exc:
         print(f"[ERROR] Failed to create GGSEL option(s): {exc}")
-        return []
+        return [], False
     finally:
         client.close()
 
@@ -5077,6 +5096,7 @@ def action_manual_link() -> int:
     snapshot, snapshot_error = _fetch_marketplace_offer_snapshot(marketplace, marketplace_offer_id)
     option_variant_entries: list[dict[str, str]] = []
     digiseller_auto_created_text_field = False
+    ggsel_auto_created_text_field = False
     if snapshot is None:
         print("Could not fetch marketplace item details by ID; continuing with manual values.")
         if snapshot_error:
@@ -5146,10 +5166,12 @@ def action_manual_link() -> int:
             f"but {len(reference_products)} G-Engine row(s) are available."
         )
         if _ask_bool("Auto-create GGSEL denominations from G-Engine data?", default=True):
-            option_variant_entries = _ggsel_create_denominations_interactively(
-                marketplace_offer_id=marketplace_offer_id,
-                products=reference_products,
-                settings=settings,
+            option_variant_entries, ggsel_auto_created_text_field = (
+                _ggsel_create_denominations_interactively(
+                    marketplace_offer_id=marketplace_offer_id,
+                    products=reference_products,
+                    settings=settings,
+                )
             )
 
     # Digiseller: same auto-create offer when the listing has no options yet.
@@ -5569,7 +5591,7 @@ def action_manual_link() -> int:
             detected_requires_buyer_input = True
             if detected_buyer_input_label is None:
                 detected_buyer_input_label = non_qty_keys[0]
-    if not detected_requires_buyer_input and digiseller_auto_created_text_field:
+    if not detected_requires_buyer_input and (digiseller_auto_created_text_field or ggsel_auto_created_text_field):
         detected_requires_buyer_input = True
     requires_buyer_input_default = bool(snapshot.get("requires_buyer_input")) if snapshot else False
     if detected_requires_buyer_input:
