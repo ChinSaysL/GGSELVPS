@@ -5594,6 +5594,53 @@ def action_manual_link() -> int:
     return 0 if successful > 0 and failed == 0 else (0 if successful > 0 else 1)
 
 
+def _check_digiseller_permissions(client: Any, label: str, api_key: str, seller_id: str | None) -> bool:
+    """Probes each Digiseller API operation the system uses and reports pass/fail per permission."""
+    try:
+        from app.clients.base import APIRequestError
+        from app.security import mask_secret
+    except ImportError:
+        return False
+
+    def _http_status(exc: Exception) -> int | None:
+        m = re.search(r"HTTP (\d{3})", str(exc))
+        return int(m.group(1)) if m else None
+
+    def _probe(name: str, fn: Callable[[], Any]) -> bool:
+        try:
+            result = fn()
+            suffix = f" ({len(result)} records)" if isinstance(result, list) else ""
+            print(f"  {name}: OK{suffix}")
+            return True
+        except APIRequestError as exc:
+            status = _http_status(exc)
+            if status in (401, 403):
+                print(f"  {name}: FAIL — permission denied (HTTP {status})")
+                return False
+            if status and 400 <= status < 500:
+                # Probe used fake data — 4xx means auth passed, resource just not found
+                print(f"  {name}: OK (HTTP {status} on probe — permission granted)")
+                return True
+            print(f"  {name}: FAIL — {exc}")
+            return False
+        except Exception as exc:  # noqa: BLE001
+            print(f"  {name}: ERROR — {exc}")
+            return False
+
+    print(f"\n[Digiseller — {label}]")
+    print(f"  key: {mask_secret(api_key)}  seller_id: {seller_id or '(not set)'}")
+
+    results = [
+        _probe("login / token refresh", lambda: client.get_latest_sales()),
+        _probe("read sales           ", lambda: client.get_latest_sales()),
+        _probe("unique-code read     ", lambda: client.verify_unique_code("PERMCHECKPROBE0000")),
+        _probe("buyer messages read  ", lambda: client.get_buyer_messages("0")),
+        _probe("list products        ", lambda: client.list_offers()),
+    ]
+    print("  note: price-edit and mark-delivered require a live order to test safely")
+    return all(results)
+
+
 def action_check_api() -> int:
     _print_header("API Connectivity Check")
     try:
@@ -5629,11 +5676,10 @@ def action_check_api() -> int:
             client.close()
 
     # --- Digiseller (main account) ---
-    print("\n[Digiseller — your account]")
     if not settings.digiseller_api_key:
+        print("\n[Digiseller — your account]")
         print("  SKIP — DIGISELLER_API_KEY not set")
     else:
-        print(f"  key: {mask_secret(settings.digiseller_api_key)}  seller_id: {settings.digiseller_seller_id or '(not set)'}")
         client = DigisellerClient(
             settings.digiseller_base_url,
             settings.digiseller_api_key,
@@ -5642,20 +5688,18 @@ def action_check_api() -> int:
             task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
         )
         try:
-            sales = client.get_latest_sales()
-            print(f"  OK — get_latest_sales returned {len(sales)} record(s)")
-        except Exception as exc:  # noqa: BLE001
-            print(f"  FAIL — {exc}")
-            all_ok = False
+            if not _check_digiseller_permissions(
+                client, "your account", settings.digiseller_api_key, settings.digiseller_seller_id
+            ):
+                all_ok = False
         finally:
             client.close()
 
     # --- Digiseller (kingpin account) ---
-    print("\n[Digiseller — kingpin's account]")
     if not settings.digiseller_kingpin_api_key:
+        print("\n[Digiseller — kingpin's account]")
         print("  SKIP — DIGISELLER_KINGPIN_API_KEY not set")
     else:
-        print(f"  key: {mask_secret(settings.digiseller_kingpin_api_key)}  seller_id: {settings.digiseller_kingpin_seller_id or '(not set)'}")
         client = DigisellerClient(
             settings.digiseller_base_url,
             settings.digiseller_kingpin_api_key,
@@ -5664,11 +5708,10 @@ def action_check_api() -> int:
             task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
         )
         try:
-            sales = client.get_latest_sales()
-            print(f"  OK — get_latest_sales returned {len(sales)} record(s)")
-        except Exception as exc:  # noqa: BLE001
-            print(f"  FAIL — {exc}")
-            all_ok = False
+            if not _check_digiseller_permissions(
+                client, "kingpin's account", settings.digiseller_kingpin_api_key, settings.digiseller_kingpin_seller_id
+            ):
+                all_ok = False
         finally:
             client.close()
 
