@@ -5606,7 +5606,7 @@ def _check_digiseller_permissions(client: Any, label: str, api_key: str, seller_
         m = re.search(r"HTTP (\d{3})", str(exc))
         return int(m.group(1)) if m else None
 
-    def _probe(name: str, fn: Callable[[], Any]) -> bool:
+    def _probe(name: str, endpoint: str, fn: Callable[[], Any]) -> bool:
         try:
             result = fn()
             suffix = f" ({len(result)} records)" if isinstance(result, list) else ""
@@ -5616,28 +5616,34 @@ def _check_digiseller_permissions(client: Any, label: str, api_key: str, seller_
             status = _http_status(exc)
             if status in (401, 403):
                 print(f"  {name}: FAIL — permission denied (HTTP {status})")
+                print(f"    → Activate in Digiseller API settings: {endpoint}")
                 return False
             if status and 400 <= status < 500:
-                # Probe used fake data — 4xx means auth passed, resource just not found
                 print(f"  {name}: OK (HTTP {status} on probe — permission granted)")
                 return True
             print(f"  {name}: FAIL — {exc}")
+            print(f"    → Endpoint: {endpoint}")
             return False
         except Exception as exc:  # noqa: BLE001
             print(f"  {name}: ERROR — {exc}")
+            print(f"    → Endpoint: {endpoint}")
             return False
 
     print(f"\n[Digiseller — {label}]")
     print(f"  key: {mask_secret(api_key)}  seller_id: {seller_id or '(not set)'}")
 
     results = [
-        _probe("login / token refresh", lambda: client.get_latest_sales()),
-        _probe("read sales           ", lambda: client.get_latest_sales()),
-        _probe("unique-code read     ", lambda: client.verify_unique_code("PERMCHECKPROBE0000")),
-        _probe("list products        ", lambda: client.list_offers()),
+        _probe("login / token refresh", "POST /api/apilogin", lambda: client.get_latest_sales()),
+        _probe("read sales           ", "POST /api/seller-sells/v2", lambda: client.get_latest_sales()),
+        _probe("unique-code read     ", "GET  /api/purchases/unique-code/{code}", lambda: client.verify_unique_code("PERMCHECKPROBE0000")),
+        _probe("list products        ", "POST /api/products/list", lambda: client.list_offers()),
     ]
-    print("  buyer messages read  : SKIP (requires a real order ID — 403 = order not yours, not permission denied)")
-    print("  note: price-edit and mark-delivered also require a live order to test safely")
+    print("  buyer messages read  : SKIP — Digiseller returns 403 for any order not owned by seller, not just missing permission")
+    print("    → Endpoint: GET  /api/debates/v2  |  send message: POST /api/debates/v2")
+    print("  price edit           : SKIP — requires a live product to test safely")
+    print("    → Endpoint: POST /api/product/edit/prices")
+    print("  mark-delivered       : SKIP — requires a live unique code to test safely")
+    print("    → Endpoint: PUT  /api/purchases/unique-code/{code}/deliver")
     return all(results)
 
 
