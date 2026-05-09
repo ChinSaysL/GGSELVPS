@@ -673,7 +673,11 @@ def _marketplace_variant_payload(
     # modifier can be represented as a non-negative PricePlus value.
     base_price = min(plan.recommended_price for _mapping, _offer, plan in plans)
 
-    variants: list[dict[str, Any]] = []
+    # Collect minimum delta per variant_id: multiple mappings can share the same
+    # variant_id (e.g. multi-edition products where region variants are reused).
+    # Sending duplicates to the API fails; use the minimum delta so the variant
+    # price reflects the cheapest available edition for that region.
+    min_delta_by_variant: dict[int, Decimal] = {}
     for mapping, _offer, plan in plans:
         variant_id = mapping.marketplace_variant_id
         if variant_id is None:
@@ -682,13 +686,14 @@ def _marketplace_variant_payload(
         if delta < Decimal("0"):
             delta = Decimal("0")
         delta = delta.quantize(Decimal("0.01"))
-        variants.append(
-            {
-                "variant_id": int(variant_id),
-                "rate": float(delta),
-                "type": 2,  # PricePlus
-            }
-        )
+        vid = int(variant_id)
+        if vid not in min_delta_by_variant or delta < min_delta_by_variant[vid]:
+            min_delta_by_variant[vid] = delta
+
+    variants: list[dict[str, Any]] = [
+        {"variant_id": vid, "rate": float(delta), "type": 2}
+        for vid, delta in sorted(min_delta_by_variant.items())
+    ]
 
     return base_price, variants
 
