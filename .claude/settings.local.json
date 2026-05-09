@@ -24,7 +24,8 @@
       "WebFetch(domain:api.digiseller.ru)",
       "WebFetch(domain:my.digiseller.com)",
       "Bash(xargs grep -l \"supplier.*order\\\\|create_order\\\\|deliver\")",
-      "Bash(grep -E \"\\\\.py$\")"
+      "Bash(grep -E \"\\\\.py$\")",
+      "Bash(git add *)"
     ]
   }
 }
