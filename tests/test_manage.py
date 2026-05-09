@@ -874,6 +874,51 @@ def test_auto_match_option_entries_matches_gengine_gift_regions() -> None:
     assert ambiguous == []
 
 
+def test_digiseller_region_names_use_union_across_uneven_editions() -> None:
+    products = [
+        SimpleNamespace(
+            id=1,
+            denomination="us",
+            cost_usd=Decimal("30"),
+            supplier_product_id="gift:2483190:standard:us",
+            raw_payload_json='{"source_type":"gift","gift_package_name":"Standard Edition"}',
+        ),
+        SimpleNamespace(
+            id=2,
+            denomination="ca",
+            cost_usd=Decimal("25"),
+            supplier_product_id="gift:2483190:standard:ca",
+            raw_payload_json='{"source_type":"gift","gift_package_name":"Standard Edition"}',
+        ),
+        SimpleNamespace(
+            id=3,
+            denomination="us",
+            cost_usd=Decimal("50"),
+            supplier_product_id="gift:2483190:premium:us",
+            raw_payload_json='{"source_type":"gift","gift_package_name":"Premium Edition"}',
+        ),
+        SimpleNamespace(
+            id=4,
+            denomination="jp",
+            cost_usd=Decimal("20"),
+            supplier_product_id="gift:2483190:premium:jp",
+            raw_payload_json='{"source_type":"gift","gift_package_name":"Premium Edition"}',
+        ),
+        SimpleNamespace(
+            id=5,
+            denomination="cl",
+            cost_usd=Decimal("35"),
+            supplier_product_id="gift:2483190:premium:cl",
+            raw_payload_json='{"source_type":"gift","gift_package_name":"Premium Edition"}',
+        ),
+    ]
+
+    names, default_index = manage._digiseller_region_names_and_default_index(products)
+
+    assert names == ["United States", "Canada", "Japan", "Chile"]
+    assert default_index == 2
+
+
 def test_auto_match_option_entries_matches_gengine_ru_cis_gift_region_alias() -> None:
     products = [
         SimpleNamespace(

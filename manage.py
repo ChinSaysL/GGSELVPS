@@ -3899,6 +3899,44 @@ def _digiseller_variant_body(title: str, order: int, *, default: bool = False) -
     }
 
 
+def _digiseller_region_names_and_default_index(products: list[Any]) -> tuple[list[str], int]:
+    """Return unique buyer-facing region names across all product editions.
+
+    Some G-Engine gift apps expose uneven region coverage per edition. Building
+    Digiseller regions from only one edition can silently skip valid rows.
+    """
+    region_names_by_key: dict[str, str] = {}
+    cheapest_cost_by_key: dict[str, Decimal] = {}
+    ordered_keys: list[str] = []
+
+    for index, product in enumerate(products):
+        display = _ggsel_region_display_name(product) or f"Region {index + 1}"
+        key = (
+            _product_gift_region_key(product)
+            or _gift_region_match_key(display)
+            or _normalize_search_text(display)
+            or f"region_{index + 1}"
+        )
+        try:
+            cost = Decimal(str(getattr(product, "cost_usd", 0) or 0))
+        except (InvalidOperation, ValueError):
+            cost = Decimal("0")
+
+        if key not in region_names_by_key:
+            ordered_keys.append(key)
+            region_names_by_key[key] = display
+            cheapest_cost_by_key[key] = cost
+            continue
+        if cost < cheapest_cost_by_key[key]:
+            cheapest_cost_by_key[key] = cost
+
+    if not ordered_keys:
+        return [], 0
+
+    cheapest_key = min(ordered_keys, key=lambda key: cheapest_cost_by_key[key])
+    return [region_names_by_key[key] for key in ordered_keys], ordered_keys.index(cheapest_key)
+
+
 def _digiseller_option_to_entries(
     option: dict[str, Any],
     option_label: str,
@@ -4063,23 +4101,9 @@ def _digiseller_create_denominations_interactively(
         else:
             edition_names.append("Standard")
 
-    # Region names from any one edition (all share same regions)
-    sample_products = next(
-        (v for k, v in sorted(non_empty.items()) if v), list(products)
-    )
-    region_names = [
-        _ggsel_region_display_name(p) or f"Region {i + 1}"
-        for i, p in enumerate(sample_products)
-    ]
-
-    # Cheapest region index (by cost_usd) so it becomes the pre-selected default.
-    try:
-        cheapest_region_idx = min(
-            range(len(sample_products)),
-            key=lambda i: getattr(sample_products[i], "cost_usd", 0) or 0,
-        )
-    except (ValueError, TypeError):
-        cheapest_region_idx = 0
+    # Use the union of all edition regions; G-Engine can have uneven region
+    # coverage per edition (for example 3 editions x 38 total rows).
+    region_names, cheapest_region_idx = _digiseller_region_names_and_default_index(products)
 
     edition_title = _ask_text("Edition option title (shown to buyer)", default="Edition")
     region_title = _ask_text("Region option title (shown to buyer)", default="Region")
