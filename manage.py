@@ -3875,7 +3875,8 @@ def _ggsel_region_display_name(product: Any) -> str:
             payload = _json.loads(raw)
             zone = str(payload.get("gift_zone") or "").strip()
             if zone:
-                return zone.upper()
+                display = _GENGINE_REGION_DISPLAY.get(zone.lower())
+                return display if display else zone.upper()
         except Exception:
             pass
 
@@ -4089,6 +4090,85 @@ def _digiseller_rename_short_code_regions(
             entry["variant_value"] = name_map[vid]
 
     return renamed
+
+
+def _ggsel_rename_short_code_regions(
+    offer_id: str,
+    region_entries: list[dict[str, Any]],
+    settings: Any,
+) -> int:
+    """Rename 2-letter ISO region variant values to full country names in GGSEL.
+
+    Only renames entries whose variant_value matches ^[A-Z]{2}$ AND whose lowercase
+    code is in _GENGINE_REGION_DISPLAY with a different (longer) full name.
+    Updates both GGSEL and the in-memory entry dicts so the match summary
+    shows the new names.  Returns the count renamed.
+    """
+    import re as _re
+
+    to_rename: list[tuple[int, str, str]] = []
+    for entry in region_entries:
+        value = str(entry.get("variant_value") or "")
+        variant_id = entry.get("variant_id")
+        if not isinstance(variant_id, int):
+            continue
+        if not _re.match(r"^[A-Z]{2}$", value):
+            continue
+        full_name = _GENGINE_REGION_DISPLAY.get(value.lower())
+        if not full_name or full_name == value:
+            continue
+        to_rename.append((variant_id, value, full_name))
+
+    if not to_rename:
+        return 0
+
+    print(
+        f"\n{len(to_rename)} region option(s) still have short 2-letter code names "
+        f"(e.g. {', '.join(v for _, v, _ in to_rename[:3])})."
+    )
+    if not _ask_bool("Rename them to full country names now?", default=True):
+        return 0
+
+    try:
+        from app.clients import GGSELClient
+        from app.clients.base import APIRequestError
+    except ImportError as exc:
+        print(f"[ERROR] Could not import GGSEL client: {exc}")
+        return 0
+
+    if not settings.ggsel_api_key:
+        print("[SKIP] GGSEL API key not configured.")
+        return 0
+
+    client = GGSELClient(
+        settings.ggsel_base_url,
+        settings.ggsel_api_key,
+        seller_id=settings.ggsel_seller_id,
+        panel_email=getattr(settings, "ggsel_email", None),
+        panel_password=getattr(settings, "ggsel_password", None),
+    )
+    name_map: dict[int, str] = {}
+    try:
+        variant_titles = {vid: full_name for vid, _, full_name in to_rename}
+        results = client.rename_offer_option_variants(offer_id, variant_titles)
+        for vid, old_name, new_name in to_rename:
+            result = results.get(vid, {})
+            if result.get("status") == "ok":
+                name_map[vid] = new_name
+                print(f"  {old_name} → {new_name}")
+            else:
+                print(f"  [ERROR] Could not rename '{old_name}': {result.get('reason', 'unknown')}")
+    except (APIRequestError, NotImplementedError) as exc:
+        print(f"[ERROR] GGSEL rename failed: {exc}")
+    finally:
+        client.close()
+
+    for entry in region_entries:
+        vid = entry.get("variant_id")
+        if isinstance(vid, int) and vid in name_map:
+            entry["variant_value"] = name_map[vid]
+
+    return len(name_map)
 
 
 def _digiseller_create_denominations_interactively(
@@ -5105,8 +5185,8 @@ def action_manual_link() -> int:
                             two_d_edition_label = grp_label
 
             if two_d_edition_label and two_d_region_label:
-                # Rename short-code region values (e.g. "AU" → "Australia") in
-                # Digiseller before matching, so the summary shows full names.
+                # Rename short-code region values (e.g. "AU" → "Australia") before
+                # matching so the summary shows full names.
                 if marketplace in ("digiseller", "digiseller_kingpin") and sys.stdin.isatty():
                     _digiseller_rename_short_code_regions(
                         marketplace_offer_id,
@@ -5114,6 +5194,12 @@ def action_manual_link() -> int:
                         settings,
                         api_key=_digi_api_key,
                         seller_id=_digi_seller_id,
+                    )
+                elif marketplace == "ggsel" and sys.stdin.isatty():
+                    _ggsel_rename_short_code_regions(
+                        marketplace_offer_id,
+                        entry_groups[two_d_region_label],
+                        settings,
                     )
 
                 n_ed = len(entry_groups[two_d_edition_label])

@@ -822,6 +822,85 @@ class GGSELClient(BaseAPIClient):
 
         return results
 
+    def rename_offer_option_variants(
+        self,
+        offer_id: str,
+        variant_titles: dict[int, str],
+    ) -> dict[int, dict[str, Any]]:
+        """Rename variants by variant_id. Does 1 GET + 1 PUT per affected option."""
+        if not self._panel_email:
+            raise NotImplementedError(
+                "GGSEL variant rename requires panel credentials."
+            )
+        internal_id = self._panel_resolve_internal_id(offer_id)
+        cookies = self._ensure_panel_session()
+        offer_data = self._panel_get_offer_data(offer_id, cookies=cookies)
+
+        _OPTION_FIELDS = (
+            "kind", "position", "title_ru", "title_en", "required",
+            "hide_price_modifier", "splitted_products",
+        )
+        _VARIANT_FIELDS = (
+            "id", "position", "title_ru", "title_en",
+            "discount_kind", "impact_variant", "default", "price", "status",
+        )
+
+        option_to_variants: dict[int, tuple[dict[str, Any], list[int]]] = {}
+        not_found: set[int] = set(variant_titles.keys())
+        for option in offer_data.get("options") or []:
+            if not isinstance(option, dict):
+                continue
+            option_id = option.get("id")
+            if option_id is None:
+                continue
+            raw_variants = option.get("variants") or option.get("variants_attributes") or []
+            found = [
+                v.get("id")
+                for v in raw_variants
+                if isinstance(v, dict) and v.get("id") in variant_titles
+            ]
+            if found:
+                option_to_variants[int(option_id)] = (option, found)
+                not_found -= set(found)
+
+        results: dict[int, dict[str, Any]] = {}
+        for vid in not_found:
+            results[vid] = {"status": "error", "reason": f"variant {vid} not found in offer {offer_id}"}
+
+        for option_id, (option, variant_ids) in option_to_variants.items():
+            option_body: dict[str, Any] = {k: option[k] for k in _OPTION_FIELDS if k in option}
+            raw_variants = option.get("variants") or option.get("variants_attributes") or []
+            variants_out = []
+            for v in raw_variants:
+                if not isinstance(v, dict):
+                    continue
+                v_copy = {k: v[k] for k in _VARIANT_FIELDS if k in v}
+                vid = v_copy.get("id")
+                if vid in variant_titles:
+                    v_copy["title_ru"] = variant_titles[vid]
+                    v_copy["title_en"] = variant_titles[vid]
+                variants_out.append(v_copy)
+            option_body["variants_attributes"] = variants_out
+            body = {"option": option_body}
+            try:
+                self._panel_request_with_reauth(
+                    "PUT",
+                    f"/api/v1/offers/{internal_id}/options/{option_id}",
+                    json_body=body,
+                )
+                for vid in variant_ids:
+                    results[vid] = {
+                        "status": "ok",
+                        "option_id": option_id,
+                        "variant_id": vid,
+                        "title": variant_titles[vid],
+                    }
+            except Exception as exc:  # noqa: BLE001
+                for vid in variant_ids:
+                    results[vid] = {"status": "error", "variant_id": vid, "reason": str(exc)}
+
+        return results
+
     def set_offer_variant_state(
         self,
         offer_id: str,
