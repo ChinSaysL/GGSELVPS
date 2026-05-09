@@ -5649,36 +5649,42 @@ def _check_digiseller_permissions(client: Any, label: str, api_key: str, seller_
         print(f"  login / token refresh: ERROR — {exc}")
         print(f"    → Endpoint: POST /api/apilogin")
 
-    # Raw diagnostic for sales — print the full Digiseller response to debug "token" errors.
+    # Diagnostic for sales: try via production client method, then raw HTTP with seller_id in body.
     sales_ok = False
     try:
-        from datetime import timedelta
-        now = datetime.now(timezone.utc)
-        token = client._get_access_token()
-        resp = client.http.request(
-            "POST",
-            "/api/seller-sells/v2",
-            params={"token": token},
-            json={
+        items = client.get_latest_sales()
+        print(f"  read sales           : OK ({len(items)} records)")
+        sales_ok = True
+    except Exception as exc:  # noqa: BLE001
+        print(f"  read sales (client)  : FAIL — {exc}")
+        # Fallback: raw HTTP with seller_id explicitly in body to diagnose auth rejection.
+        try:
+            from datetime import timedelta
+            now = datetime.now(timezone.utc)
+            token = client._get_access_token()
+            seller_id_int = int(client.seller_id) if client.seller_id else None
+            body: dict[str, object] = {
                 "date_start": (now - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"),
                 "date_finish": (now + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"),
                 "returned": 1,
                 "page": 1,
                 "rows": 10,
-            },
-            headers={"Accept": "application/json"},
-        )
-        if resp.is_error or (isinstance(resp.json(), dict) and resp.json().get("retval") not in (0, "0", None)):
-            print(f"  read sales           : FAIL — HTTP {resp.status_code}")
-            print(f"    → Raw response: {resp.text[:400]}")
-            print(f"    → Endpoint: POST /api/seller-sells/v2")
-        else:
-            items = resp.json() if isinstance(resp.json(), list) else resp.json().get("rows") or resp.json().get("items") or []
-            print(f"  read sales           : OK ({len(items)} records)")
-            sales_ok = True
-    except Exception as exc:  # noqa: BLE001
-        print(f"  read sales           : ERROR — {exc}")
+            }
+            if seller_id_int is not None:
+                body["seller_id"] = seller_id_int
+            resp = client.http.request(
+                "POST",
+                "/api/seller-sells/v2",
+                params={"token": token},
+                json=body,
+                headers={"Accept": "application/json"},
+            )
+            print(f"    → Raw HTTP {resp.status_code}: {resp.text[:400]}")
+        except Exception as raw_exc:  # noqa: BLE001
+            print(f"    → Raw HTTP attempt failed: {raw_exc}")
         print(f"    → Endpoint: POST /api/seller-sells/v2")
+        print(f"    → Fix: In Digiseller API settings, DELETE the current key and generate a new one.")
+        print(f"       Permissions only apply to keys created AFTER granting them.")
 
     results = [
         login_ok,
