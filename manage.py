@@ -5649,9 +5649,40 @@ def _check_digiseller_permissions(client: Any, label: str, api_key: str, seller_
         print(f"  login / token refresh: ERROR — {exc}")
         print(f"    → Endpoint: POST /api/apilogin")
 
+    # Raw diagnostic for sales — print the full Digiseller response to debug "token" errors.
+    sales_ok = False
+    try:
+        from datetime import timedelta
+        now = datetime.now(timezone.utc)
+        token = client._get_access_token()
+        resp = client.http.request(
+            "POST",
+            "/api/seller-sells/v2",
+            params={"token": token},
+            json={
+                "date_start": (now - timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"),
+                "date_finish": (now + timedelta(days=1)).strftime("%Y-%m-%d %H:%M:%S"),
+                "returned": 1,
+                "page": 1,
+                "rows": 10,
+            },
+            headers={"Accept": "application/json"},
+        )
+        if resp.is_error or (isinstance(resp.json(), dict) and resp.json().get("retval") not in (0, "0", None)):
+            print(f"  read sales           : FAIL — HTTP {resp.status_code}")
+            print(f"    → Raw response: {resp.text[:400]}")
+            print(f"    → Endpoint: POST /api/seller-sells/v2")
+        else:
+            items = resp.json() if isinstance(resp.json(), list) else resp.json().get("rows") or resp.json().get("items") or []
+            print(f"  read sales           : OK ({len(items)} records)")
+            sales_ok = True
+    except Exception as exc:  # noqa: BLE001
+        print(f"  read sales           : ERROR — {exc}")
+        print(f"    → Endpoint: POST /api/seller-sells/v2")
+
     results = [
         login_ok,
-        _probe("read sales           ", "POST /api/seller-sells/v2", lambda: client.get_latest_sales()),
+        sales_ok,
         _probe("unique-code read     ", "GET  /api/purchases/unique-code/{code}", lambda: client.verify_unique_code("PERMCHECKPROBE0000")),
         _probe("list products        ", "POST /api/products/list", lambda: client.list_offers()),
     ]
