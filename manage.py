@@ -2626,12 +2626,49 @@ def _auto_match_products_2d_option_groups(
     """
     import json as _json
 
+    # Reverse map: full display name (lowercase) → short denomination code.
+    # e.g. "australia" → "au", "brazil" → "br"
+    # Used to index region entries by denomination code when the variant_value
+    # is a full country name (after renaming) so product denominations match directly.
+    _reverse_display: dict[str, str] = {
+        v.lower(): k for k, v in _GENGINE_REGION_DISPLAY.items()
+    }
+
+    def _entry_region_keys(e: dict[str, Any]) -> set[str]:
+        """All lookup keys this region entry should answer to."""
+        v = str(e.get("variant_value") or "")
+        nk = _normalize_search_text(v)
+        ks: set[str] = set()
+        p = _gift_region_match_key(v)
+        if p:
+            ks.add(p)
+        if nk:
+            ks.add(nk)
+        rev = _reverse_display.get(nk) if nk else None
+        if rev:
+            ks.add(rev)
+        return ks
+
     # Build region lookup: region_key → entry
+    # Each entry is indexed under all applicable keys so that both full names
+    # ("australia") and short codes ("au") resolve to the same entry.
     region_by_key: dict[str, dict[str, Any]] = {}
     for entry in region_entries:
-        key = _gift_region_match_key(str(entry.get("variant_value") or ""))
-        if key and key not in region_by_key:
-            region_by_key[key] = entry
+        value = str(entry.get("variant_value") or "")
+        nk = _normalize_search_text(value)
+        keys: list[str] = []
+        primary = _gift_region_match_key(value)
+        if primary:
+            keys.append(primary)
+        if nk and nk not in keys:
+            keys.append(nk)
+        # Also add the short denomination code this full name maps back to.
+        rev = _reverse_display.get(nk) if nk else None
+        if rev and rev not in keys:
+            keys.append(rev)
+        for k in keys:
+            if k not in region_by_key:
+                region_by_key[k] = entry
 
     # Build edition lookup: normalized shortname → entry
     edition_by_key: dict[str, dict[str, Any]] = {}
@@ -2697,11 +2734,10 @@ def _auto_match_products_2d_option_groups(
                     f"{edition_label}: {edition_value}, {region_label}: {region_value}"
                 ),
             })
-            effective_region_key = (
-                _gift_region_match_key(region_value) or _normalize_search_text(region_value)
-            )
-            if effective_region_key:
-                matched_region_keys.add(effective_region_key)
+            # Record all keys this region entry answers to so the unmatched
+            # check works regardless of whether matching used the short code
+            # or the full country-name form.
+            matched_region_keys.update(_entry_region_keys(region_entry))
         else:
             unmatched_products.append(product)
 
@@ -2716,11 +2752,11 @@ def _auto_match_products_2d_option_groups(
         if len(unmatched_products) > 10:
             print(f"  ...and {len(unmatched_products) - 10} more.")
 
-    # Unmatched entries: region variants that had no G-Engine product
+    # Unmatched entries: region variants that had no G-Engine product.
     unmatched_entries: list[dict[str, Any]] = [
         {"entry": e}
         for e in region_entries
-        if (_gift_region_match_key(str(e.get("variant_value") or "")) or "") not in matched_region_keys
+        if not (_entry_region_keys(e) & matched_region_keys)
     ]
 
     return matches, unmatched_entries, []
