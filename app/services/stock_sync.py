@@ -853,14 +853,16 @@ def sync_offer_stock(
                 ),
             )
             # 2D (Edition × Region) offers: multiple mappings share the same region
-            # variant_id. Merge them so a region is visible if ANY edition is in stock,
-            # and only one API call is made per region variant_id.
+            # variant_id. Merge them so a region is visible only if ALL editions for
+            # that region are affordable — if any edition is unaffordable the whole
+            # region is hidden to avoid unfulfillable orders.
+            # Only one API call is made per region variant_id.
             merged_region_stock: dict[int, bool] = {}
             for _m, _s, _in_stock, _r, _rb in ordered_decisions:
                 rvid = _m.marketplace_variant_id
                 if rvid is not None:
                     ivid = int(rvid)
-                    merged_region_stock[ivid] = merged_region_stock.get(ivid, False) or _in_stock
+                    merged_region_stock[ivid] = merged_region_stock.get(ivid, True) and _in_stock
             seen_region_vids: set[int] = set()
 
             for mapping, supplier, in_stock, reason, required_balance in ordered_decisions:
