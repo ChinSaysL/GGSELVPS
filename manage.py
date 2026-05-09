@@ -86,6 +86,12 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
         "delete-links",
         "Remove product mappings or offer links from the local database.",
     ),
+    MenuAction(
+        "24",
+        "Check APIs",
+        "check-api",
+        "Test live API connectivity and permissions for all configured accounts.",
+    ),
 )
 
 VALID_MARKETPLACES = ("digiseller", "digiseller_kingpin", "ggsel")
@@ -5588,6 +5594,112 @@ def action_manual_link() -> int:
     return 0 if successful > 0 and failed == 0 else (0 if successful > 0 else 1)
 
 
+def action_check_api() -> int:
+    _print_header("API Connectivity Check")
+    try:
+        from app.clients import DigisellerClient, GEngineClient, GGSELClient
+        from app.config import get_settings
+        from app.security import mask_secret
+    except ImportError as exc:
+        print(f"Could not import app dependencies: {exc}")
+        return 1
+
+    settings = get_settings()
+    all_ok = True
+
+    # --- G-Engine ---
+    print("\n[G-Engine]")
+    if not settings.gengine_api_key:
+        print("  SKIP — GENGINE_API_KEY not set")
+        all_ok = False
+    else:
+        client = GEngineClient(settings.gengine_base_url, settings.gengine_api_key)
+        try:
+            balance = client.get_balance()
+            amount = balance.get("balance") or balance.get("amount") or balance.get("usable_balance")
+            currency = balance.get("currency", "USD")
+            if amount is not None:
+                print(f"  OK — balance: {amount} {currency}")
+            else:
+                print(f"  OK — connected (raw: {balance})")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  FAIL — {exc}")
+            all_ok = False
+        finally:
+            client.close()
+
+    # --- Digiseller (main account) ---
+    print("\n[Digiseller — your account]")
+    if not settings.digiseller_api_key:
+        print("  SKIP — DIGISELLER_API_KEY not set")
+    else:
+        print(f"  key: {mask_secret(settings.digiseller_api_key)}  seller_id: {settings.digiseller_seller_id or '(not set)'}")
+        client = DigisellerClient(
+            settings.digiseller_base_url,
+            settings.digiseller_api_key,
+            seller_id=settings.digiseller_seller_id,
+            task_poll_timeout_seconds=settings.digiseller_task_poll_timeout_seconds,
+            task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
+        )
+        try:
+            sales = client.get_latest_sales()
+            print(f"  OK — get_latest_sales returned {len(sales)} record(s)")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  FAIL — {exc}")
+            all_ok = False
+        finally:
+            client.close()
+
+    # --- Digiseller (kingpin account) ---
+    print("\n[Digiseller — kingpin's account]")
+    if not settings.digiseller_kingpin_api_key:
+        print("  SKIP — DIGISELLER_KINGPIN_API_KEY not set")
+    else:
+        print(f"  key: {mask_secret(settings.digiseller_kingpin_api_key)}  seller_id: {settings.digiseller_kingpin_seller_id or '(not set)'}")
+        client = DigisellerClient(
+            settings.digiseller_base_url,
+            settings.digiseller_kingpin_api_key,
+            seller_id=settings.digiseller_kingpin_seller_id,
+            task_poll_timeout_seconds=settings.digiseller_task_poll_timeout_seconds,
+            task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
+        )
+        try:
+            sales = client.get_latest_sales()
+            print(f"  OK — get_latest_sales returned {len(sales)} record(s)")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  FAIL — {exc}")
+            all_ok = False
+        finally:
+            client.close()
+
+    # --- GGSEL ---
+    print("\n[GGSEL]")
+    if not settings.ggsel_api_key:
+        print("  SKIP — GGSEL_API_KEY not set")
+    else:
+        print(f"  key: {mask_secret(settings.ggsel_api_key)}  seller_id: {settings.ggsel_seller_id or '(not set)'}")
+        client = GGSELClient(
+            settings.ggsel_base_url,
+            settings.ggsel_api_key,
+            seller_id=settings.ggsel_seller_id,
+        )
+        try:
+            sales = client.get_latest_sales()
+            print(f"  OK — get_latest_sales returned {len(sales)} record(s)")
+        except Exception as exc:  # noqa: BLE001
+            print(f"  FAIL — {exc}")
+            all_ok = False
+        finally:
+            client.close()
+
+    print()
+    if all_ok:
+        print("All configured APIs passed.")
+    else:
+        print("One or more APIs failed or are not configured — see above.")
+    return 0 if all_ok else 1
+
+
 def action_docker_build() -> int:
     if shutil.which("docker") is None:
         print("Docker is not installed or not on PATH.")
@@ -5619,6 +5731,7 @@ COMMANDS: dict[str, Callable[[], int]] = {
     "manual-link": action_manual_link,
     "manual-link-example": action_manual_link_example,
     "docker-build": action_docker_build,
+    "check-api": action_check_api,
 }
 
 
