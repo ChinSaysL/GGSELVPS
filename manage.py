@@ -3911,6 +3911,7 @@ def _digiseller_create_denominations_interactively(
         task_poll_interval_seconds=getattr(settings, "digiseller_task_poll_interval_seconds", None),
     )
     entries: list[dict[str, Any]] = []
+    text_field_created = False
     try:
         # Create Edition radio option (order 1)
         ed_variants = [
@@ -3964,10 +3965,11 @@ def _digiseller_create_denominations_interactively(
             order=3,
         )
         print("[OK] Steam URL text field created.")
+        text_field_created = True
 
     except (APIRequestError, NotImplementedError) as exc:
         print(f"[ERROR] Failed to create Digiseller options: {exc}")
-        return []
+        return [], False
     finally:
         client.close()
 
@@ -3976,7 +3978,7 @@ def _digiseller_create_denominations_interactively(
     else:
         print(f"[OK] {len(entries)} option variant entries ready for linking.")
 
-    return entries
+    return entries, text_field_created
 
 
 def _ggsel_create_denominations_interactively(
@@ -4704,6 +4706,7 @@ def action_manual_link() -> int:
 
     snapshot, snapshot_error = _fetch_marketplace_offer_snapshot(marketplace, marketplace_offer_id)
     option_variant_entries: list[dict[str, str]] = []
+    digiseller_auto_created_text_field = False
     if snapshot is None:
         print("Could not fetch marketplace item details by ID; continuing with manual values.")
         if snapshot_error:
@@ -4792,10 +4795,12 @@ def action_manual_link() -> int:
             f"but {len(reference_products)} G-Engine row(s) are available."
         )
         if _ask_bool("Auto-create Digiseller parameters from G-Engine data?", default=True):
-            option_variant_entries = _digiseller_create_denominations_interactively(
-                marketplace_offer_id=marketplace_offer_id,
-                products=reference_products,
-                settings=settings,
+            option_variant_entries, digiseller_auto_created_text_field = (
+                _digiseller_create_denominations_interactively(
+                    marketplace_offer_id=marketplace_offer_id,
+                    products=reference_products,
+                    settings=settings,
+                )
             )
 
     if option_variant_entries:
@@ -5163,6 +5168,8 @@ def action_manual_link() -> int:
             detected_requires_buyer_input = True
             if detected_buyer_input_label is None:
                 detected_buyer_input_label = non_qty_keys[0]
+    if not detected_requires_buyer_input and digiseller_auto_created_text_field:
+        detected_requires_buyer_input = True
     requires_buyer_input_default = bool(snapshot.get("requires_buyer_input")) if snapshot else False
     if detected_requires_buyer_input:
         requires_buyer_input_default = True
