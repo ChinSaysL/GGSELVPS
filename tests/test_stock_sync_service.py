@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from app.config import Settings
 from app.db import Base
 from app.models import BalanceSnapshot, MarketplaceOffer, ProductMapping, SupplierProduct
-from app.services.stock_sync import sync_offer_stock
+from app.services.stock_sync import _build_marketplace_clients, sync_offer_stock
 
 
 @dataclass
@@ -111,6 +111,25 @@ def _db_session() -> Generator[Session, None, None]:
 @pytest.fixture
 def db_session() -> Generator[Session, None, None]:
     yield from _db_session()
+
+
+def test_stock_sync_builds_kingpin_digiseller_client() -> None:
+    settings = Settings(
+        _env_file=None,
+        scheduler_enabled=False,
+        DIGISELLER_KINGPIN_API_KEY="kingpin-secret",
+        DIGISELLER_KINGPIN_SELLER_ID="987654",
+    )
+
+    clients = _build_marketplace_clients(settings)
+    try:
+        assert set(clients) == {"digiseller_kingpin"}
+        client = clients["digiseller_kingpin"]
+        assert getattr(client, "api_key") == "kingpin-secret"
+        assert getattr(client, "seller_id") == "987654"
+    finally:
+        for client in clients.values():
+            client.close()
 
 
 def _settings_for_tests() -> Settings:

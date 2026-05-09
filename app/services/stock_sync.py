@@ -1180,6 +1180,15 @@ def _build_marketplace_clients(settings: Settings) -> dict[str, MarketplaceStock
             task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
             rate_limit_per_minute=settings.digiseller_rate_limit_per_minute,
         )
+    if settings.digiseller_kingpin_api_key:
+        clients["digiseller_kingpin"] = DigisellerClient(
+            settings.digiseller_base_url,
+            settings.digiseller_kingpin_api_key,
+            seller_id=settings.digiseller_kingpin_seller_id,
+            task_poll_timeout_seconds=settings.digiseller_task_poll_timeout_seconds,
+            task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
+            rate_limit_per_minute=settings.digiseller_rate_limit_per_minute,
+        )
     if settings.ggsel_api_key:
         clients["ggsel"] = GGSELClient(
             settings.ggsel_base_url,

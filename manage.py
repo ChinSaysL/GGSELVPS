@@ -246,6 +246,11 @@ def action_check_config() -> int:
             "DIGISELLER_SELLER_ID is not set. Digiseller live price updates may return 401 "
             "after token expiry; set seller ID to enable automatic token refresh."
         )
+    if settings.digiseller_kingpin_api_key and not settings.digiseller_kingpin_seller_id:
+        warnings.append(
+            "DIGISELLER_KINGPIN_SELLER_ID is not set. Kingpin Digiseller live edits may return "
+            "401 after token expiry; set seller ID to enable automatic token refresh."
+        )
     if settings.ggsel_api_key and not settings.ggsel_seller_id:
         warnings.append(
             "GGSEL_SELLER_ID is not set. GGSEL public offer lookup can still work, but live "

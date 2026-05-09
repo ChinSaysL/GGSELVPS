@@ -44,6 +44,8 @@ Canonical API key variables:
 - `GGSEL_API_KEY`
 - `DIGISELLER_API_KEY`
 - `DIGISELLER_SELLER_ID` (recommended for Digiseller live edits)
+- `DIGISELLER_KINGPIN_API_KEY` (optional second Digiseller seller account)
+- `DIGISELLER_KINGPIN_SELLER_ID` (recommended for Kingpin Digiseller live edits)
 
 Compatibility aliases are also supported:
 - `GEngineToken`
@@ -56,6 +58,8 @@ Digiseller auth note:
 tokens via `POST /api/apilogin` using `DIGISELLER_API_KEY` (seller API key).
 - If `DIGISELLER_SELLER_ID` is empty, `DIGISELLER_API_KEY` is treated as a direct token.
 Direct tokens can expire and then price sync may return `401`.
+- Kingpin's second Digiseller account uses the same auth flow with
+`DIGISELLER_KINGPIN_API_KEY` and `DIGISELLER_KINGPIN_SELLER_ID`.
 - Digiseller async task polling can be tuned with:
   - `DIGISELLER_TASK_POLL_TIMEOUT_SECONDS` (default `120`)
   - `DIGISELLER_TASK_POLL_INTERVAL_SECONDS` (default `1.0`)
