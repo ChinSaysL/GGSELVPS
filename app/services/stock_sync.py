@@ -18,6 +18,8 @@ from app.utils.logging import get_logger, log_event
 
 logger = get_logger(__name__)
 
+DIGISELLER_MARKETPLACES = {"digiseller", "digiseller_kingpin"}
+
 
 class SupplierBalanceClientProtocol(Protocol):
     def get_balance(self) -> dict[str, Any]: ...
@@ -246,7 +248,7 @@ def _digiseller_disable_is_already_unavailable_error(reason: str) -> bool:
 
 
 def _marketplace_status_update_error_is_safe_noop(*, marketplace: str, reason: str) -> bool:
-    if marketplace != "digiseller":
+    if marketplace not in DIGISELLER_MARKETPLACES:
         return False
     return _digiseller_disable_is_already_unavailable_error(reason)
 
@@ -580,7 +582,7 @@ def sync_offer_stock(
             continue
 
         runtime_quantity_variant_mode = (
-            marketplace == "digiseller"
+            marketplace in DIGISELLER_MARKETPLACES
             and len(decisions) == 1
             and _is_marketplace_quantity_recharge_mapping(decisions[0][0], decisions[0][1])
             and hasattr(client, "set_offer_variant_visible")

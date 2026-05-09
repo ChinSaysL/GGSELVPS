@@ -1046,8 +1046,10 @@ def test_price_sync_uses_simple_usd_formula_for_marketplace_quantity_recharge(
     assert result["details"][0]["payment_system_commission_percent"] == "0"
 
 
+@pytest.mark.parametrize("marketplace", ["digiseller", "digiseller_kingpin"])
 def test_price_sync_updates_digiseller_variant_group_with_single_api_call(
     db_session: Session,
+    marketplace: str,
 ) -> None:
     supplier_250 = SupplierProduct(
         supplier="gengine",
@@ -1078,7 +1080,7 @@ def test_price_sync_updates_digiseller_variant_group_with_single_api_call(
     db_session.flush()
 
     offer = MarketplaceOffer(
-        marketplace="digiseller",
+        marketplace=marketplace,
         marketplace_offer_id="5850465",
         supplier_product_id=supplier_250.id,
         title="Playstation testing",
@@ -1111,7 +1113,7 @@ def test_price_sync_updates_digiseller_variant_group_with_single_api_call(
     result = sync_offer_prices(
         db=db_session,
         settings=_settings_for_tests(default_currency="USD"),
-        marketplace_clients={"digiseller": client},
+        marketplace_clients={marketplace: client},
         dry_run=False,
         refresh_supplier_prices=False,
     )

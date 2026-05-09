@@ -136,7 +136,11 @@ def _settings_for_tests() -> Settings:
     return Settings(_env_file=None, scheduler_enabled=False)
 
 
-def test_stock_sync_controls_digiseller_variants_independently(db_session: Session) -> None:
+@pytest.mark.parametrize("marketplace", ["digiseller", "digiseller_kingpin"])
+def test_stock_sync_controls_digiseller_variants_independently(
+    db_session: Session,
+    marketplace: str,
+) -> None:
     supplier_250 = SupplierProduct(
         supplier="gengine",
         supplier_product_id="5",
@@ -165,7 +169,7 @@ def test_stock_sync_controls_digiseller_variants_independently(db_session: Sessi
     db_session.flush()
 
     offer = MarketplaceOffer(
-        marketplace="digiseller",
+        marketplace=marketplace,
         marketplace_offer_id="5850465",
         supplier_product_id=supplier_250.id,
         title="Playstation testing",
@@ -198,7 +202,7 @@ def test_stock_sync_controls_digiseller_variants_independently(db_session: Sessi
         db=db_session,
         settings=_settings_for_tests(),
         supplier_balance_client=FakeSupplierBalanceClient({"data": {"balance": "50"}}),
-        marketplace_clients={"digiseller": client},
+        marketplace_clients={marketplace: client},
     )
 
     assert stats["errors"] == 0

@@ -29,6 +29,9 @@ from app.utils.logging import get_logger, log_event
 
 logger = get_logger(__name__)
 
+DIGISELLER_MARKETPLACES = {"digiseller", "digiseller_kingpin"}
+VARIANT_PRICE_MARKETPLACES = {*DIGISELLER_MARKETPLACES, "ggsel"}
+
 
 class MarketplacePriceClientProtocol(Protocol):
     def set_offer_price(
@@ -836,10 +839,10 @@ def sync_offer_prices(
 
         group = mappings_by_offer.get(int(offer.id), [mapping])
         marketplace = offer.marketplace.lower()
-        supports_variant_price_group = marketplace in {"digiseller", "ggsel"} and len(group) > 1
+        supports_variant_price_group = marketplace in VARIANT_PRICE_MARKETPLACES and len(group) > 1
 
         runtime_quantity_mode = (
-            marketplace == "digiseller"
+            marketplace in DIGISELLER_MARKETPLACES
             and len(group) == 1
             and _is_marketplace_quantity_recharge_mapping(mapping, supplier_product)
         )
@@ -942,7 +945,7 @@ def sync_offer_prices(
                 _skip_detail(stats, detail, reason=str(exc))
                 continue
             except Exception as exc:  # noqa: BLE001 - one failed offer should not stop the batch.
-                if marketplace == "digiseller" and _is_digiseller_offer_access_error(str(exc)):
+                if marketplace in DIGISELLER_MARKETPLACES and _is_digiseller_offer_access_error(str(exc)):
                     mapping.enabled = False
                     db.add(mapping)
                     _skip_detail(
@@ -1146,7 +1149,7 @@ def sync_offer_prices(
                     _skip_detail(stats, grouped_detail, reason=str(exc))
                 continue
             except Exception as exc:  # noqa: BLE001 - keep other offers running.
-                is_access_error = marketplace == "digiseller" and _is_digiseller_offer_access_error(
+                is_access_error = marketplace in DIGISELLER_MARKETPLACES and _is_digiseller_offer_access_error(
                     str(exc)
                 )
                 for grouped_mapping, grouped_offer, grouped_plan in plans:
@@ -1332,7 +1335,7 @@ def sync_offer_prices(
             _skip_detail(stats, detail, reason=str(exc))
             continue
         except Exception as exc:  # noqa: BLE001 - one failed offer should not stop the batch.
-            if marketplace == "digiseller" and _is_digiseller_offer_access_error(str(exc)):
+            if marketplace in DIGISELLER_MARKETPLACES and _is_digiseller_offer_access_error(str(exc)):
                 mapping.enabled = False
                 db.add(mapping)
                 _skip_detail(
