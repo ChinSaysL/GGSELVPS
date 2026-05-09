@@ -686,6 +686,15 @@ def _select_mapping(
     variant_ids = list(dict.fromkeys(variant_ids))
 
     if variant_ids:
+        variant_id_set = set(variant_ids)
+        # 2D match: both region and edition variant_ids must be present in the sale
+        for mapping in enabled_mappings:
+            region_vid = mapping.marketplace_variant_id
+            edition_vid = getattr(mapping, "marketplace_edition_variant_id", None)
+            if region_vid is not None and edition_vid is not None:
+                if region_vid in variant_id_set and edition_vid in variant_id_set:
+                    return mapping, None
+        # 1D fallback: match by region variant_id alone
         for variant_id in variant_ids:
             for mapping in enabled_mappings:
                 if mapping.marketplace_variant_id == variant_id:
@@ -1095,7 +1104,7 @@ def _preverify_digiseller_unique_code(
     sale: NormalizedMarketplaceSale,
     marketplace_client: MarketplaceOrderClientProtocol,
 ) -> tuple[NormalizedMarketplaceSale | None, str | None]:
-    if sale.marketplace != "digiseller":
+    if sale.marketplace not in {"digiseller", "digiseller_kingpin"}:
         return sale, None
     digiseller_client = cast(DigisellerDeliveryClientProtocol, marketplace_client)
     verification_payload: dict[str, Any] | None = None
@@ -1161,7 +1170,7 @@ def _deliver_to_marketplace(
     )
     buyer_id = sale.buyer_id or order.buyer_id or ""
 
-    if sale.marketplace == "digiseller":
+    if sale.marketplace in {"digiseller", "digiseller_kingpin"}:
         if not sale.unique_code:
             order.status = "supplier_order_created"
             order.error_message = "awaiting_digiseller_unique_code"
