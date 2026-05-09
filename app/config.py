@@ -47,6 +47,14 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("DIGISELLER_SELLER_ID", "DigisellerSellerId"),
     )
+    digiseller_kingpin_api_key: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("DIGISELLER_KINGPIN_API_KEY"),
+    )
+    digiseller_kingpin_seller_id: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("DIGISELLER_KINGPIN_SELLER_ID"),
+    )
     digiseller_base_url: str = "https://api.digiseller.com"
     digiseller_task_poll_timeout_seconds: int = 120
     digiseller_task_poll_interval_seconds: float = 1.0
@@ -96,7 +104,7 @@ class Settings(BaseSettings):
             return None
         return value
 
-    @field_validator("digiseller_seller_id", "ggsel_seller_id", mode="before")
+    @field_validator("digiseller_seller_id", "digiseller_kingpin_seller_id", "ggsel_seller_id", mode="before")
     @classmethod
     def empty_seller_id_to_none(cls, value: object) -> object:
         if value == "":

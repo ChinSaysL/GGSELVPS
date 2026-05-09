@@ -461,6 +461,38 @@ def digiseller_unique_code_delivery(
         supplier_client.close()
 
 
+@app.get("/delivery/digiseller/kingpin")
+def digiseller_kingpin_unique_code_delivery(
+    unique_code: str = Query(..., alias="uniquecode"),
+    db: Session = Depends(get_db),
+) -> HTMLResponse:
+    if not settings.gengine_api_key or not settings.digiseller_kingpin_api_key:
+        raise HTTPException(status_code=503, detail="Kingpin delivery API keys are not configured.")
+
+    supplier_client = GEngineClient(settings.gengine_base_url, settings.gengine_api_key)
+    marketplace_client = DigisellerClient(
+        settings.digiseller_base_url,
+        settings.digiseller_kingpin_api_key,
+        seller_id=settings.digiseller_kingpin_seller_id,
+        task_poll_timeout_seconds=settings.digiseller_task_poll_timeout_seconds,
+        task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
+        rate_limit_per_minute=settings.digiseller_rate_limit_per_minute,
+    )
+    try:
+        stats = process_digiseller_unique_code(
+            unique_code=unique_code,
+            db=db,
+            settings=settings,
+            supplier_client=supplier_client,
+            marketplace_client=marketplace_client,
+            marketplace="digiseller_kingpin",
+        )
+        return _digiseller_delivery_response(stats)
+    finally:
+        marketplace_client.close()
+        supplier_client.close()
+
+
 @app.post("/offers/manual-link")
 def manual_link_offer(
     payload: ManualOfferLinkRequest,

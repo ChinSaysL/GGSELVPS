@@ -1790,6 +1790,7 @@ def process_digiseller_unique_code(
     settings: Settings,
     supplier_client: SupplierOrderClientProtocol,
     marketplace_client: DigisellerDeliveryClientProtocol,
+    marketplace: str = "digiseller",
 ) -> dict[str, Any]:
     _ = settings
     stats: dict[str, Any] = {
@@ -1805,7 +1806,7 @@ def process_digiseller_unique_code(
     }
     verification_payload = marketplace_client.verify_unique_code(unique_code)
     sale = _normalize_marketplace_sale(
-        "digiseller",
+        marketplace,
         verification_payload,
         unique_code=unique_code,
     )
@@ -1830,6 +1831,17 @@ def _build_marketplace_clients(settings: Settings) -> dict[str, MarketplaceOrder
             settings.digiseller_base_url,
             settings.digiseller_api_key,
             seller_id=settings.digiseller_seller_id,
+            task_poll_timeout_seconds=settings.digiseller_task_poll_timeout_seconds,
+            task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
+            sales_page_size=settings.digiseller_sales_page_size,
+            sales_max_pages=settings.digiseller_sales_max_pages,
+            rate_limit_per_minute=settings.digiseller_rate_limit_per_minute,
+        )
+    if settings.digiseller_kingpin_api_key:
+        clients["digiseller_kingpin"] = DigisellerClient(
+            settings.digiseller_base_url,
+            settings.digiseller_kingpin_api_key,
+            seller_id=settings.digiseller_kingpin_seller_id,
             task_poll_timeout_seconds=settings.digiseller_task_poll_timeout_seconds,
             task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
             sales_page_size=settings.digiseller_sales_page_size,

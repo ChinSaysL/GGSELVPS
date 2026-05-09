@@ -88,7 +88,7 @@ MENU_ACTIONS: tuple[MenuAction, ...] = (
     ),
 )
 
-VALID_MARKETPLACES = ("digiseller", "ggsel")
+VALID_MARKETPLACES = ("digiseller", "digiseller_kingpin", "ggsel")
 VALID_CURRENCIES = ("RUB", "USD")
 GENGINE_LINK_KINDS = ("shop", "recharge", "gifts")
 ORDER_SYNC_PENDING_REASONS = {
@@ -224,6 +224,8 @@ def action_check_config() -> int:
     print(f"ggsel_seller_id configured: {_safe_yes_no(bool(settings.ggsel_seller_id))}")
     print(f"digiseller_api_key: {mask_secret(settings.digiseller_api_key)}")
     print(f"digiseller_seller_id configured: {_safe_yes_no(bool(settings.digiseller_seller_id))}")
+    print(f"digiseller_kingpin_api_key: {mask_secret(settings.digiseller_kingpin_api_key)}")
+    print(f"digiseller_kingpin_seller_id configured: {_safe_yes_no(bool(settings.digiseller_kingpin_seller_id))}")
 
     missing: list[str] = []
     warnings: list[str] = []
@@ -576,15 +578,31 @@ def action_digiseller_code() -> int:
     if not settings.gengine_api_key:
         print("GENGINE_API_KEY is required for Digiseller delivery.")
         return 1
-    if not settings.digiseller_api_key:
-        print("DIGISELLER_API_KEY is required for Digiseller delivery.")
-        return 1
+
+    use_kingpin = False
+    if settings.digiseller_kingpin_api_key:
+        use_kingpin = _ask_bool("Is this code from Kingpin's Digiseller account?", default=False)
+
+    if use_kingpin:
+        if not settings.digiseller_kingpin_api_key:
+            print("DIGISELLER_KINGPIN_API_KEY is required for Kingpin delivery.")
+            return 1
+        digiseller_api_key = settings.digiseller_kingpin_api_key
+        digiseller_seller_id = settings.digiseller_kingpin_seller_id
+        marketplace = "digiseller_kingpin"
+    else:
+        if not settings.digiseller_api_key:
+            print("DIGISELLER_API_KEY is required for Digiseller delivery.")
+            return 1
+        digiseller_api_key = settings.digiseller_api_key
+        digiseller_seller_id = settings.digiseller_seller_id
+        marketplace = "digiseller"
 
     supplier_client = GEngineClient(settings.gengine_base_url, settings.gengine_api_key)
     marketplace_client = DigisellerClient(
         settings.digiseller_base_url,
-        settings.digiseller_api_key,
-        seller_id=settings.digiseller_seller_id,
+        digiseller_api_key,
+        seller_id=digiseller_seller_id,
         task_poll_timeout_seconds=settings.digiseller_task_poll_timeout_seconds,
         task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
     )
@@ -596,6 +614,7 @@ def action_digiseller_code() -> int:
                 settings=settings,
                 supplier_client=supplier_client,
                 marketplace_client=marketplace_client,
+                marketplace=marketplace,
             )
     except Exception as exc:  # noqa: BLE001 - CLI should show a readable failure.
         print(f"Digiseller unique-code delivery failed: {exc}")
@@ -1643,6 +1662,8 @@ def action_list_offers() -> int:
             status_flags.append("HALTED")
         if offer.requires_buyer_input:
             status_flags.append("buyer-input")
+        if offer.marketplace == "digiseller_kingpin":
+            status_flags.append("kingpin")
         status_str = " ".join(status_flags)
 
         print(
@@ -2330,6 +2351,14 @@ def _fetch_marketplace_offer_snapshot(
                 settings.digiseller_base_url,
                 settings.digiseller_api_key,
                 seller_id=settings.digiseller_seller_id,
+                task_poll_timeout_seconds=settings.digiseller_task_poll_timeout_seconds,
+                task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
+            )
+        elif marketplace == "digiseller_kingpin" and settings.digiseller_kingpin_api_key:
+            client = DigisellerClient(
+                settings.digiseller_base_url,
+                settings.digiseller_kingpin_api_key,
+                seller_id=settings.digiseller_kingpin_seller_id,
                 task_poll_timeout_seconds=settings.digiseller_task_poll_timeout_seconds,
                 task_poll_interval_seconds=settings.digiseller_task_poll_interval_seconds,
             )
@@ -4454,9 +4483,12 @@ def action_auto_link() -> int:
 
     marketplace = _ask_text("Marketplace/listing platform (digiseller or ggsel)", default="digiseller")
     marketplace = marketplace.lower()
-    if marketplace not in VALID_MARKETPLACES:
-        print(f"Marketplace must be one of: {', '.join(VALID_MARKETPLACES)}.")
+    if marketplace not in ("digiseller", "ggsel"):
+        print("Marketplace must be one of: digiseller, ggsel.")
         return 1
+    if marketplace == "digiseller":
+        if _ask_bool("Use Kingpin's Digiseller account?", default=False):
+            marketplace = "digiseller_kingpin"
 
     chosen = _choose_reference_products_interactively()
     if chosen is None:
@@ -4818,9 +4850,12 @@ def action_manual_link() -> int:
 
     marketplace = _ask_text("Marketplace/listing platform (digiseller or ggsel)", default="digiseller")
     marketplace = marketplace.lower()
-    if marketplace not in VALID_MARKETPLACES:
-        print(f"Marketplace must be one of: {', '.join(VALID_MARKETPLACES)}.")
+    if marketplace not in ("digiseller", "ggsel"):
+        print("Marketplace must be one of: digiseller, ggsel.")
         return 1
+    if marketplace == "digiseller":
+        if _ask_bool("Use Kingpin's Digiseller account?", default=False):
+            marketplace = "digiseller_kingpin"
     try:
         from app.config import get_settings
     except ImportError as exc:

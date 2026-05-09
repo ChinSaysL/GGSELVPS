@@ -22,7 +22,9 @@
       "Bash(python -m pytest tests/test_manage.py -x -q)",
       "WebSearch",
       "WebFetch(domain:api.digiseller.ru)",
-      "WebFetch(domain:my.digiseller.com)"
+      "WebFetch(domain:my.digiseller.com)",
+      "Bash(xargs grep -l \"supplier.*order\\\\|create_order\\\\|deliver\")",
+      "Bash(grep -E \"\\\\.py$\")"
     ]
   }
 }
