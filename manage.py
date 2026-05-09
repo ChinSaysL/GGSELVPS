@@ -5634,10 +5634,10 @@ def _check_digiseller_permissions(client: Any, label: str, api_key: str, seller_
         _probe("login / token refresh", lambda: client.get_latest_sales()),
         _probe("read sales           ", lambda: client.get_latest_sales()),
         _probe("unique-code read     ", lambda: client.verify_unique_code("PERMCHECKPROBE0000")),
-        _probe("buyer messages read  ", lambda: client.get_buyer_messages("0")),
         _probe("list products        ", lambda: client.list_offers()),
     ]
-    print("  note: price-edit and mark-delivered require a live order to test safely")
+    print("  buyer messages read  : SKIP (requires a real order ID — 403 = order not yours, not permission denied)")
+    print("  note: price-edit and mark-delivered also require a live order to test safely")
     return all(results)
 
 
