@@ -3926,10 +3926,20 @@ def _digiseller_option_to_entries(
     return entries
 
 
+def _digiseller_credentials(marketplace: str, settings: Any) -> tuple[str | None, str | None]:
+    """Return (api_key, seller_id) for the given digiseller marketplace variant."""
+    if marketplace == "digiseller_kingpin":
+        return settings.digiseller_kingpin_api_key, settings.digiseller_kingpin_seller_id
+    return settings.digiseller_api_key, settings.digiseller_seller_id
+
+
 def _digiseller_rename_short_code_regions(
     offer_id: str,
     region_entries: list[dict[str, Any]],
     settings: Any,
+    *,
+    api_key: str | None = None,
+    seller_id: str | None = None,
 ) -> int:
     """Rename 2-letter ISO region variant values to full country names in Digiseller.
 
@@ -3973,8 +3983,8 @@ def _digiseller_rename_short_code_regions(
 
     client = DigisellerClient(
         settings.digiseller_base_url,
-        settings.digiseller_api_key,
-        seller_id=getattr(settings, "digiseller_seller_id", None),
+        api_key or settings.digiseller_api_key,
+        seller_id=seller_id if seller_id is not None else getattr(settings, "digiseller_seller_id", None),
         task_poll_timeout_seconds=getattr(settings, "digiseller_task_poll_timeout_seconds", None),
         task_poll_interval_seconds=getattr(settings, "digiseller_task_poll_interval_seconds", None),
     )
@@ -4007,22 +4017,26 @@ def _digiseller_create_denominations_interactively(
     marketplace_offer_id: str,
     products: list[Any],
     settings: Any,
-) -> list[dict[str, Any]]:
+    *,
+    api_key: str | None = None,
+    seller_id: str | None = None,
+) -> tuple[list[dict[str, Any]], bool]:
     """Create Digiseller Edition + Region radio options and Steam URL text field.
 
-    Returns option_variant_entries (Edition + Region entries only; text field is
-    buyer-input and not product-mapped).
+    Returns (option_variant_entries, text_field_created).
     """
     try:
         from app.clients import DigisellerClient
         from app.clients.base import APIRequestError
     except ImportError as exc:
         print(f"[ERROR] Could not import Digiseller client: {exc}")
-        return []
+        return [], False
 
-    if not getattr(settings, "digiseller_api_key", None):
+    effective_api_key = api_key or getattr(settings, "digiseller_api_key", None)
+    if not effective_api_key:
         print("[SKIP] Digiseller API key not configured.")
-        return []
+        return [], False
+    effective_seller_id = seller_id if seller_id is not None else getattr(settings, "digiseller_seller_id", None)
 
     # Group by edition package
     package_groups = _ggsel_group_products_by_package(products)
@@ -4073,8 +4087,8 @@ def _digiseller_create_denominations_interactively(
 
     client = DigisellerClient(
         settings.digiseller_base_url,
-        settings.digiseller_api_key,
-        seller_id=getattr(settings, "digiseller_seller_id", None),
+        effective_api_key,
+        seller_id=effective_seller_id,
         task_poll_timeout_seconds=getattr(settings, "digiseller_task_poll_timeout_seconds", None),
         task_poll_interval_seconds=getattr(settings, "digiseller_task_poll_interval_seconds", None),
     )
@@ -4960,12 +4974,13 @@ def action_manual_link() -> int:
             )
 
     # Digiseller: same auto-create offer when the listing has no options yet.
+    _digi_api_key, _digi_seller_id = _digiseller_credentials(marketplace, settings)
     if (
-        marketplace == "digiseller"
+        marketplace in ("digiseller", "digiseller_kingpin")
         and not option_variant_entries
         and len(reference_products) > 1
         and sys.stdin.isatty()
-        and getattr(settings, "digiseller_api_key", None)
+        and _digi_api_key
     ):
         print(
             f"\nThe Digiseller listing has no parameters yet, "
@@ -4977,6 +4992,8 @@ def action_manual_link() -> int:
                     marketplace_offer_id=marketplace_offer_id,
                     products=reference_products,
                     settings=settings,
+                    api_key=_digi_api_key,
+                    seller_id=_digi_seller_id,
                 )
             )
 
@@ -5026,11 +5043,13 @@ def action_manual_link() -> int:
             if two_d_edition_label and two_d_region_label:
                 # Rename short-code region values (e.g. "AU" → "Australia") in
                 # Digiseller before matching, so the summary shows full names.
-                if marketplace == "digiseller" and sys.stdin.isatty():
+                if marketplace in ("digiseller", "digiseller_kingpin") and sys.stdin.isatty():
                     _digiseller_rename_short_code_regions(
                         marketplace_offer_id,
                         entry_groups[two_d_region_label],
                         settings,
+                        api_key=_digi_api_key,
+                        seller_id=_digi_seller_id,
                     )
 
                 n_ed = len(entry_groups[two_d_edition_label])
