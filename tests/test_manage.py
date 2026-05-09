@@ -749,6 +749,54 @@ def test_extract_marketplace_snapshot_fields_keeps_variant_ids() -> None:
     ]
 
 
+def test_extract_marketplace_snapshot_fields_reads_digiseller_localized_option_names() -> None:
+    snapshot = manage._extract_marketplace_snapshot_fields(
+        {
+            "name": [{"locale": "en-US", "value": "Forza Horizon 6"}],
+            "options": [
+                {
+                    "id": 77,
+                    "name": [
+                        {"locale": "ru-RU", "value": "Регион"},
+                        {"locale": "en-US", "value": "Region"},
+                    ],
+                    "type": "radio",
+                    "variants": [
+                        {
+                            "id": 1001,
+                            "name": [
+                                {"locale": "ru-RU", "value": "США"},
+                                {"locale": "en-US", "value": "United States"},
+                            ],
+                        },
+                        {
+                            "id": 1002,
+                            "name": [{"locale": "en-US", "value": "Canada"}],
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    assert snapshot["title"] == "Forza Horizon 6"
+    assert snapshot["option_parameter_names"] == ["Region"]
+    assert snapshot["option_variant_entries"] == [
+        {
+            "option_label": "Region",
+            "variant_value": "United States",
+            "variant_id": 1001,
+            "option_id": 77,
+        },
+        {
+            "option_label": "Region",
+            "variant_value": "Canada",
+            "variant_id": 1002,
+            "option_id": 77,
+        },
+    ]
+
+
 def test_extract_marketplace_snapshot_fields_reads_variant_id_from_value_key() -> None:
     snapshot = manage._extract_marketplace_snapshot_fields(
         {

@@ -2074,12 +2074,32 @@ def _suggest_price(
         return None
 
 
+def _payload_value_to_display_text(value: object) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, list):
+        localized_values: list[tuple[bool, str]] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            text = str(item.get("value") or "").strip()
+            if not text:
+                continue
+            locale = str(item.get("locale") or "").strip().lower()
+            localized_values.append((locale.startswith("en"), text))
+        for is_english, text in localized_values:
+            if is_english:
+                return text
+        if localized_values:
+            return localized_values[0][1]
+    text = str(value).strip()
+    return text or None
+
+
 def _payload_first_str(payload: dict[str, Any], keys: tuple[str, ...]) -> str | None:
     for key in keys:
         value = payload.get(key)
-        if value is None:
-            continue
-        text = str(value).strip()
+        text = _payload_value_to_display_text(value)
         if text:
             return text
     return None
@@ -2385,6 +2405,21 @@ def _fetch_marketplace_offer_snapshot(
         raw = client.get_offer_by_id(marketplace_offer_id)
         if not isinstance(raw, dict):
             return None, "marketplace API returned no item for this id"
+
+        if marketplace in ("digiseller", "digiseller_kingpin") and hasattr(client, "list_offer_options"):
+            try:
+                existing_options = client.list_offer_options(marketplace_offer_id)
+            except Exception:
+                existing_options = []
+            if isinstance(existing_options, list) and existing_options:
+                raw_with_existing_options = dict(raw)
+                raw_with_existing_options["options"] = existing_options
+                raw_fields = _extract_marketplace_snapshot_fields(raw)
+                existing_option_fields = _extract_marketplace_snapshot_fields(raw_with_existing_options)
+                if len(existing_option_fields["option_variant_entries"]) >= len(
+                    raw_fields["option_variant_entries"]
+                ):
+                    raw = raw_with_existing_options
 
         fields = _extract_marketplace_snapshot_fields(raw)
         fields["marketplace_offer_id"] = marketplace_offer_id
