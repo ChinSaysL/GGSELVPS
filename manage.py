@@ -2650,8 +2650,10 @@ def _group_option_entries_by_label(
 
 
 def _option_group_looks_like_regions(entries: list[dict[str, Any]]) -> bool:
+    _known_full = {v.lower() for v in _GENGINE_REGION_DISPLAY.values()}
     return any(
         _gift_region_match_key(str(e.get("variant_value") or ""))
+        or _normalize_search_text(str(e.get("variant_value") or "")) in _known_full
         for e in entries
     )
 
@@ -4314,9 +4316,8 @@ def _ggsel_create_denominations_interactively(
 ) -> list[dict[str, Any]]:
     """Create GGSEL option+variants from local product rows and return option_variant_entries.
 
-    Handles both single-package (region only) and multi-package (edition+region) product sets.
-    For multi-package products, asks the user which edition to link now and creates a Region
-    option for that subset only.
+    Single-package: creates a Region option only (1D flow).
+    Multi-package: creates Edition + Region options (2D flow).
     """
     try:
         from app.clients import GGSELClient
@@ -4332,46 +4333,6 @@ def _ggsel_create_denominations_interactively(
     groups = _ggsel_group_products_by_package(products)
     non_empty_groups = {k: v for k, v in groups.items() if v}
 
-    subset: list[Any]
-    option_title: str
-
-    if len(non_empty_groups) <= 1:
-        # Single package (or ungrouped) — just use regions.
-        subset = products
-        option_title = "Region"
-    else:
-        # Multiple editions — ask user which one to link for this offer.
-        edition_names = sorted(non_empty_groups.keys())
-        print("\nThis product has multiple editions:")
-        for idx, name in enumerate(edition_names, start=1):
-            count = len(non_empty_groups[name])
-            label = name or "(no package name)"
-            print(f"  {idx}. {label}  ({count} region(s))")
-        raw = _ask_text(
-            f"Which edition is this GGSEL offer for? (1-{len(edition_names)})",
-            required=True,
-        )
-        try:
-            chosen_idx = int(raw.strip()) - 1
-            if not 0 <= chosen_idx < len(edition_names):
-                raise ValueError
-        except ValueError:
-            print("Invalid choice — skipping auto-create.")
-            return []
-        chosen_name = edition_names[chosen_idx]
-        subset = non_empty_groups[chosen_name]
-        option_title = "Region"
-        print(f"Using edition: {chosen_name or '(default)'} — {len(subset)} region(s)")
-
-    if not subset:
-        print("[SKIP] No products in selected group.")
-        return []
-
-    option_title_input = _ask_text("Option group title (shown to buyer)", default=option_title)
-    variants = _ggsel_build_option_variants(subset)
-
-    print(f"\nCreating GGSEL option '{option_title_input}' with {len(variants)} variant(s)...")
-
     client = GGSELClient(
         settings.ggsel_base_url,
         settings.ggsel_api_key,
@@ -4380,41 +4341,115 @@ def _ggsel_create_denominations_interactively(
         panel_password=getattr(settings, "ggsel_password", None),
     )
     try:
-        option = client.create_offer_option(
-            marketplace_offer_id,
-            title_en=option_title_input,
-            title_ru=option_title_input,
-            variants=variants,
-        )
+        if len(non_empty_groups) <= 1:
+            # 1D: single package — create Region option only.
+            option_title = _ask_text("Option group title (shown to buyer)", default="Region")
+            variants = _ggsel_build_option_variants(products)
+            print(f"\nCreating GGSEL option '{option_title}' with {len(variants)} variant(s)...")
+            option = client.create_offer_option(
+                marketplace_offer_id,
+                title_en=option_title,
+                title_ru=option_title,
+                variants=variants,
+            )
+            created = option.get("variants") or option.get("variants_attributes") or []
+            if not created:
+                print("[WARN] Option created but no variants returned. Re-fetch offer to get IDs.")
+                return []
+            entries: list[dict[str, Any]] = [
+                {"option_label": option_title, "variant_id": v.get("id"), "variant_value": v.get("title_en") or v.get("title_ru") or ""}
+                for v in created if isinstance(v, dict)
+            ]
+            print(f"[OK] Created option with {len(entries)} variant(s).")
+            print("     Run 'sync-prices' after linking to set per-region prices.")
+            return entries
+
+        else:
+            # 2D: multiple editions — create Edition + Region options.
+            all_pkg_names = [k for k in non_empty_groups if k]
+            common_prefix = _common_prefix_words(all_pkg_names)
+            edition_shortnames: list[str] = []
+            for pkg in sorted(non_empty_groups.keys()):
+                if pkg:
+                    shortname = (
+                        pkg[len(common_prefix):].strip()
+                        if common_prefix and pkg.lower().startswith(common_prefix.lower())
+                        else pkg
+                    )
+                    edition_shortnames.append(shortname or pkg)
+                else:
+                    edition_shortnames.append("Standard")
+
+            region_names, _ = _digiseller_region_names_and_default_index(products)
+            if not region_names:
+                print("[SKIP] Could not determine region names from products.")
+                return []
+
+            edition_title = _ask_text("Edition option title (shown to buyer)", default="Edition")
+            region_title = _ask_text("Region option title (shown to buyer)", default="Region")
+
+            edition_variants = [
+                {
+                    "id": None, "position": i,
+                    "title_ru": name, "title_en": name,
+                    "discount_kind": "fixed", "impact_variant": "increase",
+                    "default": i == 0, "price": 0,
+                }
+                for i, name in enumerate(edition_shortnames)
+            ]
+            region_variants = [
+                {
+                    "id": None, "position": i,
+                    "title_ru": name, "title_en": name,
+                    "discount_kind": "fixed", "impact_variant": "increase",
+                    "default": i == 0, "price": 0,
+                }
+                for i, name in enumerate(region_names)
+            ]
+
+            print(f"\nCreating GGSEL option '{edition_title}' with {len(edition_variants)} edition(s)...")
+            edition_option = client.create_offer_option(
+                marketplace_offer_id,
+                title_en=edition_title,
+                title_ru=edition_title,
+                variants=edition_variants,
+            )
+            print(f"[OK] Edition option created.")
+
+            print(f"Creating GGSEL option '{region_title}' with {len(region_variants)} region(s)...")
+            region_option = client.create_offer_option(
+                marketplace_offer_id,
+                title_en=region_title,
+                title_ru=region_title,
+                variants=region_variants,
+            )
+            print(f"[OK] Region option created.")
+
+            entries = []
+            for option, label in ((edition_option, edition_title), (region_option, region_title)):
+                created = option.get("variants") or option.get("variants_attributes") or []
+                for v in created:
+                    if not isinstance(v, dict):
+                        continue
+                    entries.append({
+                        "option_label": label,
+                        "variant_id": v.get("id"),
+                        "variant_value": v.get("title_en") or v.get("title_ru") or "",
+                    })
+
+            if not entries:
+                print("[WARN] Options created but no variant entries returned. Re-fetch offer to get IDs.")
+                return []
+
+            print(f"[OK] Created {len(entries)} option variant entries (edition + region).")
+            print("     Run 'sync-prices' after linking to set per-region and per-edition prices.")
+            return entries
+
     except (APIRequestError, NotImplementedError) as exc:
-        print(f"[ERROR] Failed to create GGSEL option: {exc}")
+        print(f"[ERROR] Failed to create GGSEL option(s): {exc}")
         return []
     finally:
         client.close()
-
-    created_variants = option.get("variants") or option.get("variants_attributes") or []
-    if not created_variants:
-        print("[WARN] Option created but no variants returned. Re-fetch offer to get IDs.")
-        return []
-
-    # Map back to option_variant_entries format, pairing by position.
-    entries: list[dict[str, Any]] = []
-    for v in created_variants:
-        if not isinstance(v, dict):
-            continue
-        variant_id = v.get("id")
-        title_en = v.get("title_en") or v.get("title_ru") or ""
-        entries.append(
-            {
-                "option_label": option_title_input,
-                "variant_id": variant_id,
-                "variant_value": title_en,
-            }
-        )
-
-    print(f"[OK] Created option with {len(entries)} variant(s).")
-    print("     Run 'sync-prices' after linking to set per-region prices.")
-    return entries
 
 
 def _choose_reference_products_interactively() -> tuple[GEngineProductReference, list[Any]] | None:
@@ -5169,11 +5204,11 @@ def action_manual_link() -> int:
                 option_variant_entries,
             )
 
-            # Detect 2D (edition × region) structure: Digiseller only.
+            # Detect 2D (edition × region) structure.
             entry_groups = _group_option_entries_by_label(mapping_option_entries)
             two_d_edition_label: str | None = None
             two_d_region_label: str | None = None
-            if marketplace in ("digiseller", "digiseller_kingpin"):
+            if marketplace in ("digiseller", "digiseller_kingpin", "ggsel"):
                 package_groups = _ggsel_group_products_by_package(reference_products)
                 non_empty_packages = {k: v for k, v in package_groups.items() if v}
                 if len(non_empty_packages) > 1 and len(entry_groups) >= 2:
@@ -5195,6 +5230,12 @@ def action_manual_link() -> int:
                         settings,
                         api_key=_digi_api_key,
                         seller_id=_digi_seller_id,
+                    )
+                elif marketplace == "ggsel" and sys.stdin.isatty():
+                    _ggsel_rename_short_code_regions(
+                        marketplace_offer_id,
+                        entry_groups[two_d_region_label],
+                        settings,
                     )
 
                 n_ed = len(entry_groups[two_d_edition_label])
