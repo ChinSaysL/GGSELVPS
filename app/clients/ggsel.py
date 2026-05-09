@@ -715,13 +715,25 @@ class GGSELClient(BaseAPIClient):
         *,
         archived: bool,
     ) -> dict[str, Any]:
+        return GGSELClient._build_panel_option_put_body_multi(
+            option,
+            {target_variant_id: archived},
+        )
+
+    @staticmethod
+    def _build_panel_option_put_body_multi(
+        option: dict[str, Any],
+        archived_by_variant_id: dict[int, bool],
+        *,
+        default_variant_id: int | None = None,
+    ) -> dict[str, Any]:
         _OPTION_FIELDS = (
             "kind", "position", "title_ru", "title_en", "required",
             "hide_price_modifier", "splitted_products",
         )
         _VARIANT_FIELDS = (
             "id", "position", "title_ru", "title_en",
-            "discount_kind", "impact_variant", "default", "price",
+            "discount_kind", "impact_variant", "default", "price", "status",
         )
         option_body: dict[str, Any] = {k: option[k] for k in _OPTION_FIELDS if k in option}
         raw_variants = option.get("variants") or option.get("variants_attributes") or []
@@ -730,12 +742,85 @@ class GGSELClient(BaseAPIClient):
             if not isinstance(v, dict):
                 continue
             v_copy = {k: v[k] for k in _VARIANT_FIELDS if k in v}
-            if v_copy.get("id") == target_variant_id:
-                if archived:
+            vid = v_copy.get("id")
+            if vid in archived_by_variant_id:
+                if archived_by_variant_id[vid]:
                     v_copy["status"] = "archived"
+                else:
+                    v_copy.pop("status", None)
+            if default_variant_id is not None and vid == default_variant_id:
+                v_copy["default"] = True
             variants_out.append(v_copy)
         option_body["variants_attributes"] = variants_out
         return {"option": option_body}
+
+    def set_offer_all_variant_states(
+        self,
+        offer_id: str,
+        variant_states: dict[int, bool],
+        *,
+        default_variant_id: int | None = None,
+    ) -> dict[int, dict[str, Any]]:
+        """Update visibility for all variants in one GET + one PUT per option."""
+        if not self._panel_email:
+            raise NotImplementedError(
+                "marketplace_disable_not_supported: GGSEL variant visibility requires panel credentials."
+            )
+        internal_id = self._panel_resolve_internal_id(offer_id)
+        cookies = self._ensure_panel_session()
+        offer_data = self._panel_get_offer_data(offer_id, cookies=cookies)
+
+        option_to_info: dict[int, tuple[dict[str, Any], list[int]]] = {}
+        not_found: set[int] = set(variant_states.keys())
+        for option in offer_data.get("options") or []:
+            if not isinstance(option, dict):
+                continue
+            option_id = option.get("id")
+            if option_id is None:
+                continue
+            raw_variants = option.get("variants") or option.get("variants_attributes") or []
+            found: list[int] = [
+                v.get("id")
+                for v in raw_variants
+                if isinstance(v, dict) and v.get("id") in variant_states
+            ]
+            if found:
+                option_to_info[int(option_id)] = (option, found)
+                not_found -= set(found)
+
+        results: dict[int, dict[str, Any]] = {}
+        for vid in not_found:
+            if not variant_states[vid]:
+                results[vid] = {"status": "ok", "unchanged": True, "reason": "variant_not_found_assumed_archived"}
+            else:
+                results[vid] = {"status": "error", "reason": f"variant {vid} not found in offer {offer_id}"}
+
+        for option_id, (option, variant_ids) in option_to_info.items():
+            archived_by_id = {vid: not variant_states[vid] for vid in variant_ids}
+            body = self._build_panel_option_put_body_multi(
+                option,
+                archived_by_id,
+                default_variant_id=default_variant_id,
+            )
+            try:
+                self._panel_request_with_reauth(
+                    "PUT",
+                    f"/api/v1/offers/{internal_id}/options/{option_id}",
+                    json_body=body,
+                )
+                for vid in variant_ids:
+                    results[vid] = {
+                        "status": "ok",
+                        "offer_id": offer_id,
+                        "option_id": option_id,
+                        "variant_id": vid,
+                        "visible": variant_states[vid],
+                    }
+            except Exception as exc:  # noqa: BLE001
+                for vid in variant_ids:
+                    results[vid] = {"status": "error", "variant_id": vid, "reason": str(exc)}
+
+        return results
 
     def set_offer_variant_state(
         self,

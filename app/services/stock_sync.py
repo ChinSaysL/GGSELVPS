@@ -652,54 +652,102 @@ def sync_offer_stock(
                 ),
             )
 
-            for variant_id, quantity, in_stock, reason, required_balance in ordered_variant_decisions:
-                detail = _base_detail(mapping=runtime_mapping, offer=offer, supplier=runtime_supplier)
-                detail["variant_id"] = variant_id
-                detail["variant_quantity"] = str(quantity)
-                detail["required_balance_usd"] = str(required_balance)
-                detail["stock_reason"] = reason
-
-                runtime_desired_default = (
-                    bool(
-                        runtime_default_variant_id is not None
-                        and variant_id == runtime_default_variant_id
-                    )
-                    if runtime_default_variant_id is not None
-                    else False
-                )
+            if hasattr(runtime_client, "set_offer_all_variant_states"):
+                desired_states = {
+                    vid: in_stock
+                    for vid, _qty, in_stock, _reason, _rb in ordered_variant_decisions
+                }
                 try:
-                    response = _set_offer_variant_stock_state(
-                        client=runtime_client,
-                        offer_id=offer.marketplace_offer_id,
-                        variant_id=variant_id,
-                        visible=in_stock,
-                        is_default=runtime_desired_default,
+                    batch_results = cast(Any, runtime_client).set_offer_all_variant_states(
+                        offer.marketplace_offer_id,
+                        desired_states,
+                        default_variant_id=runtime_default_variant_id,
                     )
                 except NotImplementedError as exc:
                     variant_control_failed = True
-                    _skip_detail(stats, detail, reason=str(exc))
-                    continue
+                    _skip_detail(
+                        stats,
+                        _base_detail(mapping=runtime_mapping, offer=offer, supplier=runtime_supplier),
+                        reason=str(exc),
+                    )
                 except Exception as exc:  # noqa: BLE001
-                    reason_str = str(exc)
-                    if _is_variant_not_found_error(reason_str):
-                        _skip_detail(stats, detail, reason=reason_str)
-                    else:
-                        variant_control_failed = True
-                        _error_detail(stats, detail, reason=reason_str)
-                    continue
-
-                is_pending, task_id = _is_pending_response(response if isinstance(response, dict) else None)
-                if is_pending:
                     variant_control_failed = True
-                    pending_reason = "marketplace_async_task_pending"
-                    if task_id:
-                        pending_reason = f"{pending_reason}:{task_id}"
-                    _skip_detail(stats, detail, reason=pending_reason)
-                    continue
+                    _error_detail(
+                        stats,
+                        _base_detail(mapping=runtime_mapping, offer=offer, supplier=runtime_supplier),
+                        reason=f"batch_variant_update_failed:{exc}",
+                    )
+                else:
+                    for variant_id, quantity, in_stock, reason, required_balance in ordered_variant_decisions:
+                        detail = _base_detail(mapping=runtime_mapping, offer=offer, supplier=runtime_supplier)
+                        detail["variant_id"] = variant_id
+                        detail["variant_quantity"] = str(quantity)
+                        detail["required_balance_usd"] = str(required_balance)
+                        detail["stock_reason"] = reason
+                        result = batch_results.get(variant_id, {})
+                        if result.get("status") == "ok":
+                            if result.get("unchanged"):
+                                _skip_detail(stats, detail, reason=result.get("reason", "variant_not_found_assumed_archived"))
+                            else:
+                                if in_stock:
+                                    confirmed_visible_variant = True
+                                _updated_detail(stats, detail, enabled=in_stock)
+                        else:
+                            reason_str = result.get("reason", "unknown_batch_error")
+                            if _is_variant_not_found_error(reason_str):
+                                _skip_detail(stats, detail, reason=reason_str)
+                            else:
+                                variant_control_failed = True
+                                _error_detail(stats, detail, reason=reason_str)
+            else:
+                for variant_id, quantity, in_stock, reason, required_balance in ordered_variant_decisions:
+                    detail = _base_detail(mapping=runtime_mapping, offer=offer, supplier=runtime_supplier)
+                    detail["variant_id"] = variant_id
+                    detail["variant_quantity"] = str(quantity)
+                    detail["required_balance_usd"] = str(required_balance)
+                    detail["stock_reason"] = reason
 
-                if in_stock:
-                    confirmed_visible_variant = True
-                _updated_detail(stats, detail, enabled=in_stock)
+                    runtime_desired_default = (
+                        bool(
+                            runtime_default_variant_id is not None
+                            and variant_id == runtime_default_variant_id
+                        )
+                        if runtime_default_variant_id is not None
+                        else False
+                    )
+                    try:
+                        response = _set_offer_variant_stock_state(
+                            client=runtime_client,
+                            offer_id=offer.marketplace_offer_id,
+                            variant_id=variant_id,
+                            visible=in_stock,
+                            is_default=runtime_desired_default,
+                        )
+                    except NotImplementedError as exc:
+                        variant_control_failed = True
+                        _skip_detail(stats, detail, reason=str(exc))
+                        continue
+                    except Exception as exc:  # noqa: BLE001
+                        reason_str = str(exc)
+                        if _is_variant_not_found_error(reason_str):
+                            _skip_detail(stats, detail, reason=reason_str)
+                        else:
+                            variant_control_failed = True
+                            _error_detail(stats, detail, reason=reason_str)
+                        continue
+
+                    is_pending, task_id = _is_pending_response(response if isinstance(response, dict) else None)
+                    if is_pending:
+                        variant_control_failed = True
+                        pending_reason = "marketplace_async_task_pending"
+                        if task_id:
+                            pending_reason = f"{pending_reason}:{task_id}"
+                        _skip_detail(stats, detail, reason=pending_reason)
+                        continue
+
+                    if in_stock:
+                        confirmed_visible_variant = True
+                    _updated_detail(stats, detail, enabled=in_stock)
 
             parent_enabled = confirmed_visible_variant and not variant_control_failed
             runtime_parent_detail: dict[str, Any] = {
