@@ -5632,8 +5632,25 @@ def _check_digiseller_permissions(client: Any, label: str, api_key: str, seller_
     print(f"\n[Digiseller — {label}]")
     print(f"  key: {mask_secret(api_key)}  seller_id: {seller_id or '(not set)'}")
 
+    # Test apilogin directly by forcing a token refresh and checking the internal error flag.
+    login_ok = False
+    try:
+        client._access_token = None
+        client._access_token_valid_thru = None
+        client._get_access_token(force_refresh=True)
+        apilogin_error = getattr(client, "_last_apilogin_error", None)
+        if apilogin_error:
+            print(f"  login / token refresh: FAIL — apilogin failed (fell back to raw key): {apilogin_error}")
+            print(f"    → Activate in Digiseller API settings: POST /api/apilogin")
+        else:
+            print(f"  login / token refresh: OK")
+            login_ok = True
+    except Exception as exc:  # noqa: BLE001
+        print(f"  login / token refresh: ERROR — {exc}")
+        print(f"    → Endpoint: POST /api/apilogin")
+
     results = [
-        _probe("login / token refresh", "POST /api/apilogin", lambda: client.get_latest_sales()),
+        login_ok,
         _probe("read sales           ", "POST /api/seller-sells/v2", lambda: client.get_latest_sales()),
         _probe("unique-code read     ", "GET  /api/purchases/unique-code/{code}", lambda: client.verify_unique_code("PERMCHECKPROBE0000")),
         _probe("list products        ", "POST /api/products/list", lambda: client.list_offers()),
