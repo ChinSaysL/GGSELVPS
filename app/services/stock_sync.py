@@ -821,12 +821,23 @@ def sync_offer_stock(
         if has_variant_bindings and has_variant_stock_api:
             variant_client = cast(MarketplaceVariantStockClientProtocol, client)
             any_in_stock = False
-            default_variant_id: int | None = None
-            for mapping, _supplier, in_stock, _reason, _required_balance in decisions:
-                if in_stock and mapping.marketplace_variant_id is not None and default_variant_id is None:
-                    default_variant_id = int(mapping.marketplace_variant_id)
+            # Pick cheapest in-stock region as default (minimum required_balance_usd).
+            # For 2D offers, multiple editions share the same region variant_id; taking
+            # the minimum across editions naturally selects via the cheapest edition.
+            min_balance_by_region: dict[int, Decimal] = {}
+            for mapping, _supplier, in_stock, _reason, required_balance in decisions:
+                rvid = mapping.marketplace_variant_id
                 if in_stock:
                     any_in_stock = True
+                if not in_stock or rvid is None:
+                    continue
+                ivid = int(rvid)
+                if ivid not in min_balance_by_region or required_balance < min_balance_by_region[ivid]:
+                    min_balance_by_region[ivid] = required_balance
+            default_variant_id: int | None = (
+                min(min_balance_by_region, key=lambda k: min_balance_by_region[k])
+                if min_balance_by_region else None
+            )
 
             if not any_in_stock:
                 no_stock_parent_detail: dict[str, Any] = {
