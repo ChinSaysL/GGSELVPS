@@ -2239,6 +2239,8 @@ def _extract_marketplace_snapshot_fields(payload: dict[str, Any]) -> dict[str, A
                     if default_variant_text is None and _payload_first_bool(raw_variant, default_variant_keys):
                         default_variant_text = variant_text
 
+            raw_option_id = option.get("id")
+            option_id_int = int(raw_option_id) if isinstance(raw_option_id, int) else None
             for variant_item in variants:
                 variant_text = str(variant_item.get("variant_value") or "")
                 variant_id = variant_item.get("variant_id")
@@ -2256,6 +2258,8 @@ def _extract_marketplace_snapshot_fields(payload: dict[str, Any]) -> dict[str, A
                 }
                 if isinstance(variant_id, int):
                     entry["variant_id"] = variant_id
+                if option_id_int is not None:
+                    entry["option_id"] = option_id_int
                 option_variant_entries.append(entry)
 
             if denomination is None and default_variant_text:
@@ -2687,6 +2691,7 @@ def _auto_match_products_2d_option_groups(
             edition_value = str(edition_entry.get("variant_value") or "")
             matches.append({
                 "entry": region_entry,
+                "edition_entry": edition_entry,
                 "product": product,
                 "option_description": (
                     f"{edition_label}: {edition_value}, {region_label}: {region_value}"
@@ -2991,6 +2996,7 @@ def _add_link_target(
     product: Any,
     option_description: str | None,
     variant_id: int | None = None,
+    edition_variant_id: int | None = None,
     variant_value: str | None = None,
 ) -> None:
     product_id = int(product.id)
@@ -3003,6 +3009,7 @@ def _add_link_target(
     if variant_id is not None or variant_value:
         binding = {
             "variant_id": variant_id,
+            "edition_variant_id": edition_variant_id,
             "variant_value": variant_value,
         }
         existing_bindings = item["variant_bindings"]
@@ -3821,6 +3828,8 @@ def _digiseller_option_to_entries(
     option_label: str,
 ) -> list[dict[str, Any]]:
     """Build option_variant_entries from a re-fetched Digiseller option dict."""
+    raw_option_id = option.get("id")
+    option_id_int = int(raw_option_id) if isinstance(raw_option_id, int) else None
     entries: list[dict[str, Any]] = []
     for v in option.get("variants") or []:
         if not isinstance(v, dict):
@@ -3840,8 +3849,87 @@ def _digiseller_option_to_entries(
         entry: dict[str, Any] = {"option_label": option_label, "variant_value": display}
         if vid is not None:
             entry["variant_id"] = vid
+        if option_id_int is not None:
+            entry["option_id"] = option_id_int
         entries.append(entry)
     return entries
+
+
+def _digiseller_rename_short_code_regions(
+    offer_id: str,
+    region_entries: list[dict[str, Any]],
+    settings: Any,
+) -> int:
+    """Rename 2-letter ISO region variant values to full country names in Digiseller.
+
+    Only renames entries whose variant_value matches ^[A-Z]{2}$ AND whose lowercase
+    code is in _GENGINE_REGION_DISPLAY with a different (longer) full name.
+    Updates both Digiseller and the in-memory entry dicts so the match summary
+    shows the new names.  Returns the count renamed.
+    """
+    import re as _re
+
+    to_rename: list[tuple[int, int, str, str]] = []
+    for entry in region_entries:
+        value = str(entry.get("variant_value") or "")
+        variant_id = entry.get("variant_id")
+        option_id = entry.get("option_id")
+        if not isinstance(variant_id, int) or not isinstance(option_id, int):
+            continue
+        if not _re.match(r"^[A-Z]{2}$", value):
+            continue
+        full_name = _GENGINE_REGION_DISPLAY.get(value.lower())
+        if not full_name or full_name == value:
+            continue
+        to_rename.append((option_id, variant_id, value, full_name))
+
+    if not to_rename:
+        return 0
+
+    print(
+        f"\n{len(to_rename)} region option(s) still have short 2-letter code names "
+        f"(e.g. {', '.join(v for _, _, v, _ in to_rename[:3])})."
+    )
+    if not _ask_bool("Rename them to full country names now?", default=True):
+        return 0
+
+    try:
+        from app.clients import DigisellerClient
+        from app.clients.base import APIRequestError
+    except ImportError as exc:
+        print(f"[ERROR] Could not import Digiseller client: {exc}")
+        return 0
+
+    client = DigisellerClient(
+        settings.digiseller_base_url,
+        settings.digiseller_api_key,
+        seller_id=getattr(settings, "digiseller_seller_id", None),
+        task_poll_timeout_seconds=getattr(settings, "digiseller_task_poll_timeout_seconds", None),
+        task_poll_interval_seconds=getattr(settings, "digiseller_task_poll_interval_seconds", None),
+    )
+    renamed = 0
+    name_map: dict[int, str] = {}
+    try:
+        for option_id, variant_id, old_name, new_name in to_rename:
+            try:
+                client.rename_offer_option_variant(
+                    offer_id, option_id, variant_id, new_name, new_name
+                )
+                name_map[variant_id] = new_name
+                renamed += 1
+                print(f"  {old_name} → {new_name}")
+            except APIRequestError as exc:
+                print(f"  [ERROR] Could not rename '{old_name}': {exc}")
+    finally:
+        client.close()
+
+    # Update in-memory entries so match summary and 2D detection use full names.
+    for entry in region_entries:
+        vid = entry.get("variant_id")
+        if isinstance(vid, int) and vid in name_map:
+            entry["variant_value"] = name_map[vid]
+
+    return renamed
 
 
 def _digiseller_create_denominations_interactively(
@@ -3894,6 +3982,15 @@ def _digiseller_create_denominations_interactively(
         for i, p in enumerate(sample_products)
     ]
 
+    # Cheapest region index (by cost_usd) so it becomes the pre-selected default.
+    try:
+        cheapest_region_idx = min(
+            range(len(sample_products)),
+            key=lambda i: getattr(sample_products[i], "cost_usd", 0) or 0,
+        )
+    except (ValueError, TypeError):
+        cheapest_region_idx = 0
+
     edition_title = _ask_text("Edition option title (shown to buyer)", default="Edition")
     region_title = _ask_text("Region option title (shown to buyer)", default="Region")
     steam_title_en = _ask_text(
@@ -3935,7 +4032,7 @@ def _digiseller_create_denominations_interactively(
 
         # Create Region radio option (order 2)
         reg_variants = [
-            _digiseller_variant_body(name, i + 1, default=(i == 0))
+            _digiseller_variant_body(name, i + 1, default=(i == cheapest_region_idx))
             for i, name in enumerate(region_names)
         ]
         print(
@@ -4564,6 +4661,7 @@ def _upsert_manual_link(
     buyer_input_help: str | None,
     mapping_enabled: bool,
     marketplace_variant_id: int | None = None,
+    marketplace_edition_variant_id: int | None = None,
     marketplace_variant_name: str | None = None,
     marketplace_commission_percent: Decimal | None = None,
     payment_system_commission_percent: Decimal | None = None,
@@ -4633,6 +4731,7 @@ def _upsert_manual_link(
                 marketplace_offer_id=offer.id,
                 enabled=mapping_enabled,
                 marketplace_variant_id=marketplace_variant_id,
+                marketplace_edition_variant_id=marketplace_edition_variant_id,
                 marketplace_variant_name=marketplace_variant_name,
                 marketplace_commission_percent=marketplace_commission_percent,
                 payment_system_commission_percent=payment_system_commission_percent,
@@ -4647,6 +4746,7 @@ def _upsert_manual_link(
         else:
             mapping.enabled = mapping_enabled
             mapping.marketplace_variant_id = marketplace_variant_id
+            mapping.marketplace_edition_variant_id = marketplace_edition_variant_id
             mapping.marketplace_variant_name = marketplace_variant_name
             mapping.marketplace_commission_percent = marketplace_commission_percent
             mapping.payment_system_commission_percent = payment_system_commission_percent
@@ -4847,6 +4947,15 @@ def action_manual_link() -> int:
                             two_d_edition_label = grp_label
 
             if two_d_edition_label and two_d_region_label:
+                # Rename short-code region values (e.g. "AU" → "Australia") in
+                # Digiseller before matching, so the summary shows full names.
+                if marketplace == "digiseller" and sys.stdin.isatty():
+                    _digiseller_rename_short_code_regions(
+                        marketplace_offer_id,
+                        entry_groups[two_d_region_label],
+                        settings,
+                    )
+
                 n_ed = len(entry_groups[two_d_edition_label])
                 n_reg = len(entry_groups[two_d_region_label])
                 print(
@@ -4881,11 +4990,15 @@ def action_manual_link() -> int:
                 entry = item["entry"]
                 raw_variant_id = entry.get("variant_id")
                 variant_id = int(raw_variant_id) if isinstance(raw_variant_id, int) else None
+                edition_entry = item.get("edition_entry") or {}
+                raw_ed_vid = edition_entry.get("variant_id")
+                edition_variant_id = int(raw_ed_vid) if isinstance(raw_ed_vid, int) else None
                 _add_link_target(
                     targets_by_product_id,
                     product=item["product"],
                     option_description=str(item["option_description"]),
                     variant_id=variant_id,
+                    edition_variant_id=edition_variant_id,
                     variant_value=str(entry.get("variant_value") or ""),
                 )
 
@@ -5282,6 +5395,8 @@ def action_manual_link() -> int:
         primary_binding = variant_bindings[0] if variant_bindings else {}
         variant_id = primary_binding.get("variant_id")
         marketplace_variant_id = int(variant_id) if isinstance(variant_id, int) else None
+        raw_ed_vid = primary_binding.get("edition_variant_id")
+        marketplace_edition_variant_id = int(raw_ed_vid) if isinstance(raw_ed_vid, int) else None
         marketplace_variant_name = (
             str(primary_binding.get("variant_value"))
             if primary_binding.get("variant_value") is not None
@@ -5301,6 +5416,7 @@ def action_manual_link() -> int:
                 buyer_input_help=buyer_input_help,
                 mapping_enabled=mapping_enabled,
                 marketplace_variant_id=marketplace_variant_id,
+                marketplace_edition_variant_id=marketplace_edition_variant_id,
                 marketplace_variant_name=marketplace_variant_name,
                 marketplace_commission_percent=marketplace_commission_percent,
                 payment_system_commission_percent=payment_system_commission_percent,

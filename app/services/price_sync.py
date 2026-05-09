@@ -673,10 +673,68 @@ def _marketplace_variant_payload(
     # modifier can be represented as a non-negative PricePlus value.
     base_price = min(plan.recommended_price for _mapping, _offer, plan in plans)
 
-    # Collect minimum delta per variant_id: multiple mappings can share the same
-    # variant_id (e.g. multi-edition products where region variants are reused).
-    # Sending duplicates to the API fails; use the minimum delta so the variant
-    # price reflects the cheapest available edition for that region.
+    # Check whether any mapping carries an edition_variant_id (2D listing).
+    has_edition_variants = any(
+        getattr(mapping, "marketplace_edition_variant_id", None) is not None
+        for mapping, _offer, _plan in plans
+    )
+
+    if has_edition_variants:
+        # 2D (Edition × Region) pricing.
+        # Digiseller's additive model: displayed = base + edition_rate + region_rate.
+        # Strategy:
+        #   region_rate[r] = min_e(price(e, r)) - base_price  (cheapest edition per region)
+        #   edition_rate[e] = avg_r(price(e, r) - min_e'(price(e', r)))  (average markup above cheapest)
+        # This makes the cheapest edition per region always exact, with other editions approximate.
+
+        # Collect per-region minimum prices
+        min_price_by_region: dict[int, Decimal] = {}
+        for mapping, _offer, plan in plans:
+            region_vid = mapping.marketplace_variant_id
+            if region_vid is None:
+                continue
+            rvid = int(region_vid)
+            price = plan.recommended_price
+            if rvid not in min_price_by_region or price < min_price_by_region[rvid]:
+                min_price_by_region[rvid] = price
+
+        # Region rates: cheapest edition price for that region minus global base
+        region_rates: dict[int, Decimal] = {
+            rvid: max(Decimal("0"), (p - base_price).quantize(Decimal("0.01")))
+            for rvid, p in min_price_by_region.items()
+        }
+
+        # Edition rates: average markup above cheapest-edition price per region
+        edition_markup_sum: dict[int, Decimal] = {}
+        edition_markup_count: dict[int, int] = {}
+        for mapping, _offer, plan in plans:
+            region_vid = mapping.marketplace_variant_id
+            edition_vid_raw = getattr(mapping, "marketplace_edition_variant_id", None)
+            if region_vid is None or edition_vid_raw is None:
+                continue
+            rvid = int(region_vid)
+            evid = int(edition_vid_raw)
+            markup = max(Decimal("0"), plan.recommended_price - min_price_by_region[rvid])
+            edition_markup_sum[evid] = edition_markup_sum.get(evid, Decimal("0")) + markup
+            edition_markup_count[evid] = edition_markup_count.get(evid, 0) + 1
+
+        edition_rates: dict[int, Decimal] = {
+            evid: (edition_markup_sum[evid] / edition_markup_count[evid]).quantize(Decimal("0.01"))
+            for evid in edition_markup_sum
+            if edition_markup_count[evid] > 0
+        }
+
+        all_rates: dict[int, Decimal] = {**region_rates, **edition_rates}
+        variants: list[dict[str, Any]] = [
+            {"variant_id": vid, "rate": float(rate), "type": 2}
+            for vid, rate in sorted(all_rates.items())
+        ]
+        return base_price, variants
+
+    # 1D case: collect minimum delta per variant_id.
+    # Multiple mappings can share the same variant_id (e.g. multi-edition products
+    # where region variants are reused). Sending duplicates to the API fails; use
+    # the minimum delta so the variant price reflects the cheapest edition for that region.
     min_delta_by_variant: dict[int, Decimal] = {}
     for mapping, _offer, plan in plans:
         variant_id = mapping.marketplace_variant_id
@@ -690,7 +748,7 @@ def _marketplace_variant_payload(
         if vid not in min_delta_by_variant or delta < min_delta_by_variant[vid]:
             min_delta_by_variant[vid] = delta
 
-    variants: list[dict[str, Any]] = [
+    variants = [
         {"variant_id": vid, "rate": float(delta), "type": 2}
         for vid, delta in sorted(min_delta_by_variant.items())
     ]

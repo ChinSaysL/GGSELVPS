@@ -126,6 +126,9 @@ def _run_sqlite_migrations() -> None:
         "marketplace_variant_id": (
             "ALTER TABLE product_mappings ADD COLUMN marketplace_variant_id INTEGER"
         ),
+        "marketplace_edition_variant_id": (
+            "ALTER TABLE product_mappings ADD COLUMN marketplace_edition_variant_id INTEGER"
+        ),
         "marketplace_variant_name": (
             "ALTER TABLE product_mappings ADD COLUMN marketplace_variant_name VARCHAR(255)"
         ),

@@ -863,6 +863,47 @@ class DigisellerClient(BaseAPIClient):
             is_default=None,
         )
 
+    def rename_offer_option_variant(
+        self,
+        offer_id: str,
+        option_id: int,
+        variant_id: int,
+        name_en: str,
+        name_ru: str,
+    ) -> None:
+        token = self._get_access_token()
+        option = self._get_product_option(option_id, token=token)
+        variant: dict[str, Any] | None = None
+        for v in option.get("variants") or []:
+            if isinstance(v, dict) and self._extract_variant_id(v) == variant_id:
+                variant = v
+                break
+        if variant is None:
+            raise APIRequestError(
+                f"Variant {variant_id} not found in option {option_id} for product {offer_id}."
+            )
+        payload: dict[str, Any] = {
+            "name": [
+                {"locale": "en-US", "value": name_en},
+                {"locale": "ru-RU", "value": name_ru},
+            ],
+            "type": variant.get("type", "priceplus"),
+            "rate": variant.get("rate", 0),
+            "default": bool(
+                variant.get("default") or variant.get("is_default")
+            ),
+            "visible": bool(variant.get("visible", True)),
+            "order": int(variant.get("order", 1)),
+        }
+        response = self._request_json(
+            method="POST",
+            path=f"/api/products/options/{option_id}/variants/{variant_id}",
+            params={"token": token},
+            json_body=payload,
+        )
+        if isinstance(response, dict):
+            self._ensure_success_response(response, context="Digiseller variant rename failed")
+
     def create_offer_option(
         self,
         offer_id: str,

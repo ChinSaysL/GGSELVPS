@@ -89,6 +89,7 @@ class ProductMapping(Base):
     )
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     marketplace_variant_id: Mapped[int | None] = mapped_column(nullable=True)
+    marketplace_edition_variant_id: Mapped[int | None] = mapped_column(nullable=True)
     marketplace_variant_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     marketplace_commission_percent: Mapped[Decimal | None] = mapped_column(Numeric(8, 4), nullable=True)
     payment_system_commission_percent: Mapped[Decimal | None] = mapped_column(
