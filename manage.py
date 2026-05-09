@@ -5169,20 +5169,21 @@ def action_manual_link() -> int:
                 option_variant_entries,
             )
 
-            # Detect 2D (edition × region) structure: multiple option groups AND multiple editions
+            # Detect 2D (edition × region) structure: Digiseller only.
             entry_groups = _group_option_entries_by_label(mapping_option_entries)
-            package_groups = _ggsel_group_products_by_package(reference_products)
-            non_empty_packages = {k: v for k, v in package_groups.items() if v}
             two_d_edition_label: str | None = None
             two_d_region_label: str | None = None
-            if len(non_empty_packages) > 1 and len(entry_groups) >= 2:
-                for grp_label, grp_entries in entry_groups.items():
-                    if _option_group_looks_like_regions(grp_entries):
-                        if two_d_region_label is None:
-                            two_d_region_label = grp_label
-                    else:
-                        if two_d_edition_label is None:
-                            two_d_edition_label = grp_label
+            if marketplace in ("digiseller", "digiseller_kingpin"):
+                package_groups = _ggsel_group_products_by_package(reference_products)
+                non_empty_packages = {k: v for k, v in package_groups.items() if v}
+                if len(non_empty_packages) > 1 and len(entry_groups) >= 2:
+                    for grp_label, grp_entries in entry_groups.items():
+                        if _option_group_looks_like_regions(grp_entries):
+                            if two_d_region_label is None:
+                                two_d_region_label = grp_label
+                        else:
+                            if two_d_edition_label is None:
+                                two_d_edition_label = grp_label
 
             if two_d_edition_label and two_d_region_label:
                 # Rename short-code region values (e.g. "AU" → "Australia") before
