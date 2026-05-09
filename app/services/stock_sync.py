@@ -852,6 +852,17 @@ def sync_offer_stock(
                     else 1
                 ),
             )
+            # 2D (Edition × Region) offers: multiple mappings share the same region
+            # variant_id. Merge them so a region is visible if ANY edition is in stock,
+            # and only one API call is made per region variant_id.
+            merged_region_stock: dict[int, bool] = {}
+            for _m, _s, _in_stock, _r, _rb in ordered_decisions:
+                rvid = _m.marketplace_variant_id
+                if rvid is not None:
+                    ivid = int(rvid)
+                    merged_region_stock[ivid] = merged_region_stock.get(ivid, False) or _in_stock
+            seen_region_vids: set[int] = set()
+
             for mapping, supplier, in_stock, reason, required_balance in ordered_decisions:
                 detail = _base_detail(mapping=mapping, offer=offer, supplier=supplier)
                 detail["required_balance_usd"] = str(required_balance)
@@ -862,15 +873,22 @@ def sync_offer_stock(
                     _skip_detail(stats, detail, reason="variant_id_missing_for_variant_offer")
                     continue
 
+                ivid = int(mapped_variant_id)
+                if ivid in seen_region_vids:
+                    _skip_detail(stats, detail, reason="variant_id_deduplicated_in_edition_group")
+                    continue
+                seen_region_vids.add(ivid)
+                in_stock = merged_region_stock.get(ivid, in_stock)
+
                 desired_default: bool | None = None
                 if default_variant_id is not None:
-                    desired_default = int(mapped_variant_id) == default_variant_id
+                    desired_default = ivid == default_variant_id
 
                 try:
                     response = _set_offer_variant_stock_state(
                         client=variant_client,
                         offer_id=offer.marketplace_offer_id,
-                        variant_id=int(mapped_variant_id),
+                        variant_id=ivid,
                         visible=in_stock,
                         is_default=desired_default,
                     )
