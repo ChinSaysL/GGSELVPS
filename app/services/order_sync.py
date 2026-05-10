@@ -135,6 +135,7 @@ _RECREATABLE_SUPPLIER_TERMINAL_ERRORS = (
 _DIGISELLER_UNIQUE_CODE_WAIT_PREFIX = "awaiting_digiseller_unique_code"
 _DIGISELLER_UNIQUE_CODE_PROMPT_SENT_MARKER = "prompt_sent"
 _SUPPLIER_PURCHASE_STATUS_UNKNOWN = "supplier_purchase_status_unknown"
+_ORDER_DETAIL_FETCH_FAILED = "order_detail_fetch_failed"
 _MANUALLY_CANCELLED_ORDER_STATUS = "cancelled"
 _MANUALLY_CANCELLED_ORDER_ERROR = "manually_cancelled"
 _CANCELLED_ORDER_STATUSES = {"cancelled", "canceled"}
@@ -1207,6 +1208,7 @@ def _process_normalized_sale(
     marketplace_client: MarketplaceOrderClientProtocol,
     stats: dict[str, Any],
     allow_supplier_recreate: bool = True,
+    detail_fetch_failed: bool = False,
 ) -> None:
     if not sale.order_id or not sale.offer_id:
         stats["skipped"] += 1
@@ -1358,6 +1360,21 @@ def _process_normalized_sale(
         )
 
     if not order.supplier_order_id:
+        if detail_fetch_failed:
+            order.status = "pending"
+            order.error_message = _ORDER_DETAIL_FETCH_FAILED
+            db.add(order)
+            db.commit()
+            stats["skipped"] += 1
+            stats["details"].append(
+                {
+                    "action": "skipped",
+                    "order_id": order.id,
+                    "marketplace_order_id": order.marketplace_order_id,
+                    "reason": _ORDER_DETAIL_FETCH_FAILED,
+                }
+            )
+            return
         if not should_create_supplier_purchase(order.status):
             stats["skipped"] += 1
             stats["details"].append(
@@ -1637,11 +1654,13 @@ def _process_raw_sale(
     stats: dict[str, Any],
 ) -> None:
     summary = _normalize_marketplace_sale(marketplace, raw_sale)
+    detail_fetch_failed = False
     detail_payload: dict[str, Any] = {}
     if summary.order_id:
         try:
             detail_payload = marketplace_client.get_order(summary.order_id)
         except Exception as exc:  # noqa: BLE001 - summary can still be enough.
+            detail_fetch_failed = True
             stats["details"].append(
                 {
                     "action": "order_detail_lookup_failed",
@@ -1663,6 +1682,7 @@ def _process_raw_sale(
         supplier_client=supplier_client,
         marketplace_client=marketplace_client,
         stats=stats,
+        detail_fetch_failed=detail_fetch_failed,
     )
 
 
